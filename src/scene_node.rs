@@ -323,7 +323,7 @@ pub fn axis_matrix(src: [i64; 3], dst: [i64; 3]) -> Option<Mat> {
     }
     let mut m = [0.0; 12];
     for (s, d) in src.into_iter().zip(dst) {
-        let (s, d) = (s as usize, d as usize);
+        let (s, d) = (usize::try_from(s).ok()?, usize::try_from(d).ok()?);
         m[(s >> 1) * 3 + (d >> 1)] = if (s ^ d) & 1 == 0 { 1.0 } else { -1.0 };
     }
     Some(m)
@@ -342,18 +342,18 @@ pub fn mirror_matrix_dst(m: &mut Mat, axis: i64) {
     if axis == 0 {
         return;
     }
-    let a = (axis - 1) as usize;
+    let a = usize::try_from(axis - 1).expect("validated mirror axis");
     for c in 0..4 {
         m[c * 3 + a] = -m[c * 3 + a];
     }
 }
 
 fn mirror_translation(v: &mut Vec3, axis: i64) {
-    let a = (axis - 1) as usize;
+    let a = usize::try_from(axis - 1).expect("validated mirror axis");
     v[a] = -v[a];
 }
 fn mirror_rotation(q: &mut Quat, axis: i64) {
-    let a = axis as usize;
+    let a = usize::try_from(axis).expect("validated axis");
     q[a % 3] = -q[a % 3];
     q[(a + 1) % 3] = -q[(a + 1) % 3];
 }

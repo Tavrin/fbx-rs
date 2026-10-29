@@ -5,7 +5,7 @@
 //! world transforms, meshes with every UV and color set and a triangulated
 //! index buffer, materials (FBX and PBR maps), textures, cameras, lights,
 //! settings, bones, skins, blend shapes, poses, and the list of content it
-//! does not convert yet (animation).
+//! does not convert yet.
 //!
 //! ```
 //! let fbx = br#"; FBX 7.4.0 project file
@@ -42,9 +42,9 @@
 //!   triangulation), materials, textures (paths and embedded content),
 //!   cameras and lights, and the scene settings.
 //! - Stored skins, bind/rest poses, bones and blend shapes are converted;
-//!   mesh positions stay undeformed. Animation curves and evaluation are
-//!   listed in [`Scene::unsupported`], as are NURBS geometry, caches,
-//!   constraints and audio.
+//!   mesh positions stay undeformed. Animation curves, layers and pose evaluation
+//!   are exposed through [`Scene`]. NURBS geometry, caches, constraints and audio
+//!   are listed in [`Scene::unsupported`].
 //! - FBX 6.1 and older files are rejected with [`Error::Parse`].
 //! - Only the default [`LoadOptions`] (right-handed Y-up, 1 m units) are
 //!   implemented; other values return [`Error::UnsupportedOptions`].
@@ -61,9 +61,27 @@
 //! unpublished `fbx-parity` crate. It is unstable, outside semver, and builds
 //! only from the source repository.
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
 #![warn(missing_docs)]
 
+mod animation;
+#[cfg(feature = "parity")]
+mod animation_canon;
 mod api;
+mod conversion_budget;
+mod numeric;
+#[cfg(test)]
+mod scaling_tests;
+mod scene_animation;
+pub use animation::{
+    AnimationBinding, AnimationCurve, AnimationLayer, AnimationStack, AnimationValue,
+    EvaluatedNode, EvaluatedProperty, EvaluatedScene, Extrapolation, ExtrapolationMode,
+    Interpolation, Keyframe, Tangent,
+};
 mod deform;
 mod scene_deform;
 pub use deform::*;

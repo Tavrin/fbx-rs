@@ -1,7 +1,7 @@
 # fbx-rs
 
 A pure-Rust loader for FBX files. It reads binary and ASCII FBX 7.x files
-into an owned, static scene: nodes, meshes, materials, textures, cameras and
+into an owned scene: nodes, meshes, materials, textures, cameras and
 lights. Every value it returns is the value [ufbx](https://github.com/ufbx/ufbx)
 0.23.1 produces for the same file and import options, checked bit for bit on
 a test corpus.
@@ -17,15 +17,17 @@ a test corpus.
 - Reads bones, bind/rest poses, skin clusters and all control-point influences,
   skinning methods and dual-quaternion blend factors; blend-shape channels,
   sparse targets and in-between weights at the stored deformation percentage.
+- Reads animation stacks, layers, property bindings and constant, linear or cubic
+  curves with weighted tangents and extrapolation; evaluates node transforms,
+  blend-shape weights and skin poses at any finite time.
 - Converts to right-handed Y-up with 1 m units.
 - Bounds every allocation with configurable limits, and contains no `unsafe`
   code. It builds for `wasm32-unknown-unknown`.
 
 ## What it does not do
 
-- Animation curves and evaluation are not converted. They are listed in
-  `Scene::unsupported()`, as are NURBS geometry, caches, constraints and audio.
-  Mesh positions remain undeformed; the API exposes the stored skin and blend
+- NURBS geometry, caches, constraints and audio are listed in
+  `Scene::unsupported()`. Mesh positions remain undeformed; the API exposes the stored skin and blend
   data for callers to apply.
 - FBX 6.1 and older files are rejected with an error.
 - Other target axes or units are not implemented yet; asking for them
@@ -87,31 +89,53 @@ for mesh in scene.meshes() {
 # }
 ```
 
+The unreleased animation API evaluates in seconds. `None` selects the default
+stack; an explicit stack index selects a named take:
+
+```rust
+# fn pose(scene: &fbx_rs::Scene) -> Result<(), fbx_rs::Error> {
+if scene.nodes().len() > 1 {
+    let transform = scene.evaluate_transform(None, 1, 0.5)?;
+    println!("position at 0.5 seconds: {:?}", transform.translation);
+}
+let pose = scene.evaluate(None, 0.5)?;
+for (node, evaluated) in scene.nodes().iter().zip(&pose.nodes) {
+    println!("{}: {:?}", node.name(), evaluated.node_to_world);
+}
+# Ok(())
+# }
+```
+
+`Scene::animation_stacks`, `animation_layers`, `animation_values` and
+`animation_curves` expose the authored data. `evaluate_property` returns an
+object property's numeric and retained nonnumeric values; `evaluate_binding`
+also addresses generated scaling helpers. Evaluation leaves loaded data unchanged.
+
 `fbx_rs::load_with_limits` takes explicit `Limits` for untrusted input. The
 lower-level `fbx_rs::syntax::parse` returns the raw node/property tree.
 
 ## Status and limits
 
 The published 0.1 release covers static scenes; the unreleased source also
-exposes stored deformers. On a corpus of 340 FBX files (see
-[docs/VERIFICATION.md](docs/VERIFICATION.md)), 308 files have results equal to
-ufbx 0.23.1, including all 306 original static files. Eight files differ only
-in animation, and no difference is unexplained. Stored skin and blend-shape
-records match on all seven rig fixtures. The 24 remaining files are FBX 6.1
-or older and are rejected. Camera and light modes that the corpus does not contain are
-ported but not exercised. The parser and loader are fuzzed with libFuzzer.
-
-Planned next: animation curves and evaluation.
+exposes stored deformers and animation evaluation. On a corpus of 340 FBX files
+(see [docs/VERIFICATION.md](docs/VERIFICATION.md)), all 316 supported files have
+results equal to ufbx 0.23.1, including authored curves and evaluated samples.
+There are no deferred animation differences or unexplained differences.
+The 24 remaining files are FBX 6.1 or older and are rejected. Camera and light
+modes that the corpus does not contain are ported but not exercised. The parser
+and loader are fuzzed with libFuzzer; the latest animation changes have regression
+tests and differential checks, without a new fuzz campaign.
 
 ## Comparison with ufbx
 
-ufbx is a C library that loads far more of FBX (animation, skinning, other
-file formats, many options). fbx-rs covers static scenes and stored deformers, in safe Rust
-without a C toolchain. On the static content it returns the same values,
-bit for bit, as described above.
+ufbx is a C library that loads far more of FBX (other file formats, surface
+geometry, caches and many options). fbx-rs covers scenes, stored deformers and
+animation evaluation, in safe Rust without a C toolchain. On the covered corpus,
+its values match bit for bit, as described above.
 
-Speed, measured as instructions on the 316 supported corpus files: a full
-`load` executes about 2.2 times the instructions of a ufbx load with the same
+Historical measurements, taken before animation evaluation was added, used the
+316 supported corpus files. A full `load` executes about 2.2 times the instructions
+of a ufbx load with the same
 options, partly because `load` also triangulates every mesh. Parsing alone
 costs about the same as a whole ufbx load. Peak process memory per file was at most
 4.4 MiB for fbx-rs and 3.4 MiB for ufbx on that corpus.

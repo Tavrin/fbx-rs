@@ -72,12 +72,16 @@ pub struct Limits {
     pub max_string_length: usize,
     /// Maximum FBX objects.
     pub max_objects: usize,
+    /// Maximum keys in one animation curve.
+    pub max_animation_keys: usize,
     /// Maximum FBX connections.
     pub max_connections: usize,
     /// Maximum bytes requested by one conversion stage.
     pub max_allocation: usize,
     /// Maximum deformer traversal, lookup and sorting work units.
     pub max_deformer_work: usize,
+    /// Maximum animation traversal, lookup and sorting work per stage.
+    pub max_animation_work: usize,
 }
 
 impl Default for Limits {
@@ -92,16 +96,21 @@ impl Default for Limits {
             max_decompressed_bytes: d.syntax.max_decompressed_bytes,
             max_string_length: d.syntax.max_string_length,
             max_objects: d.index.max_objects,
+            max_animation_keys: d.max_keys,
             max_connections: d.index.max_connections,
             max_allocation: d.max_allocation,
             max_deformer_work: d.max_deformer_work,
+            max_animation_work: d.max_animation_work,
         }
     }
 }
 
 impl Limits {
     fn dump_limits(&self) -> DumpLimits {
-        let mut d = DumpLimits::default();
+        let mut d = DumpLimits {
+            max_keys: self.max_animation_keys,
+            ..DumpLimits::default()
+        };
         d.syntax.max_depth = self.max_depth;
         d.syntax.max_nodes = self.max_nodes;
         d.syntax.max_properties = self.max_properties;
@@ -115,6 +124,7 @@ impl Limits {
         d.max_properties = self.max_properties;
         d.max_allocation = self.max_allocation;
         d.max_deformer_work = self.max_deformer_work;
+        d.max_animation_work = self.max_animation_work;
         d
     }
 }
@@ -953,6 +963,7 @@ pub struct Unsupported {
 /// A loaded scene. Objects refer to each other by index into the slices.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
+    animation: crate::animation::Animation,
     nodes: Vec<Node>,
     meshes: Vec<Mesh>,
     materials: Vec<Material>,
@@ -972,6 +983,98 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// Animation stacks in source identity order.
+    pub fn animation_stacks(&self) -> &[crate::AnimationStack] {
+        &self.animation.stacks
+    }
+    /// Index of the default take, chosen in source object order.
+    pub fn default_animation_stack(&self) -> Option<usize> {
+        self.animation.default_stack
+    }
+    /// Animation layers; stack layer indices refer to this slice.
+    pub fn animation_layers(&self) -> &[crate::AnimationLayer] {
+        &self.animation.layers
+    }
+    /// Animation values; bindings refer to this slice.
+    pub fn animation_values(&self) -> &[crate::AnimationValue] {
+        &self.animation.values
+    }
+    /// Authored curves with reconstructed tangent handles.
+    pub fn animation_curves(&self) -> &[crate::AnimationCurve] {
+        &self.animation.curves
+    }
+    /// Evaluate a full pose in seconds. `None` selects the default stack in source object order.
+    pub fn evaluate(
+        &self,
+        stack: Option<usize>,
+        time: f64,
+    ) -> Result<crate::EvaluatedScene, Error> {
+        self.animation.evaluate(stack, time)
+    }
+    /// Evaluate one local node transform. Node indices match [`Self::nodes`].
+    pub fn evaluate_transform(
+        &self,
+        stack: Option<usize>,
+        node: usize,
+        time: f64,
+    ) -> Result<Transform, Error> {
+        self.evaluate(stack, time)?
+            .nodes
+            .get(node)
+            .map(|n| n.local_transform)
+            .ok_or_else(|| Error::Convert("animation: node index out of range".into()))
+    }
+    /// Evaluate a binding from this scene, including properties on generated helpers.
+    pub fn evaluate_binding(
+        &self,
+        stack: Option<usize>,
+        binding: &crate::AnimationBinding,
+        time: f64,
+    ) -> Result<crate::EvaluatedProperty, Error> {
+        if !time.is_finite() {
+            return Err(Error::Convert(
+                "animation: nonfinite evaluation time".into(),
+            ));
+        }
+        if !self
+            .animation
+            .layers
+            .iter()
+            .any(|l| l.bindings.contains(binding))
+        {
+            return Err(Error::Convert(
+                "animation: binding does not belong to scene".into(),
+            ));
+        }
+        Ok(self.animation.property(
+            self.animation.stack_layers(stack)?,
+            binding.element,
+            &binding.property,
+            time,
+        ))
+    }
+    /// Evaluate any object's property by its source ID and byte-exact property name.
+    pub fn evaluate_property(
+        &self,
+        stack: Option<usize>,
+        source_id: i64,
+        name: &[u8],
+        time: f64,
+    ) -> Result<crate::EvaluatedProperty, Error> {
+        if !time.is_finite() {
+            return Err(Error::Convert(
+                "animation: nonfinite evaluation time".into(),
+            ));
+        }
+        let layers = self.animation.stack_layers(stack)?;
+        let i = self
+            .animation
+            .ids
+            .iter()
+            .position(|id| *id == Some(source_id))
+            .ok_or_else(|| Error::Convert("animation: source ID not found".into()))?;
+        Ok(self.animation.property(layers, i, name, time))
+    }
     /// Stored bones; references use indices into the corresponding scene slice.
     pub fn bones(&self) -> &[crate::Bone] {
         &self.bones
@@ -1040,7 +1143,7 @@ impl Scene {
     pub fn settings(&self) -> &SceneSettings {
         &self.settings
     }
-    /// Objects present in the file but not converted (animation, curves and
+    /// Objects present in the file but not converted (surfaces and
     /// surfaces, caches, constraints, audio).
     pub fn unsupported(&self) -> &[Unsupported] {
         &self.unsupported
@@ -1352,6 +1455,7 @@ impl Scene {
             .map(|&(kind, source_id)| Unsupported { kind, source_id })
             .collect();
         Ok(Scene {
+            animation: std::mem::take(&mut c.animation),
             nodes,
             meshes,
             materials,
@@ -1384,7 +1488,14 @@ fn triangulate(
     for (face, range) in faces.enumerate() {
         let range = range.map_err(bad)?;
         let (begin, count) = (range.start, range.len());
-        if m.face(face) != Some((begin as u32, count as u32)) {
+        if m.face(face)
+            != Some((
+                u32::try_from(begin)
+                    .map_err(|_| Error::Convert("triangulation: index overflow".into()))?,
+                u32::try_from(count)
+                    .map_err(|_| Error::Convert("triangulation: count overflow".into()))?,
+            ))
+        {
             return Err(Error::Convert("triangulation: face layout mismatch".into()));
         }
         buf.clear();
@@ -1399,7 +1510,10 @@ fn triangulate(
             } else {
                 corner
             };
-            out.push(c as u32);
+            out.push(
+                u32::try_from(c)
+                    .map_err(|_| Error::Convert("triangulation: corner overflow".into()))?,
+            );
         }
     }
     Ok(out)

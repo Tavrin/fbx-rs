@@ -11,6 +11,8 @@ ufbx function it follows (`ufbxi_...` names) and lives in these files of
 - `canon_dom.rs`: retained-DOM projection rules.
 - `canon_scene.rs`: element reading, property defaults, scene settings,
   animation-stack structure.
+- `animation.rs`, `scene_animation.rs`, `animation_canon.rs`: curve reading,
+  tangent reconstruction, extrapolation, layer blending and evaluation samples.
 - `scene_attribute.rs`: camera, light and bone updates.
 - `scene_deform.rs`: skin influences, cluster and pose matrices, sparse blend
   offsets and in-between target weights.

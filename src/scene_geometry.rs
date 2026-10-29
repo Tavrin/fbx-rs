@@ -163,7 +163,7 @@ impl MeshEnv<'_, '_> {
     fn val_i32(&self, node: usize) -> Option<i32> {
         match node_data(self.doc, node, self.ascii) {
             NodeData::Values(v) => match v.first() {
-                Some(Scalar::Num(i, _)) => Some(*i as i32),
+                Some(Scalar::Num(i, _)) => i32::try_from(*i).ok(),
                 _ => None,
             },
             _ => None,
@@ -192,7 +192,7 @@ fn fix_index(one_past_max: usize) -> Result<u32, String> {
     if one_past_max == 0 || one_past_max > u32::MAX as usize {
         return Err(err("clamped index without elements"));
     }
-    Ok((one_past_max - 1) as u32)
+    u32::try_from(one_past_max - 1).map_err(|_| err("index count overflow"))
 }
 
 /// `ufbxi_check_indices`: pad with NO_INDEX, clamp out-of-range values.
@@ -268,7 +268,10 @@ impl Mesh {
         }
         let by_vertex = mapping_is(&mapping, "ByVertex") || mapping_is(&mapping, "ByVertice");
         if let Some(index_data) = indices {
-            let index_data: Vec<u32> = index_data.into_iter().map(|x| x as u32).collect();
+            let index_data: Vec<u32> = index_data
+                .into_iter()
+                .map(crate::numeric::index_word)
+                .collect();
             if mapping_is(&mapping, "ByPolygonVertex") {
                 attrib.indices = check_indices(index_data, n, num_elems)?;
             } else if by_vertex {
@@ -301,7 +304,8 @@ impl Mesh {
                 *attrib = Attrib::default();
             }
         } else if mapping_is(&mapping, "ByPolygonVertex") {
-            let consecutive: Vec<u32> = (0..n as u32).collect();
+            let consecutive: Vec<u32> =
+                (0..u32::try_from(n).map_err(|_| err("index count overflow"))?).collect();
             attrib.indices = if num_elems >= n {
                 consecutive
             } else {
@@ -314,7 +318,8 @@ impl Mesh {
             let mut new = vec![0u32; n];
             for (face_ix, &(begin, count)) in self.faces.iter().enumerate() {
                 for i in 0..count {
-                    new[(begin + i) as usize] = face_ix as u32;
+                    new[(begin + i) as usize] =
+                        u32::try_from(face_ix).map_err(|_| err("index count overflow"))?;
                 }
             }
             attrib.indices = check_indices(new, n, num_elems)?;
@@ -332,11 +337,14 @@ impl Mesh {
         let mut begin = 0usize;
         for (i, slot) in index_data.iter_mut().enumerate() {
             let mut ix = *slot;
-            if (ix as i32) < 0 {
+            if (crate::numeric::signed_word(ix)) < 0 {
                 ix = !ix;
                 *slot = ix;
-                let num = (i - begin + 1) as u32;
-                self.faces.push((begin as u32, num));
+                let num = u32::try_from(i - begin + 1).map_err(|_| err("index count overflow"))?;
+                self.faces.push((
+                    u32::try_from(begin).map_err(|_| err("index count overflow"))?,
+                    num,
+                ));
                 if num >= 3 {
                     self.num_triangles += u64::from(num - 2);
                     self.max_face_triangles = self.max_face_triangles.max(u64::from(num - 2));
@@ -353,7 +361,8 @@ impl Mesh {
         for (ix, &vx) in index_data.iter().enumerate() {
             if (vx as usize) < self.num_vertices && self.vertex_first_index[vx as usize] == NO_INDEX
             {
-                self.vertex_first_index[vx as usize] = ix as u32;
+                self.vertex_first_index[vx as usize] =
+                    u32::try_from(ix).map_err(|_| err("index count overflow"))?;
             }
         }
         Ok(())
@@ -368,14 +377,18 @@ impl Mesh {
         if num_faces == 0 || face_group.len() != num_faces {
             return Err(err("face groups"));
         }
-        let mut ids: Vec<i32> = face_group.iter().map(|&x| x as i32).collect();
+        let mut ids: Vec<i32> = face_group
+            .iter()
+            .map(|&x| crate::numeric::signed_word(x))
+            .collect();
         ids.sort_unstable();
         ids.dedup();
         self.face_groups = ids.clone();
         let mut parts: Vec<Part> = vec![Part::default(); ids.len()];
         if ids.len() == 1 {
             face_group.iter_mut().for_each(|x| *x = 0);
-            parts[0].face_indices = (0..num_faces as u32).collect();
+            parts[0].face_indices =
+                (0..u32::try_from(num_faces).map_err(|_| err("index count overflow"))?).collect();
             parts[0].num_bad = self.num_bad;
             parts[0].num_faces = num_faces as u64;
             parts[0].num_triangles = self.num_triangles;
@@ -384,16 +397,18 @@ impl Mesh {
         }
         for (f, g) in face_group.iter_mut().enumerate() {
             let index = ids
-                .binary_search(&(*g as i32))
+                .binary_search(&(crate::numeric::signed_word(*g)))
                 .map_err(|_| err("face group lookup"))?;
             parts[index].add_face(self.faces[f].1);
-            *g = index as u32;
+            *g = u32::try_from(index).map_err(|_| err("index count overflow"))?;
         }
         for (i, p) in parts.iter_mut().enumerate() {
-            p.index = i as u32;
+            p.index = u32::try_from(i).map_err(|_| err("index count overflow"))?;
         }
         for (f, &g) in face_group.iter().enumerate() {
-            parts[g as usize].face_indices.push(f as u32);
+            parts[g as usize]
+                .face_indices
+                .push(u32::try_from(f).map_err(|_| err("index count overflow"))?);
         }
         self.face_group_parts = parts;
         Ok(())
@@ -477,11 +492,16 @@ impl Mesh {
                     edge: NO_INDEX,
                     prev: va,
                     next: vb,
-                    face: fi as u32,
+                    face: u32::try_from(fi).expect("face count bounded by index count"),
                 });
             }
         }
-        topo.sort_by_key(|t| (t.prev as i32, t.next as i32));
+        topo.sort_by_key(|t| {
+            (
+                crate::numeric::signed_word(t.prev),
+                crate::numeric::signed_word(t.next),
+            )
+        });
         if let Some(edges) = &self.edges {
             for (ei, e) in edges.iter().enumerate() {
                 let mut va = vertex_indices[e[0] as usize];
@@ -497,7 +517,7 @@ impl Mesh {
                     }
                 });
                 while ix < n && topo[ix].prev == va && topo[ix].next == vb {
-                    topo[ix].edge = ei as u32;
+                    topo[ix].edge = u32::try_from(ei).expect("edge count preflighted");
                     ix += 1;
                 }
             }
@@ -515,7 +535,7 @@ impl Mesh {
             }
             i0 = i1 + 1;
         }
-        topo.sort_by_key(|t| t.index as i32);
+        topo.sort_by_key(|t| crate::numeric::signed_word(t.index));
         for &(begin, count) in &self.faces {
             for i in 0..count {
                 let t = &mut topo[(begin + i) as usize];
@@ -627,7 +647,7 @@ fn mirror(values: &mut [f64], axis: i64) {
     if axis == 0 {
         return;
     }
-    let k = (axis - 1) as usize;
+    let k = usize::try_from(axis - 1).expect("validated mirror axis");
     for v in values.as_chunks_mut::<3>().0 {
         v[k] = -v[k];
     }
@@ -711,11 +731,11 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
     let mut index_data: Vec<u32> = indices
         .unwrap_or_default()
         .into_iter()
-        .map(|x| x as u32)
+        .map(crate::numeric::index_word)
         .collect();
     m.num_indices = index_data.len();
     if let Some(last) = index_data.last_mut() {
-        if (*last as i32) >= 0 {
+        if (crate::numeric::signed_word(*last)) >= 0 {
             *last = !*last;
         }
     }
@@ -723,13 +743,13 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
         let n = m.num_indices;
         let mut edges = Vec::with_capacity(edge_data.len());
         for e in edge_data {
-            let a = e as u32;
+            let a = crate::numeric::index_word(e);
             if a as usize >= n {
                 continue;
             }
             let mut ix = a as usize;
-            if (index_data[ix] as i32) < 0 {
-                while ix > 0 && (index_data[ix - 1] as i32) >= 0 {
+            if (crate::numeric::signed_word(index_data[ix])) < 0 {
+                while ix > 0 && (crate::numeric::signed_word(index_data[ix - 1])) >= 0 {
                     ix -= 1;
                 }
             } else {
@@ -738,7 +758,10 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
             if ix >= n {
                 return Err(err("edge index"));
             }
-            edges.push([a, ix as u32]);
+            edges.push([
+                a,
+                u32::try_from(ix).map_err(|_| err("index count overflow"))?,
+            ]);
         }
         m.edges = Some(edges);
     }
@@ -773,7 +796,7 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
             b"LayerElementBinormal" | b"LayerElementTangent" => {
                 let bi = name == b"LayerElementBinormal";
                 let stale = if bi { &mut stale_bi } else { &mut stale_tan };
-                let index = env.val_i32(n).map_or(*stale, |v| v as u32);
+                let index = env.val_i32(n).map_or(*stale, crate::numeric::index_word);
                 let mut a = Attrib::default();
                 if bi {
                     m.read_vertex_element(env, n, &mut a, b"Binormals", b"BinormalsIndex", 3)?;
@@ -794,7 +817,7 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                 }
             }
             b"LayerElementUV" => {
-                let index = env.val_i32(n).map_or(stale_uv, |v| v as u32);
+                let index = env.val_i32(n).map_or(stale_uv, crate::numeric::index_word);
                 let mut set = UvSet {
                     index,
                     name: env.find_str(n, b"Name").unwrap_or_default(),
@@ -809,7 +832,9 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                 }
             }
             b"LayerElementColor" => {
-                let index = env.val_i32(n).map_or(stale_color, |v| v as u32);
+                let index = env
+                    .val_i32(n)
+                    .map_or(stale_color, crate::numeric::index_word);
                 let mut set = ColorSet {
                     index,
                     name: env.find_str(n, b"Name").unwrap_or_default(),
@@ -880,14 +905,14 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                 if mapping_is(&mapping, "ByPolygon") {
                     let arr = env
                         .find_ints(n, b"Materials")
-                        .map(|v| v.into_iter().map(|x| x as u32).collect());
+                        .map(|v| v.into_iter().map(crate::numeric::index_word).collect());
                     if let Some(v) = truncated(arr, num_faces) {
                         m.face_material = Some(v);
                     }
                 } else if mapping_is(&mapping, "AllSame") {
                     let arr = env.find_ints(n, b"Materials");
                     let material = match arr.as_deref() {
-                        Some([first, ..]) => *first as u32,
+                        Some([first, ..]) => crate::numeric::index_word(*first),
                         _ => return Err(err("AllSame materials")),
                     };
                     m.face_material = Some(vec![material; num_faces]);
@@ -904,7 +929,7 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                     if name == b"LayerElementPolygonGroup" {
                         let arr = env
                             .find_ints(n, b"PolygonGroup")
-                            .map(|v| v.into_iter().map(|x| x as u32).collect());
+                            .map(|v| v.into_iter().map(crate::numeric::index_word).collect());
                         if let Some(v) = truncated(arr, num_faces) {
                             m.face_group = Some(v);
                         }
@@ -930,7 +955,10 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
             if env.doc.nodes[c].name != b"LayerElement" {
                 continue;
             }
-            let Some(index) = env.find_i32(c, b"TypedIndex").map(|v| v as u32) else {
+            let Some(index) = env
+                .find_i32(c, b"TypedIndex")
+                .map(crate::numeric::index_word)
+            else {
                 continue;
             };
             let Some(ty) = env.find_str(c, b"Type") else {
@@ -967,10 +995,10 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
     m.color_sets.sort_by_key(|s| s.index);
 
     if let Some(v) = env.find_i32(node, b"PreviewDivisionLevels") {
-        m.subdivision_preview_levels = u64::from(v as u32);
+        m.subdivision_preview_levels = u64::from(crate::numeric::index_word(v));
     }
     if let Some(v) = env.find_i32(node, b"RenderDivisionLevels") {
-        m.subdivision_render_levels = u64::from(v as u32);
+        m.subdivision_render_levels = u64::from(crate::numeric::index_word(v));
     }
     if let Some(v) = env.find_i32(node, b"Smoothness") {
         if (0..=3).contains(&v) {
@@ -1039,6 +1067,17 @@ pub(crate) fn convert_mesh(
     node: usize,
     links: &MeshLinks,
 ) -> Result<Mesh, String> {
+    // Source counts bound every derived corner/face/edge index, including
+    // the normal generator's infallible conversions. Check before decoding.
+    for &child in &env.children[node] {
+        if crate::canon_dom::data_len(env.doc, child)? > usize::try_from(i32::MAX).unwrap() {
+            return Err(err("source array count overflow"));
+        }
+    }
+    if links.materials.len() > usize::try_from(i32::MAX).unwrap() {
+        return Err(err("material count overflow"));
+    }
+
     let mut m = read_mesh(env, node)?;
 
     // `ufbxi_finalize_scene`.
@@ -1055,7 +1094,8 @@ pub(crate) fn convert_mesh(
         p.num_faces = num_faces as u64;
         p.num_triangles = m.num_triangles;
         p.num_bad = m.num_bad;
-        p.face_indices = (0..num_faces as u32).collect();
+        p.face_indices =
+            (0..u32::try_from(num_faces).map_err(|_| err("index count overflow"))?).collect();
         m.material_part_usage_order = vec![0];
         m.face_material = (num_materials == 1).then(|| vec![0; num_faces]);
     } else {
@@ -1071,16 +1111,20 @@ pub(crate) fn convert_mesh(
             m.material_parts[mat].add_face(face.1);
         }
         for (i, p) in m.material_parts.iter_mut().enumerate() {
-            p.index = i as u32;
-            p.face_indices.reserve(p.num_faces as usize);
+            p.index = u32::try_from(i).map_err(|_| err("index count overflow"))?;
+            p.face_indices
+                .reserve(usize::try_from(p.num_faces).map_err(|_| err("face count overflow"))?);
         }
         for (i, &mat) in fm.iter().enumerate().take(num_faces) {
             if (mat as usize) < num_parts {
-                m.material_parts[mat as usize].face_indices.push(i as u32);
+                m.material_parts[mat as usize]
+                    .face_indices
+                    .push(u32::try_from(i).map_err(|_| err("index count overflow"))?);
             }
         }
         let parts = &m.material_parts;
-        let mut order: Vec<u32> = (0..num_parts as u32).collect();
+        let mut order: Vec<u32> =
+            (0..u32::try_from(num_parts).map_err(|_| err("index count overflow"))?).collect();
         order.sort_by(|&a, &b| {
             let (pa, pb) = (&parts[a as usize], &parts[b as usize]);
             let (ca, cb) = (pa.face_indices.len(), pb.face_indices.len());
@@ -1144,7 +1188,8 @@ pub(crate) fn convert_mesh(
         m.vertex_first_index.fill(NO_INDEX);
         for (ix, &vx) in m.position.indices.iter().enumerate() {
             if (vx as usize) < m.num_vertices && m.vertex_first_index[vx as usize] == NO_INDEX {
-                m.vertex_first_index[vx as usize] = ix as u32;
+                m.vertex_first_index[vx as usize] =
+                    u32::try_from(ix).map_err(|_| err("index count overflow"))?;
             }
         }
         if let Some(edges) = m.edges.as_mut() {

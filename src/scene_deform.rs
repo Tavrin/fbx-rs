@@ -25,6 +25,7 @@ struct Reader<'a, 'd> {
     limit: usize,
     work: std::cell::Cell<usize>,
     work_limit: usize,
+    path: std::cell::Cell<crate::conversion_budget::Path>,
 }
 impl Reader<'_, '_> {
     fn new<'a, 'd>(s: &'a CanonScene<'d>, limits: &DumpLimits) -> Result<Reader<'a, 'd>, String> {
@@ -35,6 +36,7 @@ impl Reader<'_, '_> {
             limit: limits.max_allocation,
             work: std::cell::Cell::new(0),
             work_limit: limits.max_deformer_work,
+            path: std::cell::Cell::new(crate::conversion_budget::Path::Deformers),
         };
         // Outer adjacency, child counts, and at most twice the child entries
         // for Vec growth, before constructing any of the adjacency table.
@@ -58,6 +60,7 @@ impl Reader<'_, '_> {
             return Err("deformer: work limit".into());
         }
         self.work.set(used);
+        crate::conversion_budget::record(self.path.get(), count);
         Ok(())
     }
     fn sort_work(&self, count: usize) -> Result<(), String> {
@@ -113,7 +116,7 @@ impl Reader<'_, '_> {
         match self.data(n, name)? {
             None => Ok(Vec::new()),
             Some(NodeData::Ints(v)) if v.iter().all(|&x| x >= 0) => {
-                Ok(v.into_iter().map(|x| x as u32).collect())
+                Ok(v.into_iter().map(|x| u32::try_from(x).unwrap()).collect())
             }
             _ => Err(format!("deformer: invalid index array at {n}")),
         }
@@ -206,7 +209,7 @@ fn mirror(m: &mut sn::Mat, axis: i64) {
     if axis == 0 {
         return;
     }
-    let a = axis as usize - 1;
+    let a = usize::try_from(axis).expect("validated mirror axis") - 1;
     for r in 0..3 {
         m[a * 3 + r] = -m[a * 3 + r];
     }
@@ -316,6 +319,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 }
             })
         };
+    r.path.set(crate::conversion_budget::Path::Poses);
     let mut by_source = BTreeMap::new();
     r.sort_work(s.elements.len())?;
     for (k, e) in s.elements.iter().enumerate() {
@@ -440,6 +444,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             },
         ));
     }
+    r.path.set(crate::conversion_budget::Path::Deformers);
     let mut cluster_index = vec![None; s.elements.len()];
     let mut shape_index = vec![None; s.elements.len()];
     let mut shape_orders = Vec::new();
@@ -489,7 +494,8 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                                 }
                             }
                             if axis != 0 {
-                                v[axis as usize - 1] = -v[axis as usize - 1];
+                                v[usize::try_from(axis).expect("validated mirror axis") - 1] =
+                                    -v[usize::try_from(axis).expect("validated mirror axis") - 1];
                             }
                             v
                         })
@@ -1014,7 +1020,7 @@ mod tests {
                 let r = Reader::new(&s, &DumpLimits::default()).unwrap();
                 let result = r.indices(s.doc.nodes[n].parent.unwrap(), b"Indexes");
                 if (0..=i32::MAX as i64).contains(&value) {
-                    assert_eq!(result.unwrap(), [value as u32]);
+                    assert_eq!(result.unwrap(), [u32::try_from(value).unwrap()]);
                 } else {
                     assert!(result.unwrap_err().contains("invalid index"));
                 }

@@ -28,9 +28,12 @@ pub struct DumpLimits {
     #[cfg(feature = "parity")]
     pub draft: crate::scene_draft::Limits,
     pub max_properties: usize,
+    pub max_keys: usize,
     pub max_allocation: usize,
     /// Bound on deformer traversal, lookup and sorting work.
     pub max_deformer_work: usize,
+    /// Maximum animation traversal, lookup and sorting work per stage.
+    pub max_animation_work: usize,
     pub max_line: usize,
     pub max_output: usize,
 }
@@ -41,9 +44,11 @@ impl Default for DumpLimits {
             index: scene::Limits::default(),
             #[cfg(feature = "parity")]
             draft: crate::scene_draft::Limits::default(),
+            max_keys: 1 << 24,
             max_properties: 1 << 20,
             max_allocation: 512 << 20,
             max_deformer_work: 1 << 28,
+            max_animation_work: 1 << 28,
             max_line: 64 << 20,
             // 8 GiB, saturated to the address space on 32-bit targets (wasm32).
             max_output: usize::try_from(8u64 << 30).unwrap_or(usize::MAX),
@@ -157,11 +162,10 @@ impl ElementType {
             _ => "advanced",
         }
     }
-    /// Whether this element type needs animation support, which the
-    /// static converter does not provide.
+    /// Compatibility query for the former animation deferral. Animation
+    /// records are now supported, so no element requires that deferral.
     pub fn needs_later_phase(self) -> bool {
-        use ElementType::*;
-        matches!(self, AnimStack | AnimLayer | AnimValue | AnimCurve)
+        false
     }
 }
 
@@ -226,7 +230,7 @@ fn element_type(name: &[u8], sub: &[u8]) -> Option<ElementType> {
 }
 
 /// One canonical element: identity, typed projection and source binding.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Element {
     pub key: String,
     pub ordinal: usize,
@@ -269,8 +273,7 @@ pub(crate) struct Lean {
 #[derive(Debug, Default)]
 pub struct DumpSummary {
     pub elements: usize,
-    /// Elements whose semantics need rig/animation support (skins, morphs,
-    /// animation).
+    /// Compatibility list of deferred animation types (now empty).
     pub later_phase: Vec<(ElementType, usize)>,
     /// [`CanonScene::unsupported`] of the dumped scene.
     pub unsupported: Vec<(scene::UnsupportedKind, i64)>,
@@ -373,8 +376,8 @@ pub struct CanonScene<'a> {
     /// `uc->exporter` (`ufbx_exporter` value) after `ufbxi_match_exporter`:
     /// selects exporter quirks such as `metadata.ortho_size_unit`.
     pub exporter: i64,
-    /// Content this static converter does not convert (animation, curves
-    /// and surfaces, caches, constraints, audio),
+    /// Content this converter does not convert (geometric curves and
+    /// surfaces, caches, constraints, audio),
     /// with the source object ID (the owning `Geometry` for
     /// [`scene::UnsupportedKind::LegacyShape`]): objects in DOM order, then
     /// legacy in-geometry shapes in DOM order.
@@ -382,6 +385,8 @@ pub struct CanonScene<'a> {
     /// `scene.anim`: the first animation stack's `ufbx_anim` (empty without
     /// stacks).
     pub anim: Obj,
+    pub(crate) animation: crate::animation::Animation,
+    pub(crate) scale_helpers: Vec<(usize, usize)>,
     /// Lean projection (public `load`): no per-element canonical records are
     /// built; the converted values are kept typed in [`CanonScene::typed`].
     pub(crate) lean: bool,
@@ -432,8 +437,8 @@ fn project_takes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), 
 /// `ufbx_anim` of every stack and layer (`ufbxi_push_anim`, bounds from
 /// `ufbxi_update_anim_stack`), layer blend mode, weight and accumulation
 /// modes, layer `anim_values`, and `scene.anim` (`ufbxi_update_anim`: the
-/// first stack in element order). Animated property lists (`anim_props`)
-/// and curve evaluation are not converted yet.
+/// first stack in element order). The animation projection stage subsequently
+/// adds property lists (`anim_props`), curves and evaluation data.
 fn project_anim_structure(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), String> {
     use ElementType::*;
     let anim = |t0: f64, t1: f64, layers: &[usize]| {
@@ -728,6 +733,13 @@ pub(crate) fn project_with<'a>(
             connections.push((channel + 1, channel, Vec::new()));
         }
     }
+    let scale_helpers = crate::scene_animation::scale_helpers(
+        &doc,
+        &mut elements,
+        &mut connections,
+        ascii,
+        limits,
+    )?;
     let mut scene = CanonScene {
         doc,
         elements,
@@ -743,6 +755,8 @@ pub(crate) fn project_with<'a>(
         exporter: EXPORTER_UNKNOWN,
         unsupported,
         anim: Obj::new(),
+        animation: Default::default(),
+        scale_helpers,
         lean,
         typed: Lean::default(),
         deformers: Default::default(),
@@ -765,6 +779,11 @@ pub(crate) fn project_with<'a>(
     }
     let mut taken: Vec<Option<Element>> = scene.elements.drain(..).map(Some).collect();
     scene.elements = order.iter().filter_map(|&old| taken[old].take()).collect();
+    scene.scale_helpers = scene
+        .scale_helpers
+        .iter()
+        .map(|&(o, h)| (remap[o], remap[h]))
+        .collect();
     let conn = |src: usize, dst: usize, prop: &[u8]| {
         V::Obj(
             Obj::new()
@@ -809,6 +828,8 @@ pub(crate) fn project_with<'a>(
     if lean {
         return project_rest(scene, input, limits, &oo);
     }
+    let (helper_for, owner_for) =
+        crate::scene_animation::helper_index(scene.elements.len(), &scene.scale_helpers);
     for (i, e) in scene.elements.iter_mut().enumerate() {
         let mut header = Obj::new()
             .with("type", V::I(e.ty as i64))
@@ -829,8 +850,13 @@ pub(crate) fn project_with<'a>(
                     defaults: None,
                 }
             } else {
-                scene_property::layers(&scene.doc, n, limits.max_properties, limits.max_allocation)
-                    .map_err(|err| format!("properties: {err:?}"))?
+                crate::scene_animation::node_layers(
+                    &scene.doc,
+                    n,
+                    owner_for[i].is_some(),
+                    helper_for[i].is_some(),
+                    limits,
+                )?
             };
             if scene.doc.nodes[n].name == b"Shape" && e.ty == ElementType::BlendChannel {
                 let owner = scene.doc.nodes[n].parent.ok_or("shape: missing geometry")?;
@@ -884,7 +910,7 @@ fn project_rest<'a>(
     limits: &DumpLimits,
     oo: &[(usize, usize)],
 ) -> Result<CanonScene<'a>, String> {
-    let links = project_graph(&mut scene, oo);
+    let links = project_graph(&mut scene, oo, limits)?;
     project_globals(&mut scene, input, limits)?;
     project_transforms(&mut scene, &links, oo, limits)?;
     if !scene.lean {
@@ -896,6 +922,7 @@ fn project_rest<'a>(
     crate::scene_deform::project(&mut scene, limits)?;
     project_materials(&mut scene, limits)?;
     project_attributes(&mut scene, &links, limits)?;
+    crate::scene_animation::project(&mut scene, limits)?;
     Ok(scene)
 }
 
@@ -1050,9 +1077,21 @@ fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<
 
 /// Node hierarchy and attribute links from object-object connections
 /// (ufbx `ufbxi_finalize_scene` node linking; order follows connections).
-fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
+fn project_graph(
+    scene: &mut CanonScene<'_>,
+    oo: &[(usize, usize)],
+    limits: &DumpLimits,
+) -> Result<Links, String> {
     use ElementType::*;
     let n = scene.elements.len();
+    let budget = crate::conversion_budget::Budget::new(
+        limits.max_allocation,
+        limits.max_animation_work,
+        crate::conversion_budget::Path::Helpers,
+    );
+    budget.charge(n, 256)?;
+    budget.charge(oo.len(), 64)?;
+    budget.work(n + oo.len())?;
     let mut parent = vec![None; n];
     let mut children = vec![Vec::new(); n];
     let mut attribs = vec![Vec::new(); n];
@@ -1075,18 +1114,30 @@ fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
             instances[src].push(dst);
         }
     }
+    let (_, owner_for) = crate::scene_animation::helper_index(n, &scene.scale_helpers);
+    // ufbxi_cmp_node_less puts scale helpers before ordinary siblings.
+    for list in &mut children {
+        budget.sort_work(list.len())?;
+        list.sort_by_key(|i| owner_for[*i].is_none());
+    }
     let mut depth = vec![0u64; n];
+    let mut done = vec![false; n];
+    let mut path = Vec::new();
     for i in 0..n {
-        let mut d = 0;
-        let mut p = parent[i];
-        while let Some(q) = p {
-            d += 1;
-            if d > n as u64 {
+        let mut at = Some(i);
+        while let Some(k) = at {
+            budget.work(1)?;
+            if done[k] {
                 break;
             }
-            p = parent[q];
+            done[k] = true;
+            path.push(k);
+            at = parent[k];
         }
-        depth[i] = d;
+        let base = at.map_or(0, |k| depth[k] + 1);
+        for (d, k) in (base..).zip(path.drain(..).rev()) {
+            depth[k] = d;
+        }
     }
     let effective_parent: Vec<Option<usize>> = (0..n)
         .map(|i| parent[i].or(if i == 0 { None } else { Some(0) }))
@@ -1102,13 +1153,13 @@ fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
         t.children = children;
         t.node_materials = materials;
         t.attribs = attribs.clone();
-        return Links {
+        return Ok(Links {
             parent: effective_parent,
             depth: (0..n)
                 .map(|i| depth[i] + u64::from(i != 0 && parent[i].is_none()))
                 .collect(),
             attribs,
-        };
+        });
     }
     for i in 0..n {
         let ty = scene.elements[i].ty;
@@ -1195,7 +1246,7 @@ fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
             }
         }
     }
-    Links {
+    Ok(Links {
         parent: (0..n)
             .map(|i| parent[i].or(if i == 0 { None } else { Some(0) }))
             .collect(),
@@ -1203,7 +1254,7 @@ fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
             .map(|i| depth[i] + u64::from(i != 0 && parent[i].is_none()))
             .collect(),
         attribs,
-    }
+    })
 }
 
 /// Node hierarchy facts shared by the graph and transform projections.
@@ -1231,14 +1282,18 @@ fn project_transforms(
     use ElementType::*;
     let n = scene.elements.len();
     let is_node: Vec<bool> = scene.elements.iter().map(|e| e.ty == Node).collect();
+    let (helper_for, owner_for) = crate::scene_animation::helper_index(n, &scene.scale_helpers);
     // Properties through the template chain (`ufbxi_find_*`).
     let mut layers = Vec::with_capacity(n);
     for e in &scene.elements {
         layers.push(match (e.ty, e.node) {
-            (Node, Some(d)) => Some(
-                scene_property::layers(&scene.doc, d, limits.max_properties, limits.max_allocation)
-                    .map_err(|err| format!("node properties: {err:?}"))?,
-            ),
+            (Node, Some(d)) => Some(crate::scene_animation::node_layers(
+                &scene.doc,
+                d,
+                owner_for[layers.len()].is_some(),
+                helper_for[layers.len()].is_some(),
+                limits,
+            )?),
             _ => None,
         });
     }
@@ -1352,7 +1407,7 @@ fn project_transforms(
     let camera_post = post_rotation([4, 2, 1]);
     let order: Vec<usize> = {
         let mut v: Vec<usize> = (0..n).filter(|&i| is_node[i]).collect();
-        v.sort_by_key(|&i| links.depth[i]);
+        v.sort_by_key(|&i| (links.depth[i], owner_for[i].is_none()));
         v
     };
     let mut adjust = vec![Adjust::default(); n];
@@ -1402,6 +1457,24 @@ fn project_transforms(
     // `ufbxi_update_node` (geometric properties were reset by
     // `ufbxi_modify_geometry`, so every node uses the identity defaults).
     let mut states: Vec<Option<sn::NodeState>> = vec![None; n];
+    let mut eval_nodes = Vec::new();
+    let mut eval_slot = vec![None; n];
+    for i in 0..n {
+        if is_node[i] {
+            eval_slot[i] = Some(eval_nodes.len());
+            eval_nodes.push(crate::animation::NodeEval {
+                element: i,
+                parent: None,
+                props: NodeProps::default(),
+                adjust: adjust[i],
+                rotation_order: 0,
+                use_rotation_space: false,
+                translation_scale: None,
+                inherited_scale: None,
+            });
+        }
+    }
+    scene.animation.node_order = order.iter().filter_map(|&i| eval_slot[i]).collect();
     if scene.lean {
         scene.typed.visible = vec![true; n];
     }
@@ -1433,7 +1506,37 @@ fn project_transforms(
                 scaling_pivot: vec3(i, b"ScalingPivot", [0.0; 3]),
                 ..NodeProps::default()
             };
-            let local = sn::get_transform(&p, rotation_order, use_rs, a, None);
+            if let Some(slot) = eval_slot[i] {
+                eval_nodes[slot] = crate::animation::NodeEval {
+                    element: i,
+                    parent: links.parent[i].and_then(|p| eval_slot[p]),
+                    props: p,
+                    adjust: *a,
+                    rotation_order,
+                    use_rotation_space: use_rs,
+                    translation_scale: links.parent[i]
+                        .and_then(|p| helper_for[p].filter(|&h| h != i).and_then(|h| eval_slot[h])),
+                    inherited_scale: owner_for[i]
+                        .and_then(|_| links.parent[i])
+                        .and_then(|p| inherit_node[p])
+                        .and_then(|p| helper_for[p])
+                        .and_then(|h| eval_slot[h]),
+                };
+            }
+            let config = &eval_nodes[eval_slot[i].unwrap()];
+            let translation_scale = config.translation_scale.and_then(|slot| {
+                states[eval_nodes[slot].element]
+                    .as_ref()
+                    .map(|s| s.local.scale)
+            });
+            let mut local = sn::get_transform(&p, rotation_order, use_rs, a, translation_scale);
+            if let Some(slot) = config.inherited_scale {
+                if let Some(st) = &states[eval_nodes[slot].element] {
+                    for c in 0..3 {
+                        local.scale[c] *= st.local.scale[c];
+                    }
+                }
+            }
             let geometry = sn::get_geometry_transform(&p, a);
             let parent = links.parent[i].and_then(|q| states[q].as_ref());
             (sn::update_node(local, geometry, parent), use_rs)
@@ -1454,6 +1557,10 @@ fn project_transforms(
             )
         };
         obj.set("inherit_mode", V::I(0));
+        if let Some(h) = helper_for[i] {
+            obj.set("scale_helper", V::Ref(Some(h)));
+        }
+        obj.set("is_scale_helper", V::Bool(owner_for[i].is_some()));
         obj.set("original_inherit_mode", V::I(original[i]));
         obj.set("local_transform", tr(&state.local));
         obj.set("geometry_transform", tr(&state.geometry));
@@ -1508,6 +1615,7 @@ fn project_transforms(
     };
     scene.metadata.set("ortho_size_unit", V::F(ortho_size_unit));
     scene.node_states = states;
+    scene.animation.nodes = eval_nodes;
     // `ufbxi_modify_geometry` prefetch: geometric transforms of every node.
     let mut geometry_modify = vec![None; n];
     for &i in &order {
@@ -1654,7 +1762,8 @@ fn match_version_string(fmt: &[u8], s: &[u8], version: &mut [u32; 3]) -> bool {
         match c {
             b'a'..=b'z' => {
                 match s.get(pos) {
-                    Some(&b) if b == c || i32::from(b as i8) + 32 == i32::from(c) => {}
+                    Some(&b)
+                        if b == c || i32::from(i8::from_ne_bytes([b])) + 32 == i32::from(c) => {}
                     _ => return false,
                 }
                 pos += 1;
@@ -1850,7 +1959,7 @@ fn project_globals(
     let original_unit = find_real(b"OriginalUnitScaleFactor", unit);
     let time_mode = find_enum(b"TimeMode", 11, 17);
     let fps = if time_mode != 14 {
-        f64::from(FPS[time_mode as usize])
+        f64::from(FPS[usize::try_from(time_mode).unwrap()])
     } else {
         find_real(b"CustomFrameRate", 24.0)
     };
@@ -1878,15 +1987,26 @@ fn project_globals(
         "original_unit_meters",
         V::F(round_if_near(original_unit * 0.01)),
     );
+    // ufbxi_transform_to_axes leaves unknown source axes unchanged.
+    let source_axes = [
+        find_axis(b"CoordAxis", b"CoordAxisSign"),
+        find_axis(b"UpAxis", b"UpAxisSign"),
+        find_axis(b"FrontAxis", b"FrontAxisSign"),
+    ];
+    let axes = if crate::scene_node::axes_valid(source_axes) {
+        [0, 2, 4]
+    } else {
+        source_axes
+    };
     // Target axes/units after import profile conversion (right-handed Y-up,
-    // metres).
+    // metres) when the source coordinate system is known.
     scene.settings.set(
         "axes",
         V::Obj(
             Obj::new()
-                .with("right", V::I(0))
-                .with("up", V::I(2))
-                .with("front", V::I(4)),
+                .with("right", V::I(axes[0]))
+                .with("up", V::I(axes[1]))
+                .with("front", V::I(axes[2])),
         ),
     );
     // ufbx keeps the source unit in `settings.unit_meters`; the profile's target
@@ -2154,147 +2274,7 @@ fn write_all<W: Write>(
         ..Default::default()
     };
     crate::canonical_writer::write_source_triangles(&mut em.w, &draft.index, &draft.meshes, &tl)?;
-    em.begin("curve_samples")?;
-    em.count(
-        "length",
-        scene
-            .elements
-            .iter()
-            .filter(|e| e.ty == ElementType::AnimCurve)
-            .count(),
-    )?;
-    em.end()?;
-    em.begin("evaluated")?;
-    em.count("length", scene.takes.len())?;
-    for (key, begin, end) in &scene.takes {
-        write_static_evaluation(em, scene, key, *begin, *end)?;
-    }
-    em.end()
-}
-
-/// canon.c `dump_animation` for a scene without stacks: the default take has
-/// time_begin = time_end = 0, so the samples are -1, -min, 0, +min, 1.
-/// Node values are not yet derived: identity placeholders.
-#[cfg(feature = "parity")]
-fn write_static_evaluation<W: Write>(
-    em: &mut Emitter<'_, W>,
-    scene: &CanonScene<'_>,
-    key: &str,
-    begin: f64,
-    end: f64,
-) -> io::Result<()> {
-    // canon.c `add_take_samples` + `unique_sample_times` (no curve samples:
-    // static takes carry no animated properties).
-    fn next_after(x: f64, up: bool) -> f64 {
-        if x == 0.0 {
-            let tiny = f64::from_bits(1);
-            return if up { tiny } else { -tiny };
-        }
-        let b = x.to_bits();
-        f64::from_bits(if (x > 0.0) == up { b + 1 } else { b - 1 })
-    }
-    if !begin.is_finite() || !end.is_finite() || end < begin {
-        return Err(io::Error::other("invalid take bounds"));
-    }
-    let mut samples: Vec<(f64, &str, i64, i64)> = vec![
-        (next_after(begin, false), "seconds-before-take", -1, 0),
-        (next_after(end, true), "seconds-after-take", 1, 0),
-        (begin - 1.0, "before-take", -1, 1),
-        (end + 1.0, "after-take", 1, 1),
-    ];
-    let frames = ((end - begin) * 30.0).ceil();
-    if !frames.is_finite() || frames > 200_000.0 {
-        return Err(io::Error::other("30 Hz grid work limit"));
-    }
-    for i in 0..frames as i64 {
-        samples.push((begin + i as f64 / 30.0, "grid-from-take-start", i, 30));
-    }
-    samples.push((end, "take-end", 0, 1));
-    samples.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.0.to_bits().cmp(&b.0.to_bits()))
-            .then(a.1.cmp(b.1))
-            .then(a.2.cmp(&b.2))
-            .then(a.3.cmp(&b.3))
-    });
-    samples.dedup_by(|b, a| a.0.to_bits() == b.0.to_bits());
-    let base = em.push(key);
-    em.count("length", samples.len())?;
-    let nodes: Vec<usize> = (0..scene.elements.len())
-        .filter(|&i| scene.elements[i].ty == ElementType::Node)
-        .collect();
-    let eval = |b: &mut Vec<u8>, tag: &str, v: &[f64]| {
-        b.extend_from_slice(format!("{{\"{tag}\":[").as_bytes());
-        for (i, x) in v.iter().enumerate() {
-            if i > 0 {
-                b.push(b',');
-            }
-            b.extend_from_slice(format!("\"{:016x}\"", x.to_bits()).as_bytes());
-        }
-        b.extend_from_slice(b"]}");
-    };
-    let root = crate::scene_node::root_state();
-    for (s, (time, kind, num, den)) in samples.iter().enumerate() {
-        let m = em.push_index(s);
-        em.leaf_raw("time", |b| crate::canon::f64_into(b, *time))?;
-        em.leaf_raw("provenance", |b| {
-            b.extend_from_slice(
-                format!("{{\"kind\":\"{kind}\",\"curve\":null,\"key_index\":\"0\",\"numerator\":\"{num}\",\"denominator\":\"{den}\"}}").as_bytes(),
-            )
-        })?;
-        let nm = em.push("nodes");
-        em.count("length", nodes.len())?;
-        for &i in &nodes {
-            // A scene without animated properties re-evaluates to the loaded
-            // state (`ufbxi_evaluate_imp` reruns `ufbxi_update_node` on the
-            // unmodified properties).
-            let st = scene
-                .node_states
-                .get(i)
-                .and_then(|x| x.as_ref())
-                .unwrap_or(&root);
-            let k = em.push(&scene.elements[i].key);
-            for (part, t) in [("local", &st.local), ("geometry", &st.geometry)] {
-                let p = em.push(part);
-                em.leaf_raw("translation", |b| eval(b, "eval_f64", &t.translation))?;
-                em.leaf_raw("rotation", |b| eval(b, "eval_quat", &t.rotation))?;
-                em.leaf_raw("scale", |b| eval(b, "eval_f64", &t.scale))?;
-                em.restore(p);
-            }
-            for (name, m) in [
-                ("node_to_parent", &st.node_to_parent),
-                ("node_to_world", &st.node_to_world),
-                ("geometry_to_node", &st.geometry_to_node),
-                ("geometry_to_world", &st.geometry_to_world),
-            ] {
-                em.leaf_raw(name, |b| eval(b, "eval_f64", m))?;
-            }
-            em.restore(k);
-        }
-        em.restore(nm);
-        em.count("skins/length", scene.deformers.clusters.len())?;
-        let sk = em.push("skins");
-        for (i, c) in &scene.deformers.clusters {
-            let k = em.push(&scene.elements[*i].key);
-            em.leaf_raw("geometry_to_world", |b| {
-                eval(b, "eval_f64", &c.geometry_to_world.0)
-            })?;
-            em.restore(k);
-        }
-        em.restore(sk);
-        em.count("morphs/length", scene.deformers.channels.len())?;
-        let mo = em.push("morphs");
-        for (i, c) in &scene.deformers.channels {
-            let k = em.push(&scene.elements[*i].key);
-            em.leaf_raw("weight", |b| eval(b, "eval_f64", &[c.weight]))?;
-            em.restore(k);
-        }
-        em.restore(mo);
-        em.restore(m);
-    }
-    em.restore(base);
-    Ok(())
+    crate::animation_canon::write(em, scene)
 }
 
 /// canon.c `duplicate_source_ids`: duplicated signed IDs under Objects.
@@ -2321,4 +2301,49 @@ fn duplicate_source_ids(scene: &CanonScene<'_>) -> usize {
         .collect();
     ids.sort_unstable();
     ids.windows(2).filter(|w| w[0] == w[1]).count()
+}
+
+/// Animation stacks used by the canonical evaluator (unstable parity bridge).
+#[cfg(feature = "parity")]
+pub fn animation_stacks<'a>(scene: &'a CanonScene<'_>) -> &'a [crate::AnimationStack] {
+    &scene.animation.stacks
+}
+/// Animation layers used by the canonical evaluator (unstable parity bridge).
+#[cfg(feature = "parity")]
+pub fn animation_layers<'a>(scene: &'a CanonScene<'_>) -> &'a [crate::AnimationLayer] {
+    &scene.animation.layers
+}
+/// Animation values used by the canonical evaluator (unstable parity bridge).
+#[cfg(feature = "parity")]
+pub fn animation_values<'a>(scene: &'a CanonScene<'_>) -> &'a [crate::AnimationValue] {
+    &scene.animation.values
+}
+/// Animation curves used by the canonical evaluator (unstable parity bridge).
+#[cfg(feature = "parity")]
+pub fn animation_curves<'a>(scene: &'a CanonScene<'_>) -> &'a [crate::AnimationCurve] {
+    &scene.animation.curves
+}
+/// Evaluate the full projection for comparison with the lean public API.
+#[cfg(feature = "parity")]
+pub fn evaluate_pose(
+    scene: &CanonScene<'_>,
+    stack: Option<usize>,
+    time: f64,
+) -> Result<crate::EvaluatedScene, crate::Error> {
+    scene.animation.evaluate(stack, time)
+}
+/// Evaluate one canonical binding for comparison with the public API.
+#[cfg(feature = "parity")]
+pub fn evaluate_binding(
+    scene: &CanonScene<'_>,
+    stack: Option<usize>,
+    binding: &crate::AnimationBinding,
+    time: f64,
+) -> Result<crate::EvaluatedProperty, crate::Error> {
+    Ok(scene.animation.property(
+        scene.animation.stack_layers(stack)?,
+        binding.element,
+        &binding.property,
+        time,
+    ))
 }

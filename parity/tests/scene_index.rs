@@ -215,7 +215,7 @@ Connections: {
     let legacy = index.unsupported.last().unwrap();
     assert_eq!(index.objects[legacy.object].id, 10);
 
-    // The converter now supports poses and nested shapes; the index keeps
+    // The converter now supports poses, nested shapes and animation; the index keeps
     // its compatibility tags, but the scene reports only unsupported content.
     let limits = fbx_rs::canon_scene::DumpLimits::default();
     let scene = fbx_rs::canon_scene::project(source.as_bytes(), &limits).unwrap();
@@ -231,7 +231,6 @@ Connections: {
             (Constraint, 8),
             (Audio, 9),
             (Audio, 11),
-            (AnimationStack, 12),
         ]
     );
     assert_eq!(
