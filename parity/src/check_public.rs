@@ -265,5 +265,470 @@ pub fn check(canon: &CanonScene<'_>, scene: &Scene) -> Result<u64, String> {
         scene.unsupported().len(),
         canon.unsupported.len(),
     )?;
+    let mut by_type = std::collections::BTreeMap::<T, Vec<usize>>::new();
+    for (i, e) in canon.elements.iter().enumerate() {
+        by_type.entry(e.ty).or_default().push(i);
+    }
+    let elems = by_type.get(&T::Bone).cloned().unwrap_or_default();
+    c.eq("bones count", scene.bones().len(), elems.len())?;
+    for (p, &i) in scene.bones().iter().zip(&elems) {
+        let e = &canon.elements[i];
+        c.eq(
+            "deformer name",
+            p.name.as_str(),
+            String::from_utf8_lossy(&e.name).as_ref(),
+        )?;
+        let source_id = if e.node.is_some_and(|n| canon.doc.nodes[n].name == b"Shape") {
+            None
+        } else {
+            e.source_id
+        };
+        c.eq("deformer source ID", p.source_id, source_id)?;
+        deformer_value(
+            &mut c,
+            &V::List(
+                p.instances
+                    .iter()
+                    .map(|&k| V::Ref(Some(by_type[&T::Node][k])))
+                    .collect(),
+            ),
+            match e.obj.get("element") {
+                Some(V::Obj(o)) => o.get("instances"),
+                _ => None,
+            }
+            .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::F(p.radius),
+            e.obj.get("radius").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::F(p.relative_length),
+            e.obj
+                .get("relative_length")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::Bool(p.is_root),
+            e.obj.get("is_root").ok_or("missing deformer record")?,
+        )?;
+    }
+    let elems = by_type.get(&T::SkinDeformer).cloned().unwrap_or_default();
+    c.eq(
+        "skin_deformers count",
+        scene.skin_deformers().len(),
+        elems.len(),
+    )?;
+    for (p, &i) in scene.skin_deformers().iter().zip(&elems) {
+        let e = &canon.elements[i];
+        c.eq(
+            "deformer name",
+            p.name.as_str(),
+            String::from_utf8_lossy(&e.name).as_ref(),
+        )?;
+        let source_id = if e.node.is_some_and(|n| canon.doc.nodes[n].name == b"Shape") {
+            None
+        } else {
+            e.source_id
+        };
+        c.eq("deformer source ID", p.source_id, source_id)?;
+        deformer_value(
+            &mut c,
+            &V::I(match p.skinning_method {
+                fbx_rs::SkinningMethod::Linear => 0,
+                fbx_rs::SkinningMethod::Rigid => 1,
+                fbx_rs::SkinningMethod::DualQuaternion => 2,
+                fbx_rs::SkinningMethod::BlendedDqLinear => 3,
+                _ => unreachable!(),
+            }),
+            e.obj
+                .get("skinning_method")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::List(
+                p.clusters
+                    .iter()
+                    .map(|&k| V::Ref(Some(by_type[&T::SkinCluster][k])))
+                    .collect(),
+            ),
+            e.obj.get("clusters").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::List(
+                p.vertices
+                    .iter()
+                    .map(|v| {
+                        V::Obj(
+                            Obj::new()
+                                .with("weight_begin", V::U(v.weight_begin as u64))
+                                .with("num_weights", V::U(v.num_weights as u64))
+                                .with("dq_weight", V::F(v.dq_weight)),
+                        )
+                    })
+                    .collect(),
+            ),
+            e.obj.get("vertices").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::List(
+                p.weights
+                    .iter()
+                    .map(|v| {
+                        V::Obj(
+                            Obj::new()
+                                .with("cluster_index", V::U(v.cluster_index as u64))
+                                .with("weight", V::F(v.weight)),
+                        )
+                    })
+                    .collect(),
+            ),
+            e.obj.get("weights").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::U(p.max_weights_per_vertex as u64),
+            e.obj
+                .get("max_weights_per_vertex")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::List(p.dq_vertices.iter().map(|&v| V::U(v.into())).collect()),
+            e.obj.get("dq_vertices").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::F64s(p.dq_weights.clone()),
+            e.obj.get("dq_weights").ok_or("missing deformer record")?,
+        )?;
+    }
+    let elems = by_type.get(&T::SkinCluster).cloned().unwrap_or_default();
+    c.eq(
+        "skin_clusters count",
+        scene.skin_clusters().len(),
+        elems.len(),
+    )?;
+    for (p, &i) in scene.skin_clusters().iter().zip(&elems) {
+        let e = &canon.elements[i];
+        c.eq(
+            "deformer name",
+            p.name.as_str(),
+            String::from_utf8_lossy(&e.name).as_ref(),
+        )?;
+        let source_id = if e.node.is_some_and(|n| canon.doc.nodes[n].name == b"Shape") {
+            None
+        } else {
+            e.source_id
+        };
+        c.eq("deformer source ID", p.source_id, source_id)?;
+        deformer_value(
+            &mut c,
+            &V::Ref(p.bone_node.map(|k| by_type[&T::Node][k])),
+            e.obj.get("bone_node").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::Vec(p.geometry_to_bone.0.to_vec()),
+            e.obj
+                .get("geometry_to_bone")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::Vec(p.mesh_node_to_bone.0.to_vec()),
+            e.obj
+                .get("mesh_node_to_bone")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::Vec(p.bind_to_world.0.to_vec()),
+            e.obj
+                .get("bind_to_world")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::Vec(p.geometry_to_world.0.to_vec()),
+            e.obj
+                .get("geometry_to_world")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::Obj(
+                Obj::new()
+                    .with(
+                        "translation",
+                        V::Vec(p.geometry_to_world_transform.translation.to_vec()),
+                    )
+                    .with(
+                        "rotation",
+                        V::Vec(p.geometry_to_world_transform.rotation.to_vec()),
+                    )
+                    .with(
+                        "scale",
+                        V::Vec(p.geometry_to_world_transform.scale.to_vec()),
+                    ),
+            ),
+            e.obj
+                .get("geometry_to_world_transform")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::List(p.vertices.iter().map(|&v| V::U(v.into())).collect()),
+            e.obj.get("vertices").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::F64s(p.weights.clone()),
+            e.obj.get("weights").ok_or("missing deformer record")?,
+        )?;
+    }
+    let elems = by_type.get(&T::BlendDeformer).cloned().unwrap_or_default();
+    c.eq(
+        "blend_deformers count",
+        scene.blend_deformers().len(),
+        elems.len(),
+    )?;
+    for (p, &i) in scene.blend_deformers().iter().zip(&elems) {
+        let e = &canon.elements[i];
+        c.eq(
+            "deformer name",
+            p.name.as_str(),
+            String::from_utf8_lossy(&e.name).as_ref(),
+        )?;
+        let source_id = if e.node.is_some_and(|n| canon.doc.nodes[n].name == b"Shape") {
+            None
+        } else {
+            e.source_id
+        };
+        c.eq("deformer source ID", p.source_id, source_id)?;
+        deformer_value(
+            &mut c,
+            &V::List(
+                p.channels
+                    .iter()
+                    .map(|&k| V::Ref(Some(by_type[&T::BlendChannel][k])))
+                    .collect(),
+            ),
+            e.obj.get("channels").ok_or("missing deformer record")?,
+        )?;
+    }
+    let elems = by_type.get(&T::BlendChannel).cloned().unwrap_or_default();
+    c.eq(
+        "blend_channels count",
+        scene.blend_channels().len(),
+        elems.len(),
+    )?;
+    for (p, &i) in scene.blend_channels().iter().zip(&elems) {
+        let e = &canon.elements[i];
+        c.eq(
+            "deformer name",
+            p.name.as_str(),
+            String::from_utf8_lossy(&e.name).as_ref(),
+        )?;
+        let source_id = if e.node.is_some_and(|n| canon.doc.nodes[n].name == b"Shape") {
+            None
+        } else {
+            e.source_id
+        };
+        c.eq("deformer source ID", p.source_id, source_id)?;
+        deformer_value(
+            &mut c,
+            &V::F(p.weight),
+            e.obj.get("weight").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::List(
+                p.keyframes
+                    .iter()
+                    .map(|v| {
+                        V::Obj(
+                            Obj::new()
+                                .with("shape", V::Ref(Some(by_type[&T::BlendShape][v.shape])))
+                                .with("target_weight", V::F(v.target_weight))
+                                .with("effective_weight", V::F(v.effective_weight)),
+                        )
+                    })
+                    .collect(),
+            ),
+            e.obj.get("keyframes").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::Ref(p.target_shape.map(|k| by_type[&T::BlendShape][k])),
+            e.obj.get("target_shape").ok_or("missing deformer record")?,
+        )?;
+    }
+    let elems = by_type.get(&T::BlendShape).cloned().unwrap_or_default();
+    c.eq(
+        "blend_shapes count",
+        scene.blend_shapes().len(),
+        elems.len(),
+    )?;
+    for (p, &i) in scene.blend_shapes().iter().zip(&elems) {
+        let e = &canon.elements[i];
+        c.eq(
+            "deformer name",
+            p.name.as_str(),
+            String::from_utf8_lossy(&e.name).as_ref(),
+        )?;
+        let source_id = if e.node.is_some_and(|n| canon.doc.nodes[n].name == b"Shape") {
+            None
+        } else {
+            e.source_id
+        };
+        c.eq("deformer source ID", p.source_id, source_id)?;
+        deformer_value(
+            &mut c,
+            &V::List(p.offset_vertices.iter().map(|&v| V::U(v.into())).collect()),
+            e.obj
+                .get("offset_vertices")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::List(
+                p.position_offsets
+                    .iter()
+                    .map(|v| V::Vec(v.to_vec()))
+                    .collect(),
+            ),
+            e.obj
+                .get("position_offsets")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::List(
+                p.normal_offsets
+                    .iter()
+                    .map(|v| V::Vec(v.to_vec()))
+                    .collect(),
+            ),
+            e.obj
+                .get("normal_offsets")
+                .ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::F64s(p.offset_weights.clone()),
+            e.obj
+                .get("offset_weights")
+                .ok_or("missing deformer record")?,
+        )?;
+    }
+    let elems = by_type.get(&T::Pose).cloned().unwrap_or_default();
+    c.eq("poses count", scene.poses().len(), elems.len())?;
+    for (p, &i) in scene.poses().iter().zip(&elems) {
+        let e = &canon.elements[i];
+        c.eq(
+            "deformer name",
+            p.name.as_str(),
+            String::from_utf8_lossy(&e.name).as_ref(),
+        )?;
+        let source_id = if e.node.is_some_and(|n| canon.doc.nodes[n].name == b"Shape") {
+            None
+        } else {
+            e.source_id
+        };
+        c.eq("deformer source ID", p.source_id, source_id)?;
+        deformer_value(
+            &mut c,
+            &V::Bool(p.is_bind_pose),
+            e.obj.get("is_bind_pose").ok_or("missing deformer record")?,
+        )?;
+        deformer_value(
+            &mut c,
+            &V::List(
+                p.bone_poses
+                    .iter()
+                    .map(|v| {
+                        V::Obj(
+                            Obj::new()
+                                .with("bone_node", V::Ref(Some(by_type[&T::Node][v.bone_node])))
+                                .with("bone_to_world", V::Vec(v.bone_to_world.0.to_vec()))
+                                .with("bone_to_parent", V::Vec(v.bone_to_parent.0.to_vec())),
+                        )
+                    })
+                    .collect(),
+            ),
+            e.obj.get("bone_poses").ok_or("missing deformer record")?,
+        )?;
+    }
+    for (mesh, &i) in scene
+        .meshes()
+        .iter()
+        .zip(by_type.get(&T::Mesh).into_iter().flatten())
+    {
+        for (indices, ty, name) in [
+            (mesh.skin_deformers(), T::SkinDeformer, "skin_deformers"),
+            (mesh.blend_deformers(), T::BlendDeformer, "blend_deformers"),
+        ] {
+            let v = V::List(
+                indices
+                    .iter()
+                    .map(|&k| V::Ref(Some(by_type[&ty][k])))
+                    .collect(),
+            );
+            deformer_value(
+                &mut c,
+                &v,
+                canon.elements[i]
+                    .obj
+                    .get(name)
+                    .ok_or("missing mesh deformers")?,
+            )?;
+        }
+    }
+    for (node, &i) in scene.nodes().iter().zip(&by_type[&T::Node]) {
+        for (index, ty, name) in [
+            (node.bone(), T::Bone, "bone"),
+            (node.bind_pose(), T::Pose, "bind_pose"),
+        ] {
+            let v = V::Ref(index.map(|k| by_type[&ty][k]));
+            deformer_value(
+                &mut c,
+                &v,
+                canon.elements[i].obj.get(name).unwrap_or(&V::Ref(None)),
+            )?;
+        }
+    }
     Ok(c.values)
+}
+
+fn deformer_value(c: &mut Check, a: &V, b: &V) -> Result<(), String> {
+    match (a, b) {
+        (V::F(a), V::F(b)) => c.f("deformer float", &[*a], &[*b]),
+        (V::Vec(a), V::Vec(b)) | (V::F64s(a), V::F64s(b)) => c.f("deformer array", a, b),
+        (V::List(a), V::List(b)) => {
+            c.eq("deformer list length", a.len(), b.len())?;
+            for (a, b) in a.iter().zip(b) {
+                deformer_value(c, a, b)?;
+            }
+            Ok(())
+        }
+        (V::Obj(a), V::Obj(b)) => {
+            for (k, v) in &a.0 {
+                deformer_value(
+                    c,
+                    v,
+                    b.get(k)
+                        .ok_or_else(|| format!("missing deformer field {k}"))?,
+                )?;
+            }
+            Ok(())
+        }
+        _ => c.eq("deformer value", a, b),
+    }
 }

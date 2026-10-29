@@ -10,7 +10,7 @@ Both sides write the same canonical text format, `fbx-scene-canon/1`
 ([reference/SCHEMA.md](../reference/SCHEMA.md)): JSON Lines with a fixed
 member order, every floating-point value written as its exact bit pattern,
 and sections for settings, the retained DOM, elements, connections, the node
-graph, meshes, materials, cameras and lights, evaluated transforms and
+graph, meshes, stored skins and blend shapes, materials, cameras and lights, evaluated transforms and
 triangles.
 
 - The oracle is `reference/canon.c`, linked against the hash-pinned ufbx C
@@ -30,13 +30,15 @@ triangles.
     arrays). Such a difference is accepted only when the oracle's DOM array
     equals, bit for bit, the oracle's own converted mesh data. This is proved
     per array.
-  - Rig or animation content: skins, blend shapes, animation curves and
-    evaluation, and list entries that only such content creates. fbx-rs does
-    not convert these yet.
+  - Animation content: animation curves and evaluation, and list entries
+    that only animation creates. fbx-rs does not convert these yet. Stored
+    skin, blend-shape and pose records are compared without this exemption.
+    Retained shape-array mutations require bit identity with the oracle's
+    own loaded offsets.
   - Unexplained: anything else. The target is zero.
 - `fbx-parity check-public` then compares every value the public `Scene`
-  exposes (nodes, transforms, meshes, material maps, texture content,
-  cameras, lights, counts) with the canonical records of the same file, bit
+  exposes (nodes, transforms, meshes, bones, skins, poses, blend shapes,
+  material maps, texture content, cameras, lights, counts) with the canonical records of the same file, bit
   for bit, so the public API and the compared stream cannot drift apart.
 - The syntax layer is checked separately: `reference/dom_equivalence.py`
   projects the parser's node/property tree onto ufbx's retained DOM (the
@@ -69,14 +71,16 @@ On ufbx 0.23.1 with the options above:
 
 | Check | Result |
 | --- | --- |
-| Static files (no rig or animation tags) | 306 of 306 equal: 43 with no difference at all, 263 differing only by proved in-place DOM mutation (460 arrays) |
-| Files with rigs or animation | 10, differing only in that content |
+| Original static files (no rig or animation tags) | 306 of 306 equal: 43 with no difference at all, 263 differing only by proved in-place DOM mutation (460 arrays) |
+| Stored skin and blend-shape records | 7 of 7 rig files bit-exact, including both FBX 7.1 nested-shape encodings |
+| Whole-file classification | 308 equal (including proved DOM mutation), 8 differing only in animation |
+| Previously deferred files now fully equal | half-skinned mesh and synthetic blend-shape ordering regression |
 | Unexplained differences | 0 files |
 | Rejected (FBX 6.1 and older) | 24 |
-| Public `Scene` against canonical records | 316 of 316 files equal, 3,383,142 values |
+| Public `Scene` against canonical records | 316 of 316 files equal, 3,391,950 values |
 | Syntax layer against ufbx's retained DOM | 315 equal, 1 explained (ufbx sorts blend-shape offsets in place), 0 failing |
 | Unsupported-object report against oracle counts | 316 files, 0 mismatches |
-| wasm32 | canonical dumps and `Scene` contents identical to native on three corpus files (Wasmtime) |
+| wasm32 | canonical dumps and `Scene` contents identical to native on one skinned and two morph fixtures, including a nested-shape file (Wasmtime); default-feature library build passes |
 
 ## Robustness
 
@@ -99,13 +103,18 @@ crash, timeout or memory-limit failure in any target):
 | `scene_dom` | 120.0 | 10.7 M | 8588 | 120-minute cap, coverage still growing | 109 MiB |
 | `load` | 120.0 | 122.4 M | 6342 | 120-minute cap, coverage still growing | 109 MiB |
 
+The fuzz runs above preceded the deformer additions. The `load` target now
+checks deformer references and influence ranges too, but it was not run for
+this change; malformed deformer regression tests were run instead.
+
 `scene_dom` and `load` reached the cap before their coverage went flat, so
 longer runs can still find new paths in the converter.
 
 ## Not covered
 
-- Skins, blend shapes and animation: detected and reported, not converted or
-  compared.
+- Animation curves and evaluation: detected and reported, not converted.
+  Mesh positions stay undeformed; the API exposes stored influences and
+  offsets for callers to apply.
 - Camera and light modes the corpus does not contain: only three files carry
   cameras or lights. The other aperture, gate-fit and aspect branches are
   ported but not exercised.
