@@ -1,0 +1,43 @@
+[package]
+name = "fbx-syntax-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+fbx-rs = { path = "..", features = ["parity"] }
+
+[[bin]]
+name = "binary"
+path = "fuzz_targets/binary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ascii"
+path = "fuzz_targets/ascii.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "scene_dom"
+path = "fuzz_targets/scene_dom.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load"
+path = "fuzz_targets/load.rs"
+test = false
+doc = false
+bench = false

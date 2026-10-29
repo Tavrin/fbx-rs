@@ -1,0 +1,634 @@
+{
+  "schema": "fbx-load-options/1",
+  "profile": "historical-raw",
+  "defaults": "zero values select defaults in the hash-pinned C implementation; fn=true is deny_open; all other callbacks/users null",
+  "fields": [
+    {
+      "kind": "field",
+      "path": "/options/temp_allocator/allocator/alloc_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/temp_allocator/allocator/realloc_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/temp_allocator/allocator/free_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/temp_allocator/allocator/free_allocator_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/temp_allocator/allocator/user",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/temp_allocator/memory_limit",
+      "value": {
+        "u64": "4294967296"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/temp_allocator/allocation_limit",
+      "value": {
+        "u64": "16777216"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/temp_allocator/huge_threshold",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/temp_allocator/max_chunk_size",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/result_allocator/allocator/alloc_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/result_allocator/allocator/realloc_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/result_allocator/allocator/free_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/result_allocator/allocator/free_allocator_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/result_allocator/allocator/user",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/result_allocator/memory_limit",
+      "value": {
+        "u64": "4294967296"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/result_allocator/allocation_limit",
+      "value": {
+        "u64": "16777216"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/result_allocator/huge_threshold",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/result_allocator/max_chunk_size",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/thread_opts/pool/init_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/thread_opts/pool/run_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/thread_opts/pool/wait_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/thread_opts/pool/free_fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/thread_opts/pool/user",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/thread_opts/num_tasks",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/thread_opts/memory_limit",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/ignore_geometry",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/ignore_animation",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/ignore_embedded",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/ignore_all_content",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/evaluate_skinning",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/evaluate_caches",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/load_external_files",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/ignore_missing_external_files",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/skip_skin_vertices",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/skip_mesh_parts",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/clean_skin_weights",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/disable_quirks",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/strict",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/force_single_thread_ascii_parsing",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/allow_unsafe",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/index_error_handling",
+      "value": {
+        "enum": "ufbx_index_error_handling",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/connect_broken_elements",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/allow_nodes_out_of_root",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/allow_missing_vertex_position",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/allow_empty_faces",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/generate_missing_normals",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/open_main_file_with_default",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/path_separator",
+      "value": {
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/node_depth_limit",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/file_size_estimate",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/read_buffer_size",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/filename",
+      "value": {
+        "length": "0",
+        "bytes_hex": ""
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/raw_filename",
+      "value": {
+        "type": "blob",
+        "length": "0",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/progress_cb/fn",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/progress_cb/user",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/progress_interval_hint",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/open_file_cb/fn",
+      "value": true
+    },
+    {
+      "kind": "field",
+      "path": "/options/open_file_cb/user",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/geometry_transform_handling",
+      "value": {
+        "enum": "ufbx_geometry_transform_handling",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/inherit_mode_handling",
+      "value": {
+        "enum": "ufbx_inherit_mode_handling",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/pivot_handling",
+      "value": {
+        "enum": "ufbx_pivot_handling",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/space_conversion",
+      "value": {
+        "enum": "ufbx_space_conversion",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/handedness_conversion_axis",
+      "value": {
+        "enum": "ufbx_mirror_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/handedness_conversion_retain_winding",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/reverse_winding",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_axes/right",
+      "value": {
+        "enum": "ufbx_coordinate_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_axes/up",
+      "value": {
+        "enum": "ufbx_coordinate_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_axes/front",
+      "value": {
+        "enum": "ufbx_coordinate_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_unit_meters",
+      "value": {
+        "f64": "0000000000000000"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_camera_axes/right",
+      "value": {
+        "enum": "ufbx_coordinate_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_camera_axes/up",
+      "value": {
+        "enum": "ufbx_coordinate_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_camera_axes/front",
+      "value": {
+        "enum": "ufbx_coordinate_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_light_axes/right",
+      "value": {
+        "enum": "ufbx_coordinate_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_light_axes/up",
+      "value": {
+        "enum": "ufbx_coordinate_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/target_light_axes/front",
+      "value": {
+        "enum": "ufbx_coordinate_axis",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/geometry_transform_helper_name",
+      "value": {
+        "length": "0",
+        "bytes_hex": ""
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/scale_helper_name",
+      "value": {
+        "length": "0",
+        "bytes_hex": ""
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/normalize_normals",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/normalize_tangents",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/use_root_transform",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/root_transform/translation",
+      "value": {
+        "vec3": [
+          {
+            "f64": "0000000000000000"
+          },
+          {
+            "f64": "0000000000000000"
+          },
+          {
+            "f64": "0000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/root_transform/rotation",
+      "value": {
+        "quat": [
+          {
+            "f64": "0000000000000000"
+          },
+          {
+            "f64": "0000000000000000"
+          },
+          {
+            "f64": "0000000000000000"
+          },
+          {
+            "f64": "0000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/root_transform/scale",
+      "value": {
+        "vec3": [
+          {
+            "f64": "0000000000000000"
+          },
+          {
+            "f64": "0000000000000000"
+          },
+          {
+            "f64": "0000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/key_clamp_threshold",
+      "value": {
+        "f64": "0000000000000000"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/unicode_error_handling",
+      "value": {
+        "enum": "ufbx_unicode_error_handling",
+        "i64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/retain_dom",
+      "value": true
+    },
+    {
+      "kind": "field",
+      "path": "/options/file_format",
+      "value": {
+        "enum": "ufbx_file_format",
+        "i64": "1"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/file_format_lookahead",
+      "value": {
+        "u64": "0"
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/no_format_from_content",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/no_format_from_extension",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/obj_search_mtl_by_filename",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/obj_merge_objects",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/obj_merge_groups",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/obj_split_groups",
+      "value": false
+    },
+    {
+      "kind": "field",
+      "path": "/options/obj_mtl_path",
+      "value": {
+        "length": "0",
+        "bytes_hex": ""
+      }
+    },
+    {
+      "kind": "field",
+      "path": "/options/obj_mtl_data",
+      "value": {
+        "type": "blob",
+        "length": "0",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "section_sha256": "00222c24013890717b39c5e6bd202778138b2338fb38b564ad5728bb41ff9e43"
+}

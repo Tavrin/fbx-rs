@@ -1,0 +1,17 @@
+[package]
+name = "fbx-parity"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Canonical scene dump, validators and comparators for differential tests of fbx-rs against the pinned ufbx oracle"
+
+[[bin]]
+name = "fbx-parity"
+path = "src/main.rs"
+
+[dependencies]
+fbx-rs = { path = "..", features = ["parity"] }
+serde = "1"
+serde_json = "1"
+sha2 = "0.10"

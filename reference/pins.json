@@ -1,0 +1,16 @@
+{
+  "historical-raw": {
+    "version": "0.11.0",
+    "commit": "5d61cfce6272523f7a51b9d8580e156b352e1247",
+    "ufbx.c": "db1abd472eaab02b5d5a7b66193ce12552bd8c3287354a6ef4914022f05ae381",
+    "ufbx.h": "a9826f2f78e44f06c0e87ab4e3ebfcea8fbcf34d838c52c17c76301477851acd"
+  },
+  "engine-converted": {
+    "version": "0.23.1",
+    "crate_version": "0.11.5",
+    "crate_sha256": "260522f1eb74139f0e78b29dd82a58e5437d728c5498024a39e5af7282694240",
+    "ufbx.c": "4a956c26a708e40d82ecb0aeaee54da709d5ba7c144c9642174970059bda7e1d",
+    "ufbx.h": "f787be529af577efc04f3e3e735844a08556718dbb613d1211c2b313d72895dc",
+    "profile_source_sha256":"b424c5fc9dfa255e02bb0b070afce3785288061f5c993a035d7bd2dd05752803"
+  }
+}
