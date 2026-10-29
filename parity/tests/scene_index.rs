@@ -164,7 +164,7 @@ Connections: { }
 
 #[test]
 fn reports_every_unsupported_kind_on_the_scene() {
-    let source = r#"; FBX 7.4.0
+    let source = r#"; FBX 7.1.0
 Objects: {
  Geometry: 10, "Geometry::M", "Mesh" {
   Vertices: *9 { a: 0,0,0,1,0,0,0,1,0 }

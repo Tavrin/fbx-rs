@@ -1,7 +1,8 @@
 # Verification
 
-fbx-rs claims that, for the static content it converts, it returns the same
-values as ufbx 0.23.1 loaded with the same import options. This page says how
+For the static content it converts, fbx-rs targets the same values as
+ufbx 0.23.1 loaded with the same import options, with the deliberate edge
+case differences below. This page says how
 that is checked, on which files, with what result, and what is not covered.
 
 ## How equivalence with ufbx is checked
@@ -106,6 +107,37 @@ crash, timeout or memory-limit failure in any target):
 The fuzz runs above preceded the deformer additions. The `load` target now
 checks deformer references and influence ranges too, but it was not run for
 this change; malformed deformer regression tests were run instead.
+
+Deformer arrays are charged from their source counts before decoding,
+including intermediate array storage. Adjacency is charged before building
+it. Connection deduplication preserves first occurrence using an indexed
+set; pose IDs, parent entries, depths and cluster lookups use index maps.
+Traversal and sorting also consume `Limits::max_deformer_work` (default
+268,435,456 units); excessive work returns an error. Regression tests cover
+both byte orders of wide binary indices, allocation prechecks, duplicate
+connections, a reversed pose chain, and multiple static meshes with a nested
+shape. These stage budgets are not a process RSS limit.
+
+## Deliberate differences from ufbx
+
+- An integer outside the signed 32-bit index range becomes an invalid index
+  sentinel and sparse deformer conversion returns an error. ufbx 0.23.1's
+  binary array conversion casts a 64-bit integer to 32 bits, so an invalid
+  value such as 4,294,967,296 can alias vertex zero. Representable indices
+  retain their values. Invalid/missing pose IDs and malformed deformer
+  counts also return errors rather than silently dropping data.
+- Blender `FullWeights` follow the same stable permutation as their shape's
+  offsets. Source indices `[2, 0]` and weights `[20, 80]` therefore produce
+  indices `[0, 2]` and weights `[0.8, 0.2]`. ufbx 0.23.1 sorts the offsets in
+  `ufbxi_read_shape` but later copies these weights in source order in
+  `ufbxi_finalize_scene`, yielding `[0.2, 0.8]` for this case. Preserving the
+  weight-to-offset association is intentional; already sorted Blender
+  shapes and the seven corpus rig files retain bit-exact stored deformers.
+
+The rig comparison checks element names, IDs, properties, flags and
+connections as well as deformer payloads. Its only exclusions inside element
+metadata are the animation-property count and the ANIMATED flag bit on
+animated inputs. Other flag bits and static metadata remain compared.
 
 `scene_dom` and `load` reached the cap before their coverage went flat, so
 longer runs can still find new paths in the converter.

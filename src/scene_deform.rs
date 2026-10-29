@@ -2,11 +2,12 @@
 //! read_skin(_cluster), read_shape, finalize_scene, update_initial_clusters,
 //! update_pose, update_skin_cluster and update_blend_channel.
 use crate::canon::{Obj, V};
-use crate::canon_dom::{node_data, NodeData, Scalar};
+use crate::canon_dom::{data_len, node_data, NodeData, Scalar};
 use crate::canon_scene::{CanonScene, DumpLimits, ElementType as T};
 use crate::deform::*;
 use crate::scene_node as sn;
 use crate::{Matrix, Transform};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
 pub(crate) struct Deformers {
@@ -22,8 +23,50 @@ struct Reader<'a, 'd> {
     children: Vec<Vec<usize>>,
     used: std::cell::Cell<usize>,
     limit: usize,
+    work: std::cell::Cell<usize>,
+    work_limit: usize,
 }
 impl Reader<'_, '_> {
+    fn new<'a, 'd>(s: &'a CanonScene<'d>, limits: &DumpLimits) -> Result<Reader<'a, 'd>, String> {
+        let mut r = Reader {
+            s,
+            children: Vec::new(),
+            used: std::cell::Cell::new(0),
+            limit: limits.max_allocation,
+            work: std::cell::Cell::new(0),
+            work_limit: limits.max_deformer_work,
+        };
+        // Outer adjacency, child counts, and at most twice the child entries
+        // for Vec growth, before constructing any of the adjacency table.
+        r.charge(s.doc.nodes.len(), std::mem::size_of::<Vec<usize>>() + 32)?;
+        r.work(s.doc.nodes.len())?;
+        r.children = vec![Vec::new(); s.doc.nodes.len()];
+        for (i, n) in s.doc.nodes.iter().enumerate() {
+            if let Some(p) = n.parent {
+                r.children[p].push(i);
+            }
+        }
+        Ok(r)
+    }
+    fn work(&self, count: usize) -> Result<(), String> {
+        let used = self
+            .work
+            .get()
+            .checked_add(count)
+            .ok_or("deformer: work limit")?;
+        if used > self.work_limit {
+            return Err("deformer: work limit".into());
+        }
+        self.work.set(used);
+        Ok(())
+    }
+    fn sort_work(&self, count: usize) -> Result<(), String> {
+        self.work(
+            count
+                .checked_mul((usize::BITS - count.leading_zeros()) as usize + 1)
+                .ok_or("deformer: work limit")?,
+        )
+    }
     fn charge(&self, count: usize, width: usize) -> Result<(), String> {
         let used = count
             .checked_mul(width)
@@ -41,25 +84,35 @@ impl Reader<'_, '_> {
             .copied()
             .find(|&c| self.s.doc.nodes[c].name == name)
     }
-    fn data(&self, n: usize, name: &[u8]) -> Option<NodeData> {
-        self.child(n, name)
-            .map(|c| node_data(&self.s.doc, c, self.s.ascii))
+    fn data(&self, n: usize, name: &[u8]) -> Result<Option<NodeData>, String> {
+        self.work(self.children[n].len())?;
+        let Some(c) = self.child(n, name) else {
+            return Ok(None);
+        };
+        let count = data_len(&self.s.doc, c)?;
+        // Covers the ASCII token/number/encoded-byte temporaries, decoded
+        // array, derived offsets/influences and stable-sort scratch. Charge
+        // from the source count BEFORE node_data materializes any of them.
+        self.charge(count, 128)?;
+        for p in &self.s.doc.properties[self.s.doc.nodes[c].properties.clone()] {
+            if let crate::syntax::Property::String(v) = p {
+                self.charge(v.len(), 8)?;
+            }
+        }
+        self.work(count)?;
+        Ok(Some(node_data(&self.s.doc, c, self.s.ascii)))
     }
     fn reals(&self, n: usize, name: &[u8]) -> Result<Vec<f64>, String> {
-        match self.data(n, name) {
+        match self.data(n, name)? {
             None => Ok(Vec::new()),
-            Some(NodeData::Reals(v)) if v.iter().all(|x| x.is_finite()) => {
-                self.charge(v.len(), 32)?;
-                Ok(v)
-            }
+            Some(NodeData::Reals(v)) if v.iter().all(|x| x.is_finite()) => Ok(v),
             _ => Err(format!("deformer: invalid real array at {n}")),
         }
     }
     fn indices(&self, n: usize, name: &[u8]) -> Result<Vec<u32>, String> {
-        match self.data(n, name) {
+        match self.data(n, name)? {
             None => Ok(Vec::new()),
             Some(NodeData::Ints(v)) if v.iter().all(|&x| x >= 0) => {
-                self.charge(v.len(), 16)?;
                 Ok(v.into_iter().map(|x| x as u32).collect())
             }
             _ => Err(format!("deformer: invalid index array at {n}")),
@@ -75,41 +128,42 @@ impl Reader<'_, '_> {
         }
         Ok(std::array::from_fn(|i| v[i / 3 * 4 + i % 3]))
     }
-    fn dst(&self, i: usize, ty: T) -> Vec<usize> {
+    fn connected(&self, conns: &[(usize, Vec<u8>)], ty: T) -> Result<Vec<usize>, String> {
+        self.sort_work(conns.len())?;
+        self.charge(conns.len(), 80)?;
         let mut out = Vec::new();
-        for (k, p) in &self.s.elements[i].dst_conns {
-            if p.is_empty() && self.s.elements[*k].ty == ty && !out.contains(k) {
+        let mut seen = BTreeSet::new();
+        for (k, p) in conns {
+            if p.is_empty() && self.s.elements[*k].ty == ty && seen.insert(*k) {
                 out.push(*k);
             }
         }
-        out
+        Ok(out)
     }
-    fn src(&self, i: usize, ty: T) -> Vec<usize> {
-        let mut out = Vec::new();
-        for (k, p) in &self.s.elements[i].src_conns {
-            if p.is_empty() && self.s.elements[*k].ty == ty && !out.contains(k) {
-                out.push(*k);
-            }
-        }
-        out
+    fn dst(&self, i: usize, ty: T) -> Result<Vec<usize>, String> {
+        self.connected(&self.s.elements[i].dst_conns, ty)
     }
-    fn mesh_targets(&self, i: usize) -> Vec<usize> {
-        let mut out = self.src(i, T::Mesh);
-        for node in self.src(i, T::Node) {
-            out.extend(self.dst(node, T::Mesh));
+    fn src(&self, i: usize, ty: T) -> Result<Vec<usize>, String> {
+        self.connected(&self.s.elements[i].src_conns, ty)
+    }
+    fn mesh_targets(&self, i: usize) -> Result<Vec<usize>, String> {
+        let mut out = self.src(i, T::Mesh)?;
+        for node in self.src(i, T::Node)? {
+            let meshes = self.dst(node, T::Mesh)?;
+            self.charge(meshes.len(), 16)?;
+            out.extend(meshes);
         }
-        out
+        Ok(out)
     }
     fn num_vertices(&self, mesh: usize) -> Result<usize, String> {
-        Ok(self
-            .reals(
-                self.s.elements[mesh]
-                    .node
-                    .ok_or("deformer: mesh has no source")?,
-                b"Vertices",
-            )?
-            .len()
-            / 3)
+        let n = self.s.elements[mesh]
+            .node
+            .ok_or("deformer: mesh has no source")?;
+        self.work(self.children[n].len())?;
+        // Mesh conversion already validates these values. Count without
+        // copying the whole mesh again for every cluster/shape.
+        self.child(n, b"Vertices")
+            .map_or(Ok(0), |c| data_len(&self.s.doc, c).map(|n| n / 3))
     }
     fn source_id(&self, i: usize) -> Option<i64> {
         let e = &self.s.elements[i];
@@ -119,8 +173,9 @@ impl Reader<'_, '_> {
             e.source_id
         }
     }
-    fn name(&self, i: usize) -> String {
-        String::from_utf8_lossy(&self.s.elements[i].name).into_owned()
+    fn name(&self, i: usize) -> Result<String, String> {
+        self.charge(self.s.elements[i].name.len(), 3)?;
+        Ok(String::from_utf8_lossy(&self.s.elements[i].name).into_owned())
     }
 }
 fn refs(v: &[usize]) -> V {
@@ -179,20 +234,10 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
     }) {
         return Ok(());
     }
-    let mut children = vec![Vec::new(); s.doc.nodes.len()];
-    for (i, n) in s.doc.nodes.iter().enumerate() {
-        if let Some(p) = n.parent {
-            children[p].push(i);
-        }
-    }
-    let r = Reader {
-        s,
-        children,
-        used: std::cell::Cell::new(0),
-        limit: limits.max_allocation,
-    };
-    r.charge(s.doc.nodes.len(), std::mem::size_of::<Vec<usize>>() + 8)?;
-    r.charge(s.elements.len(), 64)?;
+    let r = Reader::new(s, limits)?;
+    // Element-indexed maps, traversal stacks and typed record headers.
+    r.charge(s.elements.len(), 1024)?;
+    r.work(s.elements.len())?;
     // Reject deformer-only cycles, including unconnected cycles, without recursion.
     let mut color = vec![0u8; s.elements.len()];
     for start in 0..s.elements.len() {
@@ -213,6 +258,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 continue;
             }
             let (k, p) = &conns[*next];
+            r.work(1)?;
             *next += 1;
             if !p.is_empty()
                 || !matches!(
@@ -270,6 +316,45 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 }
             })
         };
+    let mut by_source = BTreeMap::new();
+    r.sort_work(s.elements.len())?;
+    for (k, e) in s.elements.iter().enumerate() {
+        if e.ty == T::Node {
+            if let Some(id) = e.source_id {
+                by_source.entry(id).or_insert(k);
+            }
+        }
+    }
+    // Memoize parent depth once. Each node is walked at most twice, even
+    // for deep chains and multiple poses; sorting never walks ancestors.
+    let mut depths: Vec<Option<usize>> = vec![None; s.elements.len()];
+    let mut visiting = vec![false; s.elements.len()];
+    let mut path = Vec::new();
+    for start in 0..s.elements.len() {
+        if s.elements[start].ty != T::Node || depths[start].is_some() {
+            continue;
+        }
+        let mut at = Some(start);
+        while let Some(k) = at {
+            r.work(1)?;
+            if depths[k].is_some() {
+                break;
+            }
+            if visiting[k] {
+                return Err("pose: parent cycle".into());
+            }
+            visiting[k] = true;
+            path.push(k);
+            at = parent_of(k);
+        }
+        let depth = at.and_then(|k| depths[k]).map_or(0, |d| d + 1);
+        for (depth, k) in (depth..).zip(path.drain(..).rev()) {
+            depths[k] = Some(depth);
+            visiting[k] = false;
+        }
+    }
+    let mut first_bind = vec![None; s.elements.len()];
+    let mut pose_bone = vec![None; s.elements.len()];
     let mut pose_ids: Vec<usize> = s
         .elements
         .iter()
@@ -277,6 +362,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         .filter(|(_, e)| e.ty == T::Pose)
         .map(|(i, _)| i)
         .collect();
+    r.sort_work(pose_ids.len())?;
     pose_ids.sort_by_key(|&i| s.elements[i].ordinal);
     for i in pose_ids {
         let e = &s.elements[i];
@@ -284,28 +370,28 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         let props = &s.doc.properties[s.doc.nodes[n].properties.clone()];
         let bind = matches!(props.get(2),Some(crate::syntax::Property::String(v)) if v.as_ref()==b"BindPose");
         let mut bones = Vec::new();
+        r.charge(r.children[n].len(), std::mem::size_of::<BonePose>() * 3)?;
+        r.work(r.children[n].len())?;
         for &pn in &r.children[n] {
             if s.doc.nodes[pn].name != b"PoseNode" {
                 continue;
             }
-            let id = match r.data(pn, b"Node") {
+            let id = match r.data(pn, b"Node")? {
                 Some(NodeData::Values(v)) => match v.first() {
                     Some(Scalar::Num(x, _)) => *x,
                     _ => return Err("pose: invalid node".into()),
                 },
                 _ => return Err("pose: missing node".into()),
             };
-            let k = s
-                .elements
-                .iter()
-                .position(|e| e.source_id == Some(id) && e.ty == T::Node)
-                .ok_or("pose: invalid node ID")?;
+            r.work((usize::BITS - by_source.len().leading_zeros()) as usize + 1)?;
+            let k = by_source.get(&id).copied().ok_or("pose: invalid node ID")?;
             if r.child(pn, b"Matrix").is_none() {
                 return Err("pose: missing matrix".into());
             }
             let m = convert_bind(r.matrix(pn, b"Matrix")?);
             if bind && node_bind[k].is_none() {
                 node_bind[k] = Some(i);
+                first_bind[k] = Some(m);
             }
             bones.push(BonePose {
                 bone_node: k,
@@ -314,39 +400,25 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             });
         }
         // ufbx typed node order: depth, original parent element ID, original ID.
+        r.sort_work(bones.len())?;
         bones.sort_by_key(|b| {
-            let mut depth = 0usize;
-            let mut at = parent_of(b.bone_node);
-            while let Some(k) = at {
-                depth += 1;
-                at = parent_of(k);
-                if depth > s.elements.len() {
-                    break;
-                }
-            }
             (
-                depth,
+                depths[b.bone_node],
                 parent_of(b.bone_node).map(|k| s.elements[k].ordinal),
                 s.elements[b.bone_node].ordinal,
             )
         });
+        for (j, b) in bones.iter().enumerate() {
+            // Preserve the first entry when malformed poses repeat a node.
+            pose_bone[b.bone_node].get_or_insert(j);
+        }
+        r.work(bones.len())?;
         for j in 0..bones.len() {
-            let parent = s
-                .typed
-                .parent
-                .get(bones[j].bone_node)
-                .copied()
-                .flatten()
-                .or_else(|| match s.elements[bones[j].bone_node].obj.get("parent") {
-                    Some(V::Ref(p)) => *p,
-                    _ => None,
-                });
+            let parent = parent_of(bones[j].bone_node);
             let pm = parent
                 .and_then(|p| {
-                    bones
-                        .iter()
-                        .find(|b| b.bone_node == p)
-                        .map(|b| b.bone_to_world.0)
+                    pose_bone[p]
+                        .map(|j| bones[j].bone_to_world.0)
                         .or_else(|| s.node_states[p].as_ref().map(|st| st.node_to_world))
                 })
                 .unwrap_or(sn::IDENTITY_MATRIX);
@@ -355,16 +427,22 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 &bones[j].bone_to_world.0,
             ));
         }
+        for b in &bones {
+            pose_bone[b.bone_node] = None;
+        }
         d.poses.push((
             i,
             Pose {
-                name: r.name(i),
+                name: r.name(i)?,
                 source_id: r.source_id(i),
                 is_bind_pose: bind,
                 bone_poses: bones,
             },
         ));
     }
+    let mut cluster_index = vec![None; s.elements.len()];
+    let mut shape_index = vec![None; s.elements.len()];
+    let mut shape_orders = Vec::new();
     for (i, e) in s.elements.iter().enumerate() {
         let Some(n) = e.node else {
             continue;
@@ -383,16 +461,18 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                     return Err("blend shape: offset count mismatch".into());
                 }
                 // Validate against every connected mesh, not merely the largest.
-                for channel in r.src(i, T::BlendChannel) {
-                    for blend in r.src(channel, T::BlendDeformer) {
-                        for mesh in r.mesh_targets(blend) {
+                for channel in r.src(i, T::BlendChannel)? {
+                    for blend in r.src(channel, T::BlendDeformer)? {
+                        for mesh in r.mesh_targets(blend)? {
                             let count = r.num_vertices(mesh)?;
+                            r.work(indices.len())?;
                             if indices.iter().any(|&v| v as usize >= count) {
                                 return Err("blend shape: vertex out of range".into());
                             }
                         }
                     }
                 }
+                r.sort_work(indices.len())?;
                 let mut order: Vec<usize> = (0..indices.len()).collect();
                 order.sort_by_key(|&j| indices[j]);
                 let offsets = |values: &[f64], scale: f64| -> Vec<[f64; 3]> {
@@ -415,10 +495,11 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                         })
                         .collect()
                 };
+                shape_index[i] = Some(d.shapes.len());
                 d.shapes.push((
                     i,
                     BlendShape {
-                        name: r.name(i),
+                        name: r.name(i)?,
                         source_id: r.source_id(i),
                         offset_vertices: order.iter().map(|&j| indices[j]).collect(),
                         position_offsets: offsets(&pos, scale),
@@ -426,6 +507,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                         offset_weights: Vec::new(),
                     },
                 ));
+                shape_orders.push(order);
             }
             T::SkinCluster => {
                 let vertices = r.indices(n, b"Indexes")?;
@@ -433,33 +515,29 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 if vertices.len() != weights.len() {
                     return Err("skin cluster: weight count mismatch".into());
                 }
-                let bone = r.dst(i, T::Node).first().copied();
+                let bone = r.dst(i, T::Node)?.first().copied();
                 let mut mesh_mat = r.matrix(n, b"Transform")?;
                 let mut bind = r.matrix(n, b"TransformLink")?;
                 if bind.iter().all(|&x| x == 0.0) {
                     if let Some(k) = bone {
-                        for (_, pose) in &d.poses {
-                            if pose.is_bind_pose {
-                                if let Some(b) = pose.bone_poses.iter().find(|b| b.bone_node == k) {
-                                    bind = b.bone_to_world.0;
-                                    break;
-                                }
-                            }
+                        if let Some(m) = first_bind[k] {
+                            bind = m;
                         }
                     }
                 } else {
                     bind = convert_bind(bind);
                 }
                 let mut geom = mesh_mat;
-                if let Some(skin) = r.src(i, T::SkinDeformer).first().copied() {
-                    let meshes = r.mesh_targets(skin);
+                if let Some(skin) = r.src(i, T::SkinDeformer)?.first().copied() {
+                    let meshes = r.mesh_targets(skin)?;
                     for &mesh in &meshes {
                         let count = r.num_vertices(mesh)?;
+                        r.work(vertices.len())?;
                         if vertices.iter().any(|&v| v as usize >= count) {
                             return Err("skin cluster: vertex out of range".into());
                         }
                     }
-                    let node = r.src(skin, T::Node).first().copied().or_else(|| {
+                    let node = r.src(skin, T::Node)?.first().copied().or_else(|| {
                         meshes
                             .first()
                             .and_then(|&m| s.elements[m].instances.first().copied())
@@ -489,10 +567,11 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                     .and_then(|k| s.node_states[k].as_ref().map(|n| n.node_to_world))
                     .unwrap_or(bind);
                 let world = sn::matrix_mul(&bone_world, &geom);
+                cluster_index[i] = Some(d.clusters.len());
                 d.clusters.push((
                     i,
                     SkinCluster {
-                        name: r.name(i),
+                        name: r.name(i)?,
                         source_id: r.source_id(i),
                         bone_node: bone,
                         geometry_to_bone: Matrix(geom),
@@ -514,7 +593,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         };
         match e.ty {
             T::SkinDeformer => {
-                let method = match r.data(n, b"SkinningType") {
+                let method = match r.data(n, b"SkinningType")? {
                     Some(NodeData::Values(v)) => match v.first() {
                         Some(Scalar::Str(v)) => match v.as_slice() {
                             b"Rigid" => SkinningMethod::Rigid,
@@ -527,16 +606,14 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                     _ => SkinningMethod::Linear,
                 };
                 let clusters: Vec<usize> = r
-                    .dst(i, T::SkinCluster)
+                    .dst(i, T::SkinCluster)?
                     .into_iter()
-                    .filter(|k| {
-                        d.clusters
-                            .iter()
-                            .any(|(j, c)| j == k && c.bone_node.is_some())
+                    .filter(|&k| {
+                        cluster_index[k].is_some_and(|j| d.clusters[j].1.bone_node.is_some())
                     })
                     .collect();
                 let mut count = 0;
-                for mesh in r.mesh_targets(i) {
+                for mesh in r.mesh_targets(i)? {
                     count = count.max(r.num_vertices(mesh)?);
                 }
                 if count
@@ -553,12 +630,9 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 )?;
                 let mut per_vertex = vec![Vec::new(); count];
                 for (ci, k) in clusters.iter().enumerate() {
-                    let c = &d
-                        .clusters
-                        .iter()
-                        .find(|(j, _)| j == k)
-                        .ok_or("skin: missing cluster")?
-                        .1;
+                    let c = &d.clusters[cluster_index[*k].ok_or("skin: missing cluster")?].1;
+                    r.charge(c.weights.len(), std::mem::size_of::<SkinWeight>() * 8)?;
+                    r.sort_work(c.weights.len())?;
                     for (&v, &w) in c.vertices.iter().zip(&c.weights) {
                         let dst = per_vertex
                             .get_mut(v as usize)
@@ -576,10 +650,11 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 {
                     return Err("skin: invalid dual-quaternion weights".into());
                 }
-                let mut vertices = Vec::new();
+                let mut vertices = Vec::with_capacity(count);
                 let mut weights = Vec::new();
                 let mut max_weights = 0;
                 for mut w in per_vertex {
+                    r.sort_work(w.len())?;
                     w.sort_by(|a, b| {
                         b.weight
                             .partial_cmp(&a.weight)
@@ -603,7 +678,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 d.skins.push((
                     i,
                     SkinDeformer {
-                        name: r.name(i),
+                        name: r.name(i)?,
                         source_id: r.source_id(i),
                         skinning_method: method,
                         clusters,
@@ -618,13 +693,13 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             T::BlendDeformer => d.blends.push((
                 i,
                 BlendDeformer {
-                    name: r.name(i),
+                    name: r.name(i)?,
                     source_id: r.source_id(i),
-                    channels: r.dst(i, T::BlendChannel),
+                    channels: r.dst(i, T::BlendChannel)?,
                 },
             )),
             T::BlendChannel => {
-                let shapes = r.dst(i, T::BlendShape);
+                let shapes = r.dst(i, T::BlendShape)?;
                 let full = r.reals(n, b"FullWeights")?;
                 if s.exporter != 2 && !full.is_empty() && full.len() != shapes.len() {
                     return Err("blend channel: target weight count mismatch".into());
@@ -662,7 +737,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                         })
                         .map_or(0.0, |p| p.value_real[0])
                 } else if props.authored.is_empty() && r.child(n, b"DeformPercent").is_some() {
-                    match r.data(n, b"DeformPercent") {
+                    match r.data(n, b"DeformPercent")? {
                         Some(NodeData::Values(v)) => match v.first() {
                             Some(Scalar::Num(_, x)) => *x,
                             _ => 100.0,
@@ -679,13 +754,18 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 }
                 if s.exporter == 2 {
                     for &shape in &shapes {
-                        if let Some((_, target)) = d.shapes.iter_mut().find(|(k, _)| *k == shape) {
+                        if let Some(j) = shape_index[shape] {
+                            let target = &mut d.shapes[j].1;
                             if full.len() == target.offset_vertices.len() {
-                                target.offset_weights = full.iter().map(|v| v / 100.0).collect();
+                                r.charge(full.len(), 8)?;
+                                r.work(full.len())?;
+                                target.offset_weights =
+                                    shape_orders[j].iter().map(|&k| full[k] / 100.0).collect();
                             }
                         }
                     }
                 }
+                r.charge(shapes.len(), std::mem::size_of::<BlendKeyframe>() * 3)?;
                 let mut keys: Vec<BlendKeyframe> = shapes
                     .iter()
                     .enumerate()
@@ -699,6 +779,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                         effective_weight: 0.0,
                     })
                     .collect();
+                r.sort_work(keys.len())?;
                 keys.sort_by(|a, b| {
                     a.target_weight
                         .partial_cmp(&b.target_weight)
@@ -710,7 +791,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 d.channels.push((
                     i,
                     BlendChannel {
-                        name: r.name(i),
+                        name: r.name(i)?,
                         source_id: r.source_id(i),
                         weight,
                         keyframes: keys,
@@ -721,6 +802,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             _ => {}
         }
     }
+    r.sort_work(d.poses.len())?;
     d.poses.sort_by_key(|(i, _)| *i);
     for (k, p) in node_bind.into_iter().enumerate() {
         if let Some(p) = p {
@@ -888,5 +970,97 @@ fn emit(s: &mut CanonScene<'_>, d: &Deformers) {
                     .collect(),
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::Property;
+
+    const INPUT: &[u8] = b"; FBX 7.4.0\nObjects: { Deformer: 1, \"Deformer::C\", \"Cluster\" { Indexes: *1 { a: 0 }\nWeights: *1 { a: 1 }\n}\n}\n";
+
+    #[test]
+    fn binary_wide_sparse_indices_are_checked_in_both_byte_orders() {
+        for be in [false, true] {
+            for value in [
+                0i64,
+                i32::MAX as i64,
+                4294967296,
+                -4294967296,
+                i64::MAX,
+                i64::MIN,
+            ] {
+                let mut s = crate::canon_scene::project(INPUT, &DumpLimits::default()).unwrap();
+                let n = s
+                    .doc
+                    .nodes
+                    .iter()
+                    .position(|n| n.name == b"Indexes")
+                    .unwrap();
+                let p = s.doc.nodes[n].properties.start;
+                let bytes = if be {
+                    value.to_be_bytes()
+                } else {
+                    value.to_le_bytes()
+                };
+                s.doc.properties[p] = Property::Array {
+                    kind: b'l',
+                    count: 1,
+                    big_endian: be,
+                    bytes: bytes.to_vec().into(),
+                };
+                s.ascii = false;
+                let r = Reader::new(&s, &DumpLimits::default()).unwrap();
+                let result = r.indices(s.doc.nodes[n].parent.unwrap(), b"Indexes");
+                if (0..=i32::MAX as i64).contains(&value) {
+                    assert_eq!(result.unwrap(), [value as u32]);
+                } else {
+                    assert!(result.unwrap_err().contains("invalid index"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adjacency_and_arrays_are_charged_before_materializing() {
+        let mut s = crate::canon_scene::project(INPUT, &DumpLimits::default()).unwrap();
+        let limits = DumpLimits {
+            max_allocation: 0,
+            ..Default::default()
+        };
+        assert!(matches!(Reader::new(&s, &limits), Err(e) if e.contains("allocation limit")));
+        let n = s
+            .doc
+            .nodes
+            .iter()
+            .position(|n| n.name == b"Indexes")
+            .unwrap();
+        let p = s.doc.nodes[n].properties.start;
+        // Impossible array payload: preflight must fail on budget before a
+        // decoder can discard it as empty or try to materialize it.
+        s.doc.properties[p] = Property::Array {
+            kind: b'l',
+            count: usize::MAX,
+            big_endian: false,
+            bytes: Vec::new().into(),
+        };
+        let r = Reader::new(&s, &DumpLimits::default()).unwrap();
+        assert!(r
+            .indices(s.doc.nodes[n].parent.unwrap(), b"Indexes")
+            .unwrap_err()
+            .contains("allocation limit"));
+        let weights = s
+            .doc
+            .nodes
+            .iter()
+            .position(|n| n.name == b"Weights")
+            .unwrap();
+        let r = Reader::new(&s, &DumpLimits::default()).unwrap();
+        r.used.set(r.limit);
+        assert!(r
+            .reals(s.doc.nodes[weights].parent.unwrap(), b"Weights")
+            .unwrap_err()
+            .contains("allocation limit"));
     }
 }

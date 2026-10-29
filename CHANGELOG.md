@@ -25,3 +25,12 @@ All notable changes to this crate are documented here. The format follows
   node/property tree. FBX 6.1 and older are rejected.
 - `Limits` on input size, nesting, node, property, array and allocation
   counts for untrusted input.
+
+### Fixed
+
+- Reject oversized sparse indices before they can alias valid vertices.
+- Bound deformer allocations before decoding and charge traversal/sorting work;
+  index connection deduplication and pose/cluster lookups.
+- Keep Blender per-offset weights parallel to sorted sparse offsets.
+- Index legacy shape discovery and mesh sources; attach mesh deformers in one pass
+  and avoid intermediate encoding copies when reading numeric ASCII arrays.

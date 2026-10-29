@@ -164,7 +164,7 @@ fn negative_targets_and_dual_quaternion_defaults() {
 
 #[test]
 fn nested_shapes_generate_owned_channels_and_canonical_records() {
-    let f = fixture().replace(
+    let f = fixture().replace("; FBX 7.4.0", "; FBX 7.1.0").replace(
         "  PolygonVertexIndex:",
         r#"  Properties70: { P: "Legacy", "Number", "", "", 25 }
   Shape: "Legacy" {
@@ -243,4 +243,97 @@ GlobalSettings:"#,
     );
     let s = load(f.as_bytes(), &LoadOptions::default()).unwrap();
     assert_eq!(s.blend_channels()[0].weight, 0.2);
+}
+
+#[test]
+fn oversized_sparse_indices_never_alias_vertex_zero() {
+    for bad in [4294967296i64, -4294967296, i64::MAX, i64::MIN] {
+        for from in ["a: 1,0 }", "a: 2,0 }"] {
+            let f = fixture().replace(from, &format!("a: {bad},0 }}"));
+            assert!(load(f.as_bytes(), &LoadOptions::default()).is_err());
+        }
+    }
+}
+
+#[test]
+fn blender_full_weights_follow_the_sparse_offset_permutation() {
+    let f = fixture()
+        .replace("GlobalSettings:", "FBXHeaderExtension: {\n FBXHeaderVersion: 1003\n FBXVersion: 7400\n Creator: \"Blender (stable FBX IO) - 2.79 (sub 0)\"\n}\nGlobalSettings:")
+        .replace("FullWeights: *2 { a: 100,50 }", "FullWeights: *2 { a: 20,80 }");
+    let s = load(f.as_bytes(), &LoadOptions::default()).unwrap();
+    let shape = &s.blend_shapes()[0];
+    assert_eq!(shape.offset_vertices, [0, 2]);
+    assert_eq!(shape.position_offsets, [[1., 0., 0.], [0., 2., 0.]]);
+    assert_eq!(shape.offset_weights, [0.8, 0.2]);
+}
+
+#[test]
+fn duplicate_connections_keep_first_order_and_do_not_duplicate_influences() {
+    let f = fixture().replace(" C: \"OO\",41,40", &" C: \"OO\",41,40\n".repeat(128));
+    let s = load(f.as_bytes(), &LoadOptions::default()).unwrap();
+    assert_eq!(s.skin_deformers()[0].clusters.len(), 1);
+    assert_eq!(s.skin_deformers()[0].weights.len(), 2);
+}
+
+#[test]
+fn pose_chain_uses_indexed_nodes_depths_and_parent_matrices() {
+    let mut objects = String::new();
+    let mut pose = String::new();
+    let mut connections = String::new();
+    for i in 1..=128 {
+        objects.push_str(&format!("Model: {i}, \"Model::N{i}\", \"LimbNode\" {{}}\n"));
+        connections.push_str(&format!("C: \"OO\",{i},{}\n", i - 1));
+        // Reversed source order must still sort parent first.
+        pose.insert_str(0, &format!("PoseNode: {{ Node: {i}\nMatrix: *16 {{ a: 1,0,0,0,0,1,0,0,0,0,1,0,{i},0,0,1 }}\n}}\n"));
+    }
+    let f = format!("; FBX 7.4.0\nGlobalSettings: {{ Properties70: {{ P: \"UnitScaleFactor\", \"double\", \"Number\", \"\", 100 }} }}\nObjects: {{\n{objects}\nPose: 1000, \"Pose::Chain\", \"BindPose\" {{ {pose} }}\n}}\nConnections: {{ {connections} }}\n");
+    let limits = fbx_rs::Limits {
+        max_deformer_work: 20000,
+        ..Default::default()
+    };
+    let s = fbx_rs::load_with_limits(f.as_bytes(), &LoadOptions::default(), &limits).unwrap();
+    let bones = &s.poses()[0].bone_poses;
+    assert_eq!(bones.len(), 128);
+    for (i, b) in bones.iter().enumerate() {
+        assert_eq!(s.nodes()[b.bone_node].name(), format!("N{}", i + 1));
+        assert_eq!(b.bone_to_parent.0[9], 1.0);
+    }
+    let limits = fbx_rs::Limits {
+        max_deformer_work: 100,
+        ..limits
+    };
+    assert!(
+        fbx_rs::load_with_limits(f.as_bytes(), &LoadOptions::default(), &limits)
+            .unwrap_err()
+            .to_string()
+            .contains("work limit")
+    );
+}
+
+#[test]
+fn many_static_meshes_keep_their_sources_and_deformers() {
+    let mut objects = String::new();
+    let mut connections = String::new();
+    for i in 1..=64 {
+        objects.push_str(&format!("Geometry: {i}, \"Geometry::M{i}\", \"Mesh\" {{ Vertices: *9 {{ a: 0,0,0, {i},0,0, 0,1,0 }}\nPolygonVertexIndex: *3 {{ a: 0,1,-3 }}\n}}\n"));
+        // One legacy shape near the end catches parent-index mixups.
+        if i == 63 {
+            objects.push_str("Geometry: 1000, \"Geometry::Legacy\", \"Mesh\" { Vertices: *9 { a: 0,0,0, 1,0,0, 0,1,0 }\nPolygonVertexIndex: *3 { a: 0,1,-3 }\nShape: \"Nested\" { Indexes: *1 { a: 0 }\nVertices: *3 { a: 1,0,0 }\n}\n}\n");
+        }
+        connections.push_str(&format!("C: \"OO\",{i},0\n"));
+    }
+    let f = format!("; FBX 7.1.0\nObjects: {{ {objects} }}\nConnections: {{ {connections} }}\n");
+    let s = load(f.as_bytes(), &LoadOptions::default()).unwrap();
+    assert_eq!(s.meshes().len(), 65);
+    assert_eq!(s.blend_shapes().len(), 1);
+    for m in s.meshes() {
+        assert_eq!(m.blend_deformers().len(), usize::from(m.name() == "Legacy"));
+        if let Some(id @ 1..=64) = m.source_id() {
+            assert_eq!(m.positions().values()[1][0], id as f64 * 0.01);
+        }
+    }
+    // ufbx only synthesizes nested legacy shapes through version 7.1.
+    let modern = f.replace("; FBX 7.1.0", "; FBX 7.4.0");
+    let s = load(modern.as_bytes(), &LoadOptions::default()).unwrap();
+    assert!(s.blend_shapes().is_empty());
 }

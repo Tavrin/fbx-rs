@@ -29,6 +29,8 @@ pub struct DumpLimits {
     pub draft: crate::scene_draft::Limits,
     pub max_properties: usize,
     pub max_allocation: usize,
+    /// Bound on deformer traversal, lookup and sorting work.
+    pub max_deformer_work: usize,
     pub max_line: usize,
     pub max_output: usize,
 }
@@ -41,6 +43,7 @@ impl Default for DumpLimits {
             draft: crate::scene_draft::Limits::default(),
             max_properties: 1 << 20,
             max_allocation: 512 << 20,
+            max_deformer_work: 1 << 28,
             max_line: 64 << 20,
             // 8 GiB, saturated to the address space on 32-bit targets (wasm32).
             max_output: usize::try_from(8u64 << 30).unwrap_or(usize::MAX),
@@ -629,9 +632,25 @@ pub(crate) fn project_with<'a>(
     };
     // FBX 7.1 stores shapes inside the base Geometry. ufbx creates one
     // deformer and one channel/target pair per nested Shape.
+    // Index nested shapes once; static meshes need no per-mesh DOM scan.
+    let mut legacy_shapes = std::collections::HashMap::<usize, Vec<usize>>::new();
+    for (i, n) in doc.nodes.iter().enumerate().take(if doc.version <= 7100 {
+        doc.nodes.len()
+    } else {
+        0
+    }) {
+        if let Some(parent) = n.parent.filter(|_| n.name == b"Shape") {
+            legacy_shapes.entry(parent).or_default().push(i);
+        }
+    }
     let bases: Vec<(usize, usize)> = elements
         .iter()
         .enumerate()
+        .take(if legacy_shapes.is_empty() {
+            0
+        } else {
+            elements.len()
+        })
         .filter_map(|(i, e)| {
             (e.ty == ElementType::Mesh)
                 .then_some(e.node.map(|n| (i, n)))
@@ -641,13 +660,9 @@ pub(crate) fn project_with<'a>(
     let mut synthetic_counts = [0usize; 3];
     let mut property_links = Vec::new();
     for (base, node) in bases {
-        let shapes: Vec<usize> = doc
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| n.parent == Some(node) && n.name == b"Shape")
-            .map(|(i, _)| i)
-            .collect();
+        let Some(shapes) = legacy_shapes.remove(&node) else {
+            continue;
+        };
         let mut deformer = None;
         for shape in shapes {
             let name = string_of(props_of(&doc, shape).first()).to_vec();

@@ -344,13 +344,7 @@ fn encode(target: u8, values: &[Num], boolean: bool) -> DomValue {
                 (Num::I(i), false) => i as u8,
                 (Num::F(f), false) => to_u8(f),
             }),
-            b'i' => bytes.extend_from_slice(
-                &match v {
-                    Num::I(i) => i as i32,
-                    Num::F(f) => f64_to_i32(f),
-                }
-                .to_le_bytes(),
-            ),
+            b'i' => bytes.extend_from_slice(&num_i32(v).to_le_bytes()),
             b'l' => bytes.extend_from_slice(
                 &match v {
                     Num::I(i) => i,
@@ -437,7 +431,8 @@ fn num_f64(v: Num) -> f64 {
 /// [`encode`]'s element conversion for an `ARRAY_I32` target (`'i'`).
 fn num_i32(v: Num) -> i32 {
     match v {
-        Num::I(i) => i as i32,
+        // Invalid wide integers must never alias a valid sparse index.
+        Num::I(i) => i32::try_from(i).unwrap_or(i32::MIN),
         Num::F(f) => f64_to_i32(f),
     }
 }
@@ -632,12 +627,49 @@ pub(crate) enum NodeData {
     Values(Vec<Scalar>),
 }
 
+/// Upper bound on numeric values, without decoding or allocating. Includes
+/// scalar properties for binary nodes that do not use an array property.
+pub(crate) fn data_len(doc: &Document<'_>, i: usize) -> Result<usize, String> {
+    doc.properties[doc.nodes[i].properties.clone()]
+        .iter()
+        .try_fold(0usize, |n, p| {
+            let count = match p {
+                Property::Array { count, .. } => *count,
+                Property::AsciiArray(v) => v.len(),
+                _ => 1,
+            };
+            n.checked_add(count)
+                .ok_or_else(|| "deformer: allocation limit".into())
+        })
+}
+
 /// The converted values of DOM node `i` (`ufbxi_get_array` / `ufbxi_get_val*`),
 /// shared with the retained-DOM projection so both see the same conversions.
 pub(crate) fn node_data(doc: &Document<'_>, i: usize, ascii: bool) -> NodeData {
     let parent = state_of(doc, doc.nodes[i].parent);
     let state = child_state(parent, doc.nodes[i].name);
     let target = array_type(parent, doc.nodes[i].name, ascii, doc.version);
+    // Numeric ASCII arrays are already tokenized by the syntax parser. Decode
+    // them directly, using exactly the retained-DOM conversions, rather than
+    // allocating token, number and encoded-byte vectors only to decode again.
+    // KeyAttrDataFloat has a special float32 rounding rule and stays below.
+    if ascii && doc.nodes[i].name != b"KeyAttrDataFloat" {
+        if let [Property::AsciiArray(values)] = &doc.properties[doc.nodes[i].properties.clone()] {
+            let nums = || {
+                values.iter().map(|v| match v {
+                    AsciiValue::I64(v) => Num::I(*v),
+                    AsciiValue::F64(bits) => Num::F(f64::from_bits(*bits)),
+                    AsciiValue::NegativeZero => Num::F(-0.0),
+                    AsciiValue::Bare(w) => Num::I(w.first().map_or(0, |&b| i64::from(b as i8))),
+                })
+            };
+            match target {
+                Some(b'i') => return NodeData::Ints(nums().map(num_i32).collect()),
+                Some(b'd') => return NodeData::Reals(nums().map(num_f64).collect()),
+                _ => {}
+            }
+        }
+    }
     if let (Some(t), false) = (target, ascii) {
         if let Some(data) = binary_array_data(doc, i, t) {
             return data;
@@ -936,7 +968,45 @@ pub fn write_dom<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::decode_base64;
+    use super::*;
+
+    #[test]
+    fn direct_ascii_arrays_match_retained_projection_bits() {
+        let input = b"; FBX 7.4.0\nObjects: { Geometry: 1, \"Geometry::S\", \"Shape\" {\nIndexes: *6 { a: 0,-1,2147483647,4294967296,1.5,-0 }\nVertices: *6 { a: -0,1.23456789,42,-3.25,1e-100,T }\n}\n}\n";
+        let doc = crate::syntax::parse(input, &Default::default()).unwrap();
+        for (i, n) in doc.nodes.iter().enumerate() {
+            if !matches!(n.name, b"Indexes" | b"Vertices") {
+                continue;
+            }
+            let parent = state_of(&doc, n.parent);
+            let values = project(&doc, i, child_state(parent, n.name), parent, true);
+            match (node_data(&doc, i, true), &values[0]) {
+                (NodeData::Ints(v), DomValue::Array(ARRAY_I32, _, bytes)) => {
+                    assert_eq!(
+                        v,
+                        bytes
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|c| i32::from_le_bytes(*c))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                (NodeData::Reals(v), DomValue::Array(ARRAY_F64, _, bytes)) => {
+                    assert_eq!(
+                        v.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        bytes
+                            .as_chunks::<8>()
+                            .0
+                            .iter()
+                            .map(|c| u64::from_le_bytes(*c))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                _ => panic!("numeric array"),
+            }
+        }
+    }
 
     #[test]
     fn ascii_content_base64_matches_ufbx_padding_rules() {

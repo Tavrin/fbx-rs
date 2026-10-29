@@ -76,6 +76,8 @@ pub struct Limits {
     pub max_connections: usize,
     /// Maximum bytes requested by one conversion stage.
     pub max_allocation: usize,
+    /// Maximum deformer traversal, lookup and sorting work units.
+    pub max_deformer_work: usize,
 }
 
 impl Default for Limits {
@@ -92,6 +94,7 @@ impl Default for Limits {
             max_objects: d.index.max_objects,
             max_connections: d.index.max_connections,
             max_allocation: d.max_allocation,
+            max_deformer_work: d.max_deformer_work,
         }
     }
 }
@@ -111,6 +114,7 @@ impl Limits {
         d.index.max_allocation = self.max_allocation;
         d.max_properties = self.max_properties;
         d.max_allocation = self.max_allocation;
+        d.max_deformer_work = self.max_deformer_work;
         d
     }
 }
@@ -1209,6 +1213,8 @@ impl Scene {
             scene::index(&c.doc, &limits.index).map_err(|e| Error::Convert(format!("{e:?}")))?;
         let sources = scene_mesh::extract(&c.doc, &index, &scene_mesh::Limits::default())
             .map_err(|e| Error::Convert(format!("{e:?}")))?;
+        let sources_by_node: std::collections::HashMap<_, _> =
+            sources.meshes.iter().map(|s| (s.node, s)).collect();
         let tl = TriangulationLimits::default();
         let mut converted = t.meshes;
         converted.sort_by_key(|(i, _, _)| *i);
@@ -1216,9 +1222,7 @@ impl Scene {
         let mut done = vec![false; n];
         for (i, m, mesh_materials) in converted {
             let e = &c.elements[i];
-            let source = e
-                .node
-                .and_then(|node| sources.meshes.iter().find(|s| s.node == node));
+            let source = e.node.and_then(|node| sources_by_node.get(&node).copied());
             let triangles = match source {
                 Some(s) => triangulate(s, &m, &tl)?,
                 None => Vec::new(),
@@ -1254,26 +1258,25 @@ impl Scene {
                 .filter_map(|(k, _)| r(*k))
                 .collect()
         };
-        for (i, mesh) in meshes.iter_mut().enumerate() {
-            let e = c
-                .elements
-                .iter()
-                .filter(|e| e.ty == T::Mesh)
-                .nth(i)
-                .ok_or_else(|| Error::Convert("mesh index".into()))?;
-            let fetch = |ty| {
-                let mut out = bone_refs(e, ty);
-                if let Some(&node) = e.instances.first() {
-                    for k in bone_refs(&c.elements[node], ty) {
-                        if !out.contains(&k) {
-                            out.push(k);
+        if !c.deformers.skins.is_empty() || !c.deformers.blends.is_empty() {
+            for (mesh, e) in meshes
+                .iter_mut()
+                .zip(c.elements.iter().filter(|e| e.ty == T::Mesh))
+            {
+                let fetch = |ty| {
+                    let mut out = bone_refs(e, ty);
+                    if let Some(&node) = e.instances.first() {
+                        for k in bone_refs(&c.elements[node], ty) {
+                            if !out.contains(&k) {
+                                out.push(k);
+                            }
                         }
                     }
-                }
-                out
-            };
-            mesh.skin_deformers = fetch(T::SkinDeformer);
-            mesh.blend_deformers = fetch(T::BlendDeformer);
+                    out
+                };
+                mesh.skin_deformers = fetch(T::SkinDeformer);
+                mesh.blend_deformers = fetch(T::BlendDeformer);
+            }
         }
         let bones = c
             .elements
