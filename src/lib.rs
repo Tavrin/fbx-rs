@@ -4,8 +4,8 @@
 //! converts it into an owned [`Scene`]: the node hierarchy with local and
 //! world transforms, meshes with every UV and color set and a triangulated
 //! index buffer, materials (FBX and PBR maps), textures, cameras, lights,
-//! settings, and the list of content it does not convert yet (skins, blend
-//! shapes, animation).
+//! settings, bones, skins, blend shapes, poses, and the list of content it
+//! does not convert yet (animation).
 //!
 //! ```
 //! let fbx = br#"; FBX 7.4.0 project file
@@ -41,9 +41,10 @@
 //!   normals, UV sets with tangents, color sets, faces, material parts,
 //!   triangulation), materials, textures (paths and embedded content),
 //!   cameras and lights, and the scene settings.
-//! - Skins, blend shapes and animation are not converted. They are detected
-//!   and listed in [`Scene::unsupported`] instead of being dropped silently,
-//!   as are NURBS geometry, caches, constraints and audio.
+//! - Stored skins, bind/rest poses, bones and blend shapes are converted;
+//!   mesh positions stay undeformed. Animation curves and evaluation are
+//!   listed in [`Scene::unsupported`], as are NURBS geometry, caches,
+//!   constraints and audio.
 //! - FBX 6.1 and older files are rejected with [`Error::Parse`].
 //! - Only the default [`LoadOptions`] (right-handed Y-up, 1 m units) are
 //!   implemented; other values return [`Error::UnsupportedOptions`].
@@ -63,6 +64,9 @@
 #![warn(missing_docs)]
 
 mod api;
+mod deform;
+mod scene_deform;
+pub use deform::*;
 pub mod syntax;
 
 // Converter internals: public only for the parity tooling (unstable). Without

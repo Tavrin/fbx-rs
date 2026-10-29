@@ -621,6 +621,11 @@ pub fn rust_scene_source_sha256() -> String {
             "src/scene_attribute.rs",
             include_bytes!("../../src/scene_attribute.rs"),
         ),
+        ("src/deform.rs", include_bytes!("../../src/deform.rs")),
+        (
+            "src/scene_deform.rs",
+            include_bytes!("../../src/scene_deform.rs"),
+        ),
         ("src/api.rs", include_bytes!("../../src/api.rs")),
         (
             "src/canonical_writer.rs",

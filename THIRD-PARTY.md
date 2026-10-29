@@ -12,6 +12,8 @@ ufbx function it follows (`ufbxi_...` names) and lives in these files of
 - `canon_scene.rs`: element reading, property defaults, scene settings,
   animation-stack structure.
 - `scene_attribute.rs`: camera, light and bone updates.
+- `scene_deform.rs`: skin influences, cluster and pose matrices, sparse blend
+  offsets and in-between target weights.
 - `scene_geometry.rs`, `scene_mesh.rs`, `scene_surface.rs`: mesh conversion,
   attribute layers and triangulation.
 - `scene_material.rs`: material and texture conversion, shader maps,

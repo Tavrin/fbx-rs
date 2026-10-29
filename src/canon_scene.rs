@@ -29,6 +29,8 @@ pub struct DumpLimits {
     pub draft: crate::scene_draft::Limits,
     pub max_properties: usize,
     pub max_allocation: usize,
+    /// Bound on deformer traversal, lookup and sorting work.
+    pub max_deformer_work: usize,
     pub max_line: usize,
     pub max_output: usize,
 }
@@ -41,6 +43,7 @@ impl Default for DumpLimits {
             draft: crate::scene_draft::Limits::default(),
             max_properties: 1 << 20,
             max_allocation: 512 << 20,
+            max_deformer_work: 1 << 28,
             max_line: 64 << 20,
             // 8 GiB, saturated to the address space on 32-bit targets (wasm32).
             max_output: usize::try_from(8u64 << 30).unwrap_or(usize::MAX),
@@ -154,22 +157,11 @@ impl ElementType {
             _ => "advanced",
         }
     }
-    /// Whether this element type needs rig/animation support (skins,
-    /// morphs, animation), which the static converter does not provide.
+    /// Whether this element type needs animation support, which the
+    /// static converter does not provide.
     pub fn needs_later_phase(self) -> bool {
         use ElementType::*;
-        matches!(
-            self,
-            SkinDeformer
-                | SkinCluster
-                | BlendDeformer
-                | BlendChannel
-                | BlendShape
-                | AnimStack
-                | AnimLayer
-                | AnimValue
-                | AnimCurve
-        )
+        matches!(self, AnimStack | AnimLayer | AnimValue | AnimCurve)
     }
 }
 
@@ -341,6 +333,23 @@ fn props_value(layers: &scene_property::PropertyLayers<'_>) -> V {
     V::Obj(props)
 }
 
+// Synthesized DeformPercent replaces the authored list but preserves templates.
+fn percent_props(layers: &scene_property::PropertyLayers<'_>, percent: f64, connected: bool) -> V {
+    let prop = Obj::new()
+        .with("name", s(b"DeformPercent"))
+        .with("type", V::I(3))
+        .with("flags", V::I(if connected { 0x8000 } else { 0 }))
+        .with("value_real_arr", V::Vec(vec![percent, 0.0, 0.0, 0.0]));
+    let mut value = props_value(layers);
+    if let V::Obj(o) = &mut value {
+        o.set(
+            "props",
+            V::Obj(Obj::new().with("data", V::List(vec![V::Obj(prop)]))),
+        );
+    }
+    value
+}
+
 /// The projected scene: elements in canonical order plus scene-level records.
 pub struct CanonScene<'a> {
     pub doc: Document<'a>,
@@ -364,8 +373,8 @@ pub struct CanonScene<'a> {
     /// `uc->exporter` (`ufbx_exporter` value) after `ufbxi_match_exporter`:
     /// selects exporter quirks such as `metadata.ortho_size_unit`.
     pub exporter: i64,
-    /// Content this static converter does not convert (skins, blend shapes,
-    /// animation, poses, curves and surfaces, caches, constraints, audio),
+    /// Content this static converter does not convert (animation, curves
+    /// and surfaces, caches, constraints, audio),
     /// with the source object ID (the owning `Geometry` for
     /// [`scene::UnsupportedKind::LegacyShape`]): objects in DOM order, then
     /// legacy in-geometry shapes in DOM order.
@@ -378,6 +387,7 @@ pub struct CanonScene<'a> {
     pub(crate) lean: bool,
     /// Typed results (lean projection only).
     pub(crate) typed: Lean,
+    pub(crate) deformers: crate::scene_deform::Deformers,
     /// Conversion warnings: content that is read but not ported, meshes
     /// that failed to convert.
     pub warnings: Vec<String>,
@@ -544,7 +554,7 @@ pub(crate) fn project_with<'a>(
         return Err(format!("syntax: UnsupportedVersion {}", doc.version));
     }
     let ascii = !input.starts_with(b"Kaydara FBX Binary  \x00\x1a");
-    let (elements, connections, unsupported) = {
+    let (mut elements, mut connections, unsupported) = {
         let index = scene::index(&doc, &limits.index).map_err(|e| format!("index: {e:?}"))?;
         let mut elements = vec![Element {
             key: "root".into(),
@@ -603,8 +613,121 @@ pub(crate) fn project_with<'a>(
             .iter()
             .map(|u| (u.kind, index.objects[u.object].id))
             .collect();
+        let unsupported = unsupported
+            .into_iter()
+            .filter(|(kind, _)| {
+                !matches!(
+                    kind,
+                    scene::UnsupportedKind::Skin
+                        | scene::UnsupportedKind::SkinCluster
+                        | scene::UnsupportedKind::BlendShape
+                        | scene::UnsupportedKind::BlendShapeChannel
+                        | scene::UnsupportedKind::ShapeGeometry
+                        | scene::UnsupportedKind::LegacyShape
+                        | scene::UnsupportedKind::Pose
+                )
+            })
+            .collect();
         (elements, connections, unsupported)
     };
+    // FBX 7.1 stores shapes inside the base Geometry. ufbx creates one
+    // deformer and one channel/target pair per nested Shape.
+    // Index nested shapes once; static meshes need no per-mesh DOM scan.
+    let mut legacy_shapes = std::collections::HashMap::<usize, Vec<usize>>::new();
+    for (i, n) in doc.nodes.iter().enumerate().take(if doc.version <= 7100 {
+        doc.nodes.len()
+    } else {
+        0
+    }) {
+        if let Some(parent) = n.parent.filter(|_| n.name == b"Shape") {
+            legacy_shapes.entry(parent).or_default().push(i);
+        }
+    }
+    let bases: Vec<(usize, usize)> = elements
+        .iter()
+        .enumerate()
+        .take(if legacy_shapes.is_empty() {
+            0
+        } else {
+            elements.len()
+        })
+        .filter_map(|(i, e)| {
+            (e.ty == ElementType::Mesh)
+                .then_some(e.node.map(|n| (i, n)))
+                .flatten()
+        })
+        .collect();
+    let mut synthetic_counts = [0usize; 3];
+    let mut property_links = Vec::new();
+    for (base, node) in bases {
+        let Some(shapes) = legacy_shapes.remove(&node) else {
+            continue;
+        };
+        let mut deformer = None;
+        for shape in shapes {
+            let name = string_of(props_of(&doc, shape).first()).to_vec();
+            if deformer.is_none() {
+                let k = elements.len();
+                deformer = Some(k);
+                elements.push(Element {
+                    key: format!("id:0:ordinal:{}", shape + 1),
+                    ordinal: shape + 1,
+                    source_id: Some(0),
+                    ty: ElementType::BlendDeformer,
+                    node: Some(shape),
+                    name: name.clone(),
+                    src_conns: Vec::new(),
+                    dst_conns: Vec::new(),
+                    instances: Vec::new(),
+                    obj: Obj::new(),
+                });
+                connections.push((k, base, Vec::new()));
+            }
+            let channel = elements.len();
+            for (offset, ty) in [ElementType::BlendChannel, ElementType::BlendShape]
+                .into_iter()
+                .enumerate()
+            {
+                let shared = deformer.is_some_and(|k| elements[k].node == Some(shape));
+                let key = if offset == 0 && !shared {
+                    format!("id:0:ordinal:{}", shape + 1)
+                } else {
+                    let count = &mut synthetic_counts[offset + 1];
+                    let key = format!(
+                        "synthetic:root:role:scene-generated:type:{}:ordinal:{}",
+                        ty as i64, *count
+                    );
+                    *count += 1;
+                    key
+                };
+                elements.push(Element {
+                    key,
+                    ordinal: shape + 1,
+                    source_id: Some(0),
+                    ty,
+                    node: Some(shape),
+                    name: name.clone(),
+                    src_conns: Vec::new(),
+                    dst_conns: Vec::new(),
+                    instances: Vec::new(),
+                    obj: Obj::new(),
+                });
+            }
+            let owner_props =
+                scene_property::layers(&doc, node, limits.max_properties, limits.max_allocation)
+                    .map_err(|e| format!("shape owner properties: {e:?}"))?;
+            if owner_props.find(&name).is_some_and(|p| {
+                matches!(
+                    p.kind,
+                    scene_property::Type::Number | scene_property::Type::Integer
+                )
+            }) {
+                property_links.push((base, channel, name.clone()));
+            }
+            connections.push((channel, deformer.unwrap(), Vec::new()));
+            connections.push((channel + 1, channel, Vec::new()));
+        }
+    }
     let mut scene = CanonScene {
         doc,
         elements,
@@ -622,13 +745,19 @@ pub(crate) fn project_with<'a>(
         anim: Obj::new(),
         lean,
         typed: Lean::default(),
+        deformers: Default::default(),
         warnings: Vec::new(),
     };
     // Canonical element order: signed source ID then DOM ordinal; root first.
     let mut order: Vec<usize> = (0..scene.elements.len()).collect();
-    order.sort_by_key(|&i| {
-        let e = &scene.elements[i];
-        (e.source_id.unwrap_or(i64::MIN), e.ordinal)
+    order.sort_by(|&a, &b| {
+        let a = &scene.elements[a];
+        let b = &scene.elements[b];
+        a.source_id
+            .unwrap_or(i64::MIN)
+            .cmp(&b.source_id.unwrap_or(i64::MIN))
+            .then(a.ordinal.cmp(&b.ordinal))
+            .then(a.key.cmp(&b.key))
     });
     let mut remap = vec![0; order.len()];
     for (new, &old) in order.iter().enumerate() {
@@ -662,6 +791,21 @@ pub(crate) fn project_with<'a>(
         scene.elements[src].src_conns.push((dst, prop.clone()));
         scene.elements[dst].dst_conns.push((src, prop));
     }
+    for (src, dst, name) in property_links {
+        let (src, dst) = (remap[src], remap[dst]);
+        let prop = b"DeformPercent".to_vec();
+        if !lean {
+            let mut c = conn(src, dst, &prop);
+            if let V::Obj(o) = &mut c {
+                o.set("src_prop", s(&name));
+            }
+            src_lists[src].push(c.clone());
+            dst_lists[dst].push(c.clone());
+            scene.connections.push(c);
+        }
+        scene.elements[src].src_conns.push((dst, prop.clone()));
+        scene.elements[dst].dst_conns.push((src, prop));
+    }
     if lean {
         return project_rest(scene, input, limits, &oo);
     }
@@ -679,10 +823,54 @@ pub(crate) fn project_with<'a>(
         if let Some(n) = e.node {
             header.set("name", s(&e.name));
             header.set("dom_node", V::Dom(Some(n + 1)));
-            let layers =
+            let layers = if scene.doc.nodes[n].name == b"Shape" {
+                scene_property::PropertyLayers {
+                    authored: Vec::new(),
+                    defaults: None,
+                }
+            } else {
                 scene_property::layers(&scene.doc, n, limits.max_properties, limits.max_allocation)
-                    .map_err(|err| format!("properties: {err:?}"))?;
-            header.set("props", props_value(&layers));
+                    .map_err(|err| format!("properties: {err:?}"))?
+            };
+            if scene.doc.nodes[n].name == b"Shape" && e.ty == ElementType::BlendChannel {
+                let owner = scene.doc.nodes[n].parent.ok_or("shape: missing geometry")?;
+                let parent_props = scene_property::layers(
+                    &scene.doc,
+                    owner,
+                    limits.max_properties,
+                    limits.max_allocation,
+                )
+                .map_err(|e| format!("shape properties: {e:?}"))?;
+                let source = parent_props.find(&e.name).filter(|p| {
+                    matches!(
+                        p.kind,
+                        scene_property::Type::Number | scene_property::Type::Integer
+                    )
+                });
+                let percent = source.map_or(0.0, |p| p.value_real[0]);
+                header.set("props", percent_props(&layers, percent, source.is_some()));
+            } else if e.ty == ElementType::BlendChannel && layers.authored.is_empty() {
+                let direct = scene
+                    .doc
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .find(|(_, d)| d.parent == Some(n) && d.name == b"DeformPercent");
+                if let Some((d, _)) = direct {
+                    let percent = match crate::canon_dom::node_data(&scene.doc, d, scene.ascii) {
+                        crate::canon_dom::NodeData::Values(v) => match v.first() {
+                            Some(crate::canon_dom::Scalar::Num(_, x)) => *x,
+                            _ => 100.0,
+                        },
+                        _ => 100.0,
+                    };
+                    header.set("props", percent_props(&layers, percent, false));
+                } else {
+                    header.set("props", props_value(&layers));
+                }
+            } else {
+                header.set("props", props_value(&layers));
+            }
         }
         e.obj.set("element", V::Obj(header));
     }
@@ -705,6 +893,7 @@ fn project_rest<'a>(
         project_takes(&mut scene, limits)?;
     }
     project_meshes(&mut scene);
+    crate::scene_deform::project(&mut scene, limits)?;
     project_materials(&mut scene, limits)?;
     project_attributes(&mut scene, &links, limits)?;
     Ok(scene)
@@ -756,10 +945,6 @@ fn project_attributes(
         else {
             continue;
         };
-        if scene.lean && ty == Bone {
-            // Bones are not part of the public scene.
-            continue;
-        }
         let props = scene_property::layers(
             &scene.doc,
             node,
@@ -2088,8 +2273,24 @@ fn write_static_evaluation<W: Write>(
             em.restore(k);
         }
         em.restore(nm);
-        em.count("skins/length", 0)?;
-        em.count("morphs/length", 0)?;
+        em.count("skins/length", scene.deformers.clusters.len())?;
+        let sk = em.push("skins");
+        for (i, c) in &scene.deformers.clusters {
+            let k = em.push(&scene.elements[*i].key);
+            em.leaf_raw("geometry_to_world", |b| {
+                eval(b, "eval_f64", &c.geometry_to_world.0)
+            })?;
+            em.restore(k);
+        }
+        em.restore(sk);
+        em.count("morphs/length", scene.deformers.channels.len())?;
+        let mo = em.push("morphs");
+        for (i, c) in &scene.deformers.channels {
+            let k = em.push(&scene.elements[*i].key);
+            em.leaf_raw("weight", |b| eval(b, "eval_f64", &[c.weight]))?;
+            em.restore(k);
+        }
+        em.restore(mo);
         em.restore(m);
     }
     em.restore(base);

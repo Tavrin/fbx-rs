@@ -25,6 +25,14 @@ fn walk(scene: &Scene) {
     }
     for mesh in scene.meshes() {
         assert!(mesh
+            .skin_deformers()
+            .iter()
+            .all(|&i| i < scene.skin_deformers().len()));
+        assert!(mesh
+            .blend_deformers()
+            .iter()
+            .all(|&i| i < scene.blend_deformers().len()));
+        assert!(mesh
             .materials()
             .iter()
             .all(|&m| m < scene.materials().len()));
@@ -37,6 +45,62 @@ fn walk(scene: &Scene) {
             std::hint::black_box(face);
         }
         std::hint::black_box((mesh.triangles(), mesh.parts(), mesh.uv_sets()));
+    }
+    for node in scene.nodes() {
+        assert!(node.bone().is_none_or(|i| i < scene.bones().len()));
+        assert!(node.bind_pose().is_none_or(|i| i < scene.poses().len()));
+    }
+    for bone in scene.bones() {
+        assert!(bone.instances.iter().all(|&i| i < nodes));
+    }
+    for skin in scene.skin_deformers() {
+        assert!(skin
+            .clusters
+            .iter()
+            .all(|&i| i < scene.skin_clusters().len()));
+        assert_eq!(skin.dq_vertices.len(), skin.dq_weights.len());
+        assert!(skin
+            .dq_vertices
+            .iter()
+            .all(|&i| (i as usize) < skin.vertices.len()));
+        for v in &skin.vertices {
+            assert!(v.weight_begin <= skin.weights.len());
+            assert!(v.num_weights <= skin.weights.len() - v.weight_begin);
+        }
+        assert!(skin
+            .weights
+            .iter()
+            .all(|w| w.cluster_index < skin.clusters.len()));
+    }
+    for cluster in scene.skin_clusters() {
+        assert!(cluster.bone_node.is_none_or(|i| i < nodes));
+        assert_eq!(cluster.vertices.len(), cluster.weights.len());
+    }
+    for blend in scene.blend_deformers() {
+        assert!(blend
+            .channels
+            .iter()
+            .all(|&i| i < scene.blend_channels().len()));
+    }
+    for channel in scene.blend_channels() {
+        assert!(channel
+            .target_shape
+            .is_none_or(|i| i < scene.blend_shapes().len()));
+        assert!(channel
+            .keyframes
+            .iter()
+            .all(|k| k.shape < scene.blend_shapes().len()));
+    }
+    for shape in scene.blend_shapes() {
+        assert_eq!(shape.offset_vertices.len(), shape.position_offsets.len());
+        assert!(
+            shape.normal_offsets.is_empty()
+                || shape.normal_offsets.len() == shape.offset_vertices.len()
+        );
+        assert!(shape.offset_vertices.windows(2).all(|p| p[0] <= p[1]));
+    }
+    for pose in scene.poses() {
+        assert!(pose.bone_poses.iter().all(|b| b.bone_node < nodes));
     }
     for material in scene.materials() {
         for (_, map) in material.fbx_maps().chain(material.pbr_maps()) {

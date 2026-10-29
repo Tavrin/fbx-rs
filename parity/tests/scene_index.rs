@@ -164,7 +164,7 @@ Connections: { }
 
 #[test]
 fn reports_every_unsupported_kind_on_the_scene() {
-    let source = r#"; FBX 7.4.0
+    let source = r#"; FBX 7.1.0
 Objects: {
  Geometry: 10, "Geometry::M", "Mesh" {
   Vertices: *9 { a: 0,0,0,1,0,0,0,1,0 }
@@ -215,13 +215,39 @@ Connections: {
     let legacy = index.unsupported.last().unwrap();
     assert_eq!(index.objects[legacy.object].id, 10);
 
-    // The converted scene carries the same list with source IDs, and static
-    // conversion still succeeds.
+    // The converter now supports poses and nested shapes; the index keeps
+    // its compatibility tags, but the scene reports only unsupported content.
     let limits = fbx_rs::canon_scene::DumpLimits::default();
     let scene = fbx_rs::canon_scene::project(source.as_bytes(), &limits).unwrap();
     let ids: Vec<_> = scene.unsupported.iter().map(|&(k, id)| (k, id)).collect();
-    assert_eq!(ids[0], (Pose, 2));
-    assert_eq!(ids[9], (AnimationStack, 12));
-    assert_eq!(ids[10], (LegacyShape, 10));
-    assert_eq!(ids.len(), 11);
+    assert_eq!(
+        ids,
+        vec![
+            (CurveOrSurfaceGeometry, 3),
+            (CurveOrSurfaceGeometry, 4),
+            (Cache, 5),
+            (Cache, 6),
+            (Constraint, 7),
+            (Constraint, 8),
+            (Audio, 9),
+            (Audio, 11),
+            (AnimationStack, 12),
+        ]
+    );
+    assert_eq!(
+        scene
+            .elements
+            .iter()
+            .filter(|e| e.ty == fbx_rs::canon_scene::ElementType::Pose)
+            .count(),
+        1
+    );
+    assert_eq!(
+        scene
+            .elements
+            .iter()
+            .filter(|e| e.ty == fbx_rs::canon_scene::ElementType::BlendShape)
+            .count(),
+        1
+    );
 }

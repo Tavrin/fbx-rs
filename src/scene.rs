@@ -60,22 +60,23 @@ pub struct Connection<'a> {
     /// None denotes the implicit FBX root ID 0.
     pub destination: Option<usize>,
 }
-/// Content the static converter does not convert. Each entry is reported,
-/// never silently dropped and never a failure for static use.
+/// Content categories recognized by the object index. The public loader
+/// reports only categories it does not convert; skin, blend and pose tags
+/// are retained here for compatibility with the lower-level index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum UnsupportedKind {
-    /// `Deformer` of class `Skin` (skinning, planned).
+    /// `Deformer` of class `Skin` (converted by the public loader).
     Skin,
-    /// `Deformer` of class `Cluster` (skinning, planned).
+    /// `Deformer` of class `Cluster` (converted by the public loader).
     SkinCluster,
-    /// `Deformer` of class `BlendShape` (blend shapes, planned).
+    /// `Deformer` of class `BlendShape` (converted by the public loader).
     BlendShape,
-    /// `Deformer` of class `BlendShapeChannel` (blend shapes, planned).
+    /// `Deformer` of class `BlendShapeChannel` (converted by the public loader).
     BlendShapeChannel,
-    /// `Geometry` of class `Shape`, a blend-shape target (planned).
+    /// `Geometry` of class `Shape`, a blend-shape target.
     ShapeGeometry,
     /// A `Shape` node nested in a `Geometry` object (FBX 7100-style in-geometry
-    /// blend shape, which ufbx turns into synthetic blend elements; planned).
+    /// blend shape, converted into generated blend elements).
     LegacyShape,
     /// `AnimationStack` (animation, planned).
     AnimationStack,
@@ -85,7 +86,7 @@ pub enum UnsupportedKind {
     AnimationCurveNode,
     /// `AnimationCurve` (animation, planned).
     AnimationCurve,
-    /// `Pose` (bind and rest poses; planned with skinning).
+    /// `Pose` (bind and rest poses, converted by the public loader).
     Pose,
     /// `Geometry` of class `NurbsCurve`, `NurbsSurface`, `TrimNurbsSurface`,
     /// `Boundary` or `Line` (not planned yet).

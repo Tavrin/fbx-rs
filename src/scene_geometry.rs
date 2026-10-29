@@ -1437,6 +1437,8 @@ pub(crate) fn public_mesh(
         instances,
         reversed_winding: m.reversed_winding,
         generated_normals: m.generated_normals,
+        skin_deformers: Vec::new(),
+        blend_deformers: Vec::new(),
     }
 }
 

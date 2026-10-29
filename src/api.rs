@@ -76,6 +76,8 @@ pub struct Limits {
     pub max_connections: usize,
     /// Maximum bytes requested by one conversion stage.
     pub max_allocation: usize,
+    /// Maximum deformer traversal, lookup and sorting work units.
+    pub max_deformer_work: usize,
 }
 
 impl Default for Limits {
@@ -92,6 +94,7 @@ impl Default for Limits {
             max_objects: d.index.max_objects,
             max_connections: d.index.max_connections,
             max_allocation: d.max_allocation,
+            max_deformer_work: d.max_deformer_work,
         }
     }
 }
@@ -111,6 +114,7 @@ impl Limits {
         d.index.max_allocation = self.max_allocation;
         d.max_properties = self.max_properties;
         d.max_allocation = self.max_allocation;
+        d.max_deformer_work = self.max_deformer_work;
         d
     }
 }
@@ -455,9 +459,20 @@ pub struct Mesh {
     pub(crate) instances: Vec<usize>,
     pub(crate) reversed_winding: bool,
     pub(crate) generated_normals: bool,
+    pub(crate) skin_deformers: Vec<usize>,
+    pub(crate) blend_deformers: Vec<usize>,
 }
 
 impl Mesh {
+    /// Skin deformers, indexed into [`Scene::skin_deformers`].
+    pub fn skin_deformers(&self) -> &[usize] {
+        &self.skin_deformers
+    }
+    /// Blend deformers, indexed into [`Scene::blend_deformers`].
+    pub fn blend_deformers(&self) -> &[usize] {
+        &self.blend_deformers
+    }
+
     /// Object name.
     pub fn name(&self) -> &str {
         &self.base.name
@@ -545,9 +560,20 @@ pub struct Node {
     pub(crate) camera: Option<usize>,
     pub(crate) light: Option<usize>,
     pub(crate) materials: Vec<usize>,
+    pub(crate) bone: Option<usize>,
+    pub(crate) bind_pose: Option<usize>,
 }
 
 impl Node {
+    /// Attached bone attribute, indexed into [`Scene::bones`].
+    pub fn bone(&self) -> Option<usize> {
+        self.bone
+    }
+    /// First bind pose containing this node, indexed into [`Scene::poses`].
+    pub fn bind_pose(&self) -> Option<usize> {
+        self.bind_pose
+    }
+
     /// Object name (empty for the root).
     pub fn name(&self) -> &str {
         &self.base.name
@@ -933,12 +959,48 @@ pub struct Scene {
     textures: Vec<Texture>,
     cameras: Vec<Camera>,
     lights: Vec<Light>,
+    bones: Vec<crate::Bone>,
+    skin_deformers: Vec<crate::SkinDeformer>,
+    skin_clusters: Vec<crate::SkinCluster>,
+    blend_deformers: Vec<crate::BlendDeformer>,
+    blend_channels: Vec<crate::BlendChannel>,
+    blend_shapes: Vec<crate::BlendShape>,
+    poses: Vec<crate::Pose>,
     settings: SceneSettings,
     unsupported: Vec<Unsupported>,
     warnings: Vec<String>,
 }
 
 impl Scene {
+    /// Stored bones; references use indices into the corresponding scene slice.
+    pub fn bones(&self) -> &[crate::Bone] {
+        &self.bones
+    }
+    /// Stored skin deformers; references use indices into the corresponding scene slice.
+    pub fn skin_deformers(&self) -> &[crate::SkinDeformer] {
+        &self.skin_deformers
+    }
+    /// Stored skin clusters; references use indices into the corresponding scene slice.
+    pub fn skin_clusters(&self) -> &[crate::SkinCluster] {
+        &self.skin_clusters
+    }
+    /// Stored blend deformers; references use indices into the corresponding scene slice.
+    pub fn blend_deformers(&self) -> &[crate::BlendDeformer] {
+        &self.blend_deformers
+    }
+    /// Stored blend channels; references use indices into the corresponding scene slice.
+    pub fn blend_channels(&self) -> &[crate::BlendChannel] {
+        &self.blend_channels
+    }
+    /// Stored blend shapes; references use indices into the corresponding scene slice.
+    pub fn blend_shapes(&self) -> &[crate::BlendShape] {
+        &self.blend_shapes
+    }
+    /// Stored poses; references use indices into the corresponding scene slice.
+    pub fn poses(&self) -> &[crate::Pose] {
+        &self.poses
+    }
+
     /// Conversion warnings: content that was read but is not converted
     /// (unported shader types, shader textures) or a mesh that failed to
     /// convert and is left empty. The text is for people, not for matching.
@@ -978,8 +1040,8 @@ impl Scene {
     pub fn settings(&self) -> &SceneSettings {
         &self.settings
     }
-    /// Objects present in the file but not converted (skins, blend shapes,
-    /// animation, poses, curves and surfaces, caches, constraints, audio).
+    /// Objects present in the file but not converted (animation, curves and
+    /// surfaces, caches, constraints, audio).
     pub fn unsupported(&self) -> &[Unsupported] {
         &self.unsupported
     }
@@ -989,7 +1051,7 @@ impl Scene {
         let n = c.elements.len();
         // Element index -> index within its kind.
         let mut slot = vec![usize::MAX; n];
-        let mut counts = [0usize; 6];
+        let mut counts = [0usize; 13];
         for (i, e) in c.elements.iter().enumerate() {
             let k = match e.ty {
                 T::Node => 0,
@@ -998,6 +1060,13 @@ impl Scene {
                 T::Texture => 3,
                 T::Camera => 4,
                 T::Light => 5,
+                T::Bone => 6,
+                T::SkinDeformer => 7,
+                T::SkinCluster => 8,
+                T::BlendDeformer => 9,
+                T::BlendChannel => 10,
+                T::BlendShape => 11,
+                T::Pose => 12,
                 _ => continue,
             };
             slot[i] = counts[k];
@@ -1042,6 +1111,11 @@ impl Scene {
                 mesh: attrib(T::Mesh),
                 camera: attrib(T::Camera),
                 light: attrib(T::Light),
+                bone: attrib(T::Bone),
+                bind_pose: match e.obj.get("bind_pose") {
+                    Some(V::Ref(Some(k))) => r(*k),
+                    _ => None,
+                },
                 materials: t.node_materials.get(i).map_or(Vec::new(), |l| refs(l)),
             });
         }
@@ -1139,6 +1213,8 @@ impl Scene {
             scene::index(&c.doc, &limits.index).map_err(|e| Error::Convert(format!("{e:?}")))?;
         let sources = scene_mesh::extract(&c.doc, &index, &scene_mesh::Limits::default())
             .map_err(|e| Error::Convert(format!("{e:?}")))?;
+        let sources_by_node: std::collections::HashMap<_, _> =
+            sources.meshes.iter().map(|s| (s.node, s)).collect();
         let tl = TriangulationLimits::default();
         let mut converted = t.meshes;
         converted.sort_by_key(|(i, _, _)| *i);
@@ -1146,9 +1222,7 @@ impl Scene {
         let mut done = vec![false; n];
         for (i, m, mesh_materials) in converted {
             let e = &c.elements[i];
-            let source = e
-                .node
-                .and_then(|node| sources.meshes.iter().find(|s| s.node == node));
+            let source = e.node.and_then(|node| sources_by_node.get(&node).copied());
             let triangles = match source {
                 Some(s) => triangulate(s, &m, &tl)?,
                 None => Vec::new(),
@@ -1174,9 +1248,78 @@ impl Scene {
             }
         }
         meshes.sort_by_key(|(i, _)| *i);
-        let meshes = meshes.into_iter().map(|(_, m)| m).collect();
+        let mut meshes: Vec<Mesh> = meshes.into_iter().map(|(_, m)| m).collect();
 
         let st = &c.settings;
+        let bone_refs = |e: &canon_scene::Element, want: T| -> Vec<usize> {
+            e.dst_conns
+                .iter()
+                .filter(|(k, p)| p.is_empty() && c.elements[*k].ty == want)
+                .filter_map(|(k, _)| r(*k))
+                .collect()
+        };
+        if !c.deformers.skins.is_empty() || !c.deformers.blends.is_empty() {
+            for (mesh, e) in meshes
+                .iter_mut()
+                .zip(c.elements.iter().filter(|e| e.ty == T::Mesh))
+            {
+                let fetch = |ty| {
+                    let mut out = bone_refs(e, ty);
+                    if let Some(&node) = e.instances.first() {
+                        for k in bone_refs(&c.elements[node], ty) {
+                            if !out.contains(&k) {
+                                out.push(k);
+                            }
+                        }
+                    }
+                    out
+                };
+                mesh.skin_deformers = fetch(T::SkinDeformer);
+                mesh.blend_deformers = fetch(T::BlendDeformer);
+            }
+        }
+        let bones = c
+            .elements
+            .iter()
+            .filter(|e| e.ty == T::Bone)
+            .map(|e| crate::Bone {
+                name: String::from_utf8_lossy(&e.name).into_owned(),
+                source_id: e.source_id,
+                instances: refs(&e.instances),
+                radius: real(e.obj.get("radius")),
+                relative_length: real(e.obj.get("relative_length")),
+                is_root: matches!(e.obj.get("is_root"), Some(V::Bool(true))),
+            })
+            .collect();
+        let mut d = std::mem::take(&mut c.deformers);
+        for (_, skin) in &mut d.skins {
+            skin.clusters = refs(&skin.clusters);
+        }
+        for (_, cluster) in &mut d.clusters {
+            cluster.bone_node = cluster.bone_node.and_then(r);
+        }
+        for (_, blend) in &mut d.blends {
+            blend.channels = refs(&blend.channels);
+        }
+        for (_, channel) in &mut d.channels {
+            channel.target_shape = channel.target_shape.and_then(r);
+            for key in &mut channel.keyframes {
+                key.shape =
+                    r(key.shape).ok_or_else(|| Error::Convert("blend target index".into()))?;
+            }
+        }
+        for (_, pose) in &mut d.poses {
+            for b in &mut pose.bone_poses {
+                b.bone_node =
+                    r(b.bone_node).ok_or_else(|| Error::Convert("pose node index".into()))?;
+            }
+        }
+        let skin_deformers = d.skins.into_iter().map(|(_, v)| v).collect();
+        let skin_clusters = d.clusters.into_iter().map(|(_, v)| v).collect();
+        let blend_deformers = d.blends.into_iter().map(|(_, v)| v).collect();
+        let blend_channels = d.channels.into_iter().map(|(_, v)| v).collect();
+        let blend_shapes = d.shapes.into_iter().map(|(_, v)| v).collect();
+        let poses = d.poses.into_iter().map(|(_, v)| v).collect();
         let md = &c.metadata;
         let axes = match st.get("axes") {
             Some(V::Obj(a)) => CoordinateAxes {
@@ -1215,6 +1358,13 @@ impl Scene {
             textures,
             cameras,
             lights,
+            bones,
+            skin_deformers,
+            skin_clusters,
+            blend_deformers,
+            blend_channels,
+            blend_shapes,
+            poses,
             settings,
             unsupported,
             warnings: std::mem::take(&mut c.warnings),
