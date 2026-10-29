@@ -246,7 +246,7 @@ pub(crate) fn string_view(raw: &[u8], raw_context: bool) -> Vec<u8> {
     out
 }
 
-fn f64_to_i64(x: f64) -> i64 {
+pub(crate) fn f64_to_i64(x: f64) -> i64 {
     if x.is_nan() {
         i64::MIN
     } else if x.abs() <= 9_223_372_036_854_775_807.0 {
@@ -964,6 +964,16 @@ pub fn write_dom<W: Write>(
     }
     emit_node(em, doc, &children, 0, St::Root, St::Root, ascii, 0)?;
     em.end()
+}
+
+/// Numeric animation arrays in their retained byte representation.
+pub(crate) fn animation_array(doc: &Document<'_>, i: usize, ascii: bool) -> Option<(i64, Vec<u8>)> {
+    let parent = state_of(doc, doc.nodes[i].parent);
+    let state = child_state(parent, doc.nodes[i].name);
+    match project(doc, i, state, parent, ascii).into_iter().next()? {
+        DomValue::Array(kind, _, bytes) => Some((kind, bytes)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

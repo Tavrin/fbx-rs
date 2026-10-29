@@ -1,6 +1,6 @@
 # Verification
 
-For the static content it converts, fbx-rs targets the same values as
+For the scene content it converts, fbx-rs targets the same values as
 ufbx 0.23.1 loaded with the same import options, with the deliberate edge
 case differences below. This page says how
 that is checked, on which files, with what result, and what is not covered.
@@ -11,8 +11,8 @@ Both sides write the same canonical text format, `fbx-scene-canon/1`
 ([reference/SCHEMA.md](../reference/SCHEMA.md)): JSON Lines with a fixed
 member order, every floating-point value written as its exact bit pattern,
 and sections for settings, the retained DOM, elements, connections, the node
-graph, meshes, stored skins and blend shapes, materials, cameras and lights, evaluated transforms and
-triangles.
+graph, meshes, stored skins and blend shapes, materials, cameras and lights,
+triangles, authored curves and evaluated animation samples.
 
 - The oracle is `reference/canon.c`, linked against the hash-pinned ufbx C
   sources (`reference/pins.json`) and built by `reference/build.py`. Its load
@@ -24,30 +24,37 @@ triangles.
   as `fbx_rs::load` (crate `parity/`).
 - `fbx-parity compare-scene` validates both streams completely (pins,
   coverage, options, section order, counts, checksums) and then compares them
-  value by value, bit for bit for every f64.
-- Each remaining difference is attributed by path to one of three causes:
+  value by value. Its standalone evaluated comparison supports tolerances;
+  the per-file gate below compares the raw bit strings directly.
+- Each compared path is checked under these rules:
   - DOM mutation: ufbx modifies some retained DOM arrays in place while
     loading (`Geometry/Vertices`, `LayerElementNormal/Normals`, blend-shape
     arrays). Such a difference is accepted only when the oracle's DOM array
     equals, bit for bit, the oracle's own converted mesh data. This is proved
     per array.
-  - Animation content: animation curves and evaluation, and list entries
-    that only animation creates. fbx-rs does not convert these yet. Stored
-    skin, blend-shape and pose records are compared without this exemption.
-    Retained shape-array mutations require bit identity with the oracle's
-    own loaded offsets.
+  - Retained shape-array mutation: accepted only with bit identity against
+    the oracle's own loaded offsets.
+  - Animation is compared without an exemption: curve keys, tangent handles,
+    layer bindings, property samples, node transforms, morph weights and
+    skin matrices must all match bit for bit.
   - Unexplained: anything else. The target is zero.
 - `fbx-parity check-public` then compares every value the public `Scene`
   exposes (nodes, transforms, meshes, bones, skins, poses, blend shapes,
-  material maps, texture content, cameras, lights, counts) with the canonical records of the same file, bit
-  for bit, so the public API and the compared stream cannot drift apart.
+  material maps, texture content, cameras, lights, animation records, evaluated
+  poses and counts) with the canonical records of the same file, bit for bit,
+  so the public API and the compared stream cannot drift apart.
 - The syntax layer is checked separately: `reference/dom_equivalence.py`
   projects the parser's node/property tree onto ufbx's retained DOM (the
   rules cite ufbx source lines) and compares every value bit for bit.
 - The list of unsupported objects (`Scene::unsupported`) is compared per
   file with the oracle's element counts per type.
 
-The per-file classification script that applies the three categories above
+No numeric tolerance is used for the per-file results below, including evaluated
+quaternions and matrices. The reference sampling contract is in `reference/canon.c`;
+the Rust emitter implements the same times and provenance. No oracle
+nondeterminism was observed or used to justify a tolerance.
+
+The per-file classification script that applies the rules above
 is not yet part of this repository; the dumpers and comparators it drives are.
 
 ## Corpus
@@ -74,14 +81,15 @@ On ufbx 0.23.1 with the options above:
 | --- | --- |
 | Original static files (no rig or animation tags) | 306 of 306 equal: 43 with no difference at all, 263 differing only by proved in-place DOM mutation (460 arrays) |
 | Stored skin and blend-shape records | 7 of 7 rig files bit-exact, including both FBX 7.1 nested-shape encodings |
-| Whole-file classification | 308 equal (including proved DOM mutation), 8 differing only in animation |
-| Previously deferred files now fully equal | half-skinned mesh and synthetic blend-shape ordering regression |
+| Whole-file classification | 316 equal (including proved DOM mutation), 0 deferred, 0 unexplained |
+| Authored animation and evaluated samples | 8 animated files, 121 curves, all bit-exact; key/tick neighbours, segment fractions, take bounds and a 30 Hz grid |
+| Additional animation fixtures | 39 complete streams bit-exact: interpolation, weighted tangents, extrapolation, all rotation orders, layers, animated layer weights and recursive scale helpers |
 | Unexplained differences | 0 files |
 | Rejected (FBX 6.1 and older) | 24 |
-| Public `Scene` against canonical records | 316 of 316 files equal, 3,391,950 values |
+| Public `Scene` against canonical records | 316 of 316 files equal, 3,664,695 values, including authored animation and evaluated poses |
 | Syntax layer against ufbx's retained DOM | 315 equal, 1 explained (ufbx sorts blend-shape offsets in place), 0 failing |
 | Unsupported-object report against oracle counts | 316 files, 0 mismatches |
-| wasm32 | canonical dumps and `Scene` contents identical to native on one skinned and two morph fixtures, including a nested-shape file (Wasmtime); default-feature library build passes |
+| wasm32 | canonical dump, public scene and evaluated poses identical to native on one animated morph fixture (Wasmtime); default-feature library build passes |
 
 ## Robustness
 
@@ -104,9 +112,11 @@ crash, timeout or memory-limit failure in any target):
 | `scene_dom` | 120.0 | 10.7 M | 8588 | 120-minute cap, coverage still growing | 109 MiB |
 | `load` | 120.0 | 122.4 M | 6342 | 120-minute cap, coverage still growing | 109 MiB |
 
-The fuzz runs above preceded the deformer additions. The `load` target now
-checks deformer references and influence ranges too, but it was not run for
-this change; malformed deformer regression tests were run instead.
+The fuzz runs above preceded the deformer and animation additions. The `load`
+target now checks deformer and animation references, key ordering and evaluated
+pose sizes too, but it was not run for this change. Malformed-curve regressions
+require errors for unsorted and nonfinite times, invalid attribute counts and
+excessive key counts; duplicate times and finite repeat limits are also tested.
 
 Deformer arrays are charged from their source counts before decoding,
 including intermediate array storage. Adjacency is charged before building
@@ -144,9 +154,9 @@ longer runs can still find new paths in the converter.
 
 ## Not covered
 
-- Animation curves and evaluation: detected and reported, not converted.
-  Mesh positions stay undeformed; the API exposes stored influences and
-  offsets for callers to apply.
+- Mesh positions stay undeformed: evaluation returns transforms, channel
+  weights and skin matrices. Applying skin influences and sparse offsets to
+  the vertex arrays remains the caller's responsibility.
 - Camera and light modes the corpus does not contain: only three files carry
   cameras or lights. The other aperture, gate-fit and aspect branches are
   ported but not exercised.

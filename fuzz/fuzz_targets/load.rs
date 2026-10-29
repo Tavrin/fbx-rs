@@ -107,6 +107,14 @@ fn walk(scene: &Scene) {
             check_map(scene, map);
         }
     }
+    for stack in scene.animation_stacks() {assert!(stack.layers.iter().all(|&i|i<scene.animation_layers().len()));}
+    for layer in scene.animation_layers() {assert!(layer.values.iter().all(|&i|i<scene.animation_values().len()));for binding in &layer.bindings {assert!(binding.value<scene.animation_values().len());}}
+    for value in scene.animation_values() {assert!(value.curves.iter().flatten().all(|&i|i<scene.animation_curves().len()));}
+    for curve in scene.animation_curves() {assert!(curve.keys.windows(2).all(|w|w[0].time<=w[1].time));}
+    let pose=scene.evaluate(None,0.5).unwrap();
+    assert_eq!(pose.nodes.len(),scene.nodes().len());
+    assert_eq!(pose.blend_weights.len(),scene.blend_channels().len());
+    assert_eq!(pose.skin_matrices.len(),scene.skin_clusters().len());
     std::hint::black_box((scene.settings(), scene.unsupported(), scene.warnings()));
 }
 
@@ -120,6 +128,7 @@ fuzz_target!(|data: &[u8]| {
         max_decompressed_bytes: 32768,
         max_string_length: 8192,
         max_objects: 256,
+        max_animation_keys: 4096,
         max_connections: 256,
         max_allocation: 131072,
     };

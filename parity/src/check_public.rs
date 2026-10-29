@@ -704,6 +704,7 @@ pub fn check(canon: &CanonScene<'_>, scene: &Scene) -> Result<u64, String> {
             )?;
         }
     }
+    check_animation(&mut c, canon, scene)?;
     Ok(c.values)
 }
 
@@ -731,4 +732,139 @@ fn deformer_value(c: &mut Check, a: &V, b: &V) -> Result<(), String> {
         }
         _ => c.eq("deformer value", a, b),
     }
+}
+
+fn check_animation(c: &mut Check, canon: &CanonScene<'_>, scene: &Scene) -> Result<(), String> {
+    use fbx_rs::canon_scene as cs;
+    c.eq(
+        "animation stacks",
+        scene.animation_stacks(),
+        cs::animation_stacks(canon),
+    )?;
+    c.eq(
+        "animation layers",
+        scene.animation_layers(),
+        cs::animation_layers(canon),
+    )?;
+    c.eq(
+        "animation values",
+        scene.animation_values(),
+        cs::animation_values(canon),
+    )?;
+    c.eq(
+        "animation curve count",
+        scene.animation_curves().len(),
+        cs::animation_curves(canon).len(),
+    )?;
+    for (a, b) in scene
+        .animation_stacks()
+        .iter()
+        .zip(cs::animation_stacks(canon))
+    {
+        c.f(
+            "take bounds",
+            &[a.time_begin, a.time_end],
+            &[b.time_begin, b.time_end],
+        )?;
+    }
+    for (a, b) in scene
+        .animation_layers()
+        .iter()
+        .zip(cs::animation_layers(canon))
+    {
+        c.f("layer weight", &[a.weight], &[b.weight])?;
+    }
+    for (a, b) in scene
+        .animation_values()
+        .iter()
+        .zip(cs::animation_values(canon))
+    {
+        c.f("animation defaults", &a.default_value, &b.default_value)?;
+    }
+    for (a, b) in scene
+        .animation_curves()
+        .iter()
+        .zip(cs::animation_curves(canon))
+    {
+        c.eq("animation curve", a, b)?;
+        for (a, b) in a.keys.iter().zip(&b.keys) {
+            c.f(
+                "curve key",
+                &[
+                    a.time,
+                    a.value,
+                    f64::from(a.left.dx),
+                    f64::from(a.left.dy),
+                    f64::from(a.right.dx),
+                    f64::from(a.right.dy),
+                ],
+                &[
+                    b.time,
+                    b.value,
+                    f64::from(b.left.dx),
+                    f64::from(b.left.dy),
+                    f64::from(b.right.dx),
+                    f64::from(b.right.dy),
+                ],
+            )?;
+        }
+    }
+    for stack in 0..scene.animation_stacks().len().max(1) {
+        let stack = (!scene.animation_stacks().is_empty()).then_some(stack);
+        for time in [-1.0, 0.0, 0.25, 0.5, 1.0, 2.0] {
+            let a = scene.evaluate(stack, time).map_err(|e| e.to_string())?;
+            let b = cs::evaluate_pose(canon, stack, time).map_err(|e| e.to_string())?;
+            c.eq("evaluated node count", a.nodes.len(), b.nodes.len())?;
+            for (a, b) in a.nodes.iter().zip(&b.nodes) {
+                c.f(
+                    "evaluated translation",
+                    &a.local_transform.translation,
+                    &b.local_transform.translation,
+                )?;
+                c.f(
+                    "evaluated rotation",
+                    &a.local_transform.rotation,
+                    &b.local_transform.rotation,
+                )?;
+                c.f(
+                    "evaluated scale",
+                    &a.local_transform.scale,
+                    &b.local_transform.scale,
+                )?;
+                for (a, b) in [
+                    (&a.node_to_parent, &b.node_to_parent),
+                    (&a.node_to_world, &b.node_to_world),
+                    (&a.geometry_to_node, &b.geometry_to_node),
+                    (&a.geometry_to_world, &b.geometry_to_world),
+                ] {
+                    c.f("evaluated matrix", &a.0, &b.0)?;
+                }
+            }
+            c.f(
+                "evaluated blend weights",
+                &a.blend_weights,
+                &b.blend_weights,
+            )?;
+            c.eq(
+                "evaluated cluster count",
+                a.skin_matrices.len(),
+                b.skin_matrices.len(),
+            )?;
+            for (a, b) in a.skin_matrices.iter().zip(&b.skin_matrices) {
+                c.f("evaluated cluster", &a.0, &b.0)?;
+            }
+            for layer in scene.animation_layers() {
+                for binding in &layer.bindings {
+                    let a = scene
+                        .evaluate_binding(stack, binding, time)
+                        .map_err(|e| e.to_string())?;
+                    let b = cs::evaluate_binding(canon, stack, binding, time)
+                        .map_err(|e| e.to_string())?;
+                    c.f("evaluated property", &a.components, &b.components)?;
+                    c.eq("evaluated property metadata", a, b)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
