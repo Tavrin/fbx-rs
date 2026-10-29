@@ -1,6 +1,9 @@
 name: CI
-# Enable push and pull request triggers when the repository goes public.
-on: workflow_dispatch
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
