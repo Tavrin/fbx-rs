@@ -142,8 +142,8 @@ fn number(p: &Property<'_>) -> Option<f64> {
         Property::I64(v) => Some(*v as f64),
         Property::F32(v) => Some(f64::from(f32::from_bits(*v))),
         Property::F64(v) => Some(f64::from_bits(*v)),
-        Property::Bool(v) | Property::BoolAlt(v) => Some(f64::from(*v as i8)),
-        Property::AsciiBare(v) => v.first().map(|&b| f64::from(b as i8)),
+        Property::Bool(v) | Property::BoolAlt(v) => Some(f64::from(i8::from_ne_bytes([*v]))),
+        Property::AsciiBare(v) => v.first().map(|&b| f64::from(i8::from_ne_bytes([b]))),
         Property::AsciiNegativeZero => Some(-0.0),
         _ => None,
     }
@@ -159,7 +159,7 @@ fn scalar(p: &[Property<'_>], authored: bool) -> Option<Number> {
             if value.is_nan() {
                 i64::MIN
             } else {
-                value as i64
+                crate::numeric::saturating_i64(value)
             }
         }
     };
@@ -189,7 +189,7 @@ fn material_color(p: &[Property<'_>], authored: bool) -> Option<MaterialColor> {
     }
     Some(MaterialColor {
         value,
-        components: count as u8,
+        components: u8::try_from(count).unwrap(),
         authored,
     })
 }

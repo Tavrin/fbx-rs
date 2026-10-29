@@ -98,9 +98,11 @@ impl NumericArray<'_> {
             },
             _ => match self.word(index)? {
                 (b'd', v) => Some(f64::from_bits(v)),
-                (b'f', v) => Some(f64::from(f32::from_bits(v as u32))),
-                (b'i', v) => Some((v as u32 as i32) as f64),
-                (b'l', v) => Some((v as i64) as f64),
+                (b'f', v) => Some(f64::from(f32::from_bits(u32::try_from(v).ok()?))),
+                (b'i', v) => {
+                    Some((i32::from_le_bytes(v.to_le_bytes()[..4].try_into().unwrap())) as f64)
+                }
+                (b'l', v) => Some((i64::from_ne_bytes(v.to_ne_bytes())) as f64),
                 (b'b' | b'c', v) => Some(v as f64),
                 _ => None,
             },
@@ -114,9 +116,11 @@ impl NumericArray<'_> {
                 _ => None,
             },
             _ => match self.word(index)? {
-                (b'i', v) => Some(i64::from(v as u32 as i32)),
-                (b'l', v) => Some(v as i64),
-                (b'b' | b'c', v) => Some(v as i64),
+                (b'i', v) => Some(i64::from(i32::from_le_bytes(
+                    v.to_le_bytes()[..4].try_into().unwrap(),
+                ))),
+                (b'l', v) => Some(i64::from_ne_bytes(v.to_ne_bytes())),
+                (b'b' | b'c', v) => Some(i64::from_ne_bytes(v.to_ne_bytes())),
                 _ => None,
             },
         }

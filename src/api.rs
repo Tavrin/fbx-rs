@@ -80,6 +80,8 @@ pub struct Limits {
     pub max_allocation: usize,
     /// Maximum deformer traversal, lookup and sorting work units.
     pub max_deformer_work: usize,
+    /// Maximum animation traversal, lookup and sorting work per stage.
+    pub max_animation_work: usize,
 }
 
 impl Default for Limits {
@@ -98,6 +100,7 @@ impl Default for Limits {
             max_connections: d.index.max_connections,
             max_allocation: d.max_allocation,
             max_deformer_work: d.max_deformer_work,
+            max_animation_work: d.max_animation_work,
         }
     }
 }
@@ -121,6 +124,7 @@ impl Limits {
         d.max_properties = self.max_properties;
         d.max_allocation = self.max_allocation;
         d.max_deformer_work = self.max_deformer_work;
+        d.max_animation_work = self.max_animation_work;
         d
     }
 }
@@ -1484,7 +1488,14 @@ fn triangulate(
     for (face, range) in faces.enumerate() {
         let range = range.map_err(bad)?;
         let (begin, count) = (range.start, range.len());
-        if m.face(face) != Some((begin as u32, count as u32)) {
+        if m.face(face)
+            != Some((
+                u32::try_from(begin)
+                    .map_err(|_| Error::Convert("triangulation: index overflow".into()))?,
+                u32::try_from(count)
+                    .map_err(|_| Error::Convert("triangulation: count overflow".into()))?,
+            ))
+        {
             return Err(Error::Convert("triangulation: face layout mismatch".into()));
         }
         buf.clear();
@@ -1499,7 +1510,10 @@ fn triangulate(
             } else {
                 corner
             };
-            out.push(c as u32);
+            out.push(
+                u32::try_from(c)
+                    .map_err(|_| Error::Convert("triangulation: corner overflow".into()))?,
+            );
         }
     }
     Ok(out)

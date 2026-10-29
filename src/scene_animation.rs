@@ -2,8 +2,9 @@
 use crate::animation::*;
 use crate::canon::{s, Obj, V};
 use crate::canon_scene::{CanonScene, DumpLimits, ElementType as T};
+use crate::conversion_budget::{Budget, Path};
 use crate::scene_property;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn auto_tangent(
     times: [f64; 3],
@@ -57,7 +58,7 @@ fn auto_tangent(
         }
         slope = sign * abs;
     }
-    slope as f32
+    crate::numeric::round_f32(slope)
 }
 fn auto_edge(t0: f64, t1: f64, v0: f64, v1: f64, bias: f32, flags: u32) -> f32 {
     if flags & 0x4000 != 0 || (flags & 0x1000 != 0 && (v1 - v0).abs() <= 0.0) {
@@ -70,11 +71,12 @@ fn auto_edge(t0: f64, t1: f64, v0: f64, v1: f64, bias: f32, flags: u32) -> f32 {
             slope += b * b * if bias > 0.0 { 1.0 } else { -1.0 } * 40.0;
         }
     }
-    slope as f32
+    crate::numeric::round_f32(slope)
 }
 struct Reader<'s, 'd> {
     s: &'s CanonScene<'d>,
     children: Vec<Vec<usize>>,
+    budget: Budget,
 }
 impl Reader<'_, '_> {
     fn child(&self, n: usize, name: &[u8]) -> Option<usize> {
@@ -87,6 +89,8 @@ impl Reader<'_, '_> {
         let c = self
             .child(n, name)
             .ok_or("animation: missing curve array")?;
+        self.budget
+            .work(crate::canon_dom::data_len(&self.s.doc, c)?)?;
         for p in &self.s.doc.properties[self.s.doc.nodes[c].properties.clone()] {
             let count = match p {
                 crate::syntax::Property::Array { count, .. } => *count,
@@ -130,14 +134,14 @@ impl Reader<'_, '_> {
         }
         Ok(bytes)
     }
-    fn ext(&self, n: usize, name: &[u8]) -> Extrapolation {
+    fn ext(&self, n: usize, name: &[u8]) -> Result<Extrapolation, String> {
         use crate::canon_dom::{node_data, NodeData, Scalar};
         let mut out = Extrapolation {
             mode: ExtrapolationMode::Constant,
             repeat_count: -1,
         };
         let Some(n) = self.child(n, name) else {
-            return out;
+            return Ok(out);
         };
         let number = |name| {
             self.child(n, name)
@@ -150,16 +154,19 @@ impl Reader<'_, '_> {
                 })
         };
         if let Some(c) = number(b"Type") {
-            out.mode = match c as u8 {
-                b'A' => ExtrapolationMode::RepeatRelative,
-                b'K' => ExtrapolationMode::Slope,
-                b'M' => ExtrapolationMode::Mirror,
-                b'R' => ExtrapolationMode::Repeat,
+            let c = i32::try_from(c).map_err(|_| "animation: extrapolation type out of range")?;
+            out.mode = match c {
+                65 => ExtrapolationMode::RepeatRelative,
+                75 => ExtrapolationMode::Slope,
+                77 => ExtrapolationMode::Mirror,
+                82 => ExtrapolationMode::Repeat,
                 _ => ExtrapolationMode::Constant,
             };
-            out.repeat_count = number(b"Repetition").unwrap_or(-1).max(-1) as i32;
+            out.repeat_count = i32::try_from(number(b"Repetition").unwrap_or(-1))
+                .map_err(|_| "animation: extrapolation repetition out of range")?
+                .max(-1);
         }
-        out
+        Ok(out)
     }
     fn curve(
         &self,
@@ -233,7 +240,10 @@ impl Reader<'_, '_> {
                 return Err("animation: invalid attribute repetition".into());
             }
             total = total
-                .checked_add(r as usize)
+                .checked_add(
+                    usize::try_from(r)
+                        .map_err(|_| "animation: attribute repetition out of range")?,
+                )
                 .ok_or("animation: count overflow")?;
         }
         if total != count {
@@ -293,8 +303,8 @@ impl Reader<'_, '_> {
                     let d01 = factor * (1.0 - t) * (1.0 - b) * (1.0 + c);
                     let d10 = factor * (1.0 - t) * (1.0 + b) * (1.0 + c);
                     let d11 = factor * (1.0 - t) * (1.0 - b) * (1.0 - c);
-                    sl = (d00 * ls + d01 * rs) as f32;
-                    sr = (d10 * ls + d11 * rs) as f32;
+                    sl = crate::numeric::round_f32(d00 * ls + d01 * rs);
+                    sr = crate::numeric::round_f32(d10 * ls + d11 * rs);
                     nsl = 0.0;
                     nwl = 0.333333;
                 } else if f & 0x400 == 0 {
@@ -325,19 +335,19 @@ impl Reader<'_, '_> {
                 wr = 0.333333;
                 nwl = 0.333333;
                 sr = if next > time {
-                    ((values[k + 1] - value) / (next - time)) as f32
+                    crate::numeric::round_f32((values[k + 1] - value) / (next - time))
                 } else {
                     0.0
                 };
                 nsl = sr;
             }
             let ld = if time > prev {
-                (f64::from(wl) * (time - prev)) as f32
+                crate::numeric::round_f32(f64::from(wl) * (time - prev))
             } else {
                 0.0
             };
             let rd = if next > time {
-                (f64::from(wr) * (next - time)) as f32
+                crate::numeric::round_f32(f64::from(wr) * (next - time))
             } else {
                 0.0
             };
@@ -375,8 +385,8 @@ impl Reader<'_, '_> {
             element: i,
             source_id: self.s.elements[i].source_id.unwrap_or(0),
             keys,
-            pre_extrapolation: self.ext(n, b"Pre-Extrapolation"),
-            post_extrapolation: self.ext(n, b"Post-Extrapolation"),
+            pre_extrapolation: self.ext(n, b"Pre-Extrapolation")?,
+            post_extrapolation: self.ext(n, b"Post-Extrapolation")?,
         })
     }
 }
@@ -408,19 +418,160 @@ fn binding_obj(b: &AnimationBinding, a: &Animation) -> Obj {
         .with("prop_name", s(&b.property))
         .with("anim_value", V::Ref(Some(a.values[b.value].element)))
 }
-pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), String> {
-    let mut children = vec![Vec::new(); scn.doc.nodes.len()];
-    for (i, n) in scn.doc.nodes.iter().enumerate() {
+fn child_index(doc: &crate::syntax::Document<'_>) -> Vec<Vec<usize>> {
+    let mut children = vec![Vec::new(); doc.nodes.len()];
+    for (i, n) in doc.nodes.iter().enumerate() {
         if let Some(p) = n.parent {
             children[p].push(i);
         }
     }
+    children
+}
+// Validate and charge every source array before either helper detection or key
+// reconstruction can decode it. Repeated connections never repeat decoding.
+fn preflight_curves(
+    doc: &crate::syntax::Document<'_>,
+    elements: &[crate::canon_scene::Element],
+    children: &[Vec<usize>],
+    limits: &DumpLimits,
+    budget: &Budget,
+) -> Result<(), String> {
+    for e in elements {
+        if e.ty != T::AnimCurve {
+            continue;
+        }
+        let n = e.node.ok_or("animation: curve source")?;
+        budget.work(children[n].len())?;
+        let mut arrays = [None; 5];
+        for &c in &children[n] {
+            let slot = match doc.nodes[c].name {
+                b"KeyTime" => 0,
+                b"KeyValueFloat" => 1,
+                b"KeyAttrFlags" => 2,
+                b"KeyAttrDataFloat" => 3,
+                b"KeyAttrRefCount" => 4,
+                _ => continue,
+            };
+            if arrays[slot].is_none() {
+                arrays[slot] = Some(c);
+            }
+        }
+        let mut counts = [0; 5];
+        for (i, node) in arrays.into_iter().enumerate() {
+            let node = node.ok_or("animation: missing curve array")?;
+            counts[i] = crate::canon_dom::data_len(doc, node)?;
+        }
+        if counts[0] > limits.max_keys {
+            return Err("animation: key limit".into());
+        }
+        if counts[0] != counts[1]
+            || counts[2] != counts[4]
+            || counts[4].checked_mul(4) != Some(counts[3])
+        {
+            return Err("animation: mismatched curve arrays".into());
+        }
+        budget.charge(counts[0], std::mem::size_of::<Keyframe>() * 2)?;
+        for count in counts {
+            budget.charge(count, 128)?;
+        }
+        for c in arrays.into_iter().flatten() {
+            for p in &doc.properties[doc.nodes[c].properties.clone()] {
+                if let crate::syntax::Property::String(v) = p {
+                    budget.charge(v.len(), 8)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+fn validate_cycles(
+    elements: &[crate::canon_scene::Element],
+    budget: &Budget,
+) -> Result<(), String> {
+    let anim = |k: usize| {
+        matches!(
+            elements[k].ty,
+            T::AnimCurve | T::AnimValue | T::AnimLayer | T::AnimStack
+        )
+    };
+    let mut color = vec![0u8; elements.len()];
+    for start in 0..elements.len() {
+        if !anim(start) || color[start] != 0 {
+            continue;
+        }
+        color[start] = 1;
+        let mut stack = vec![(start, 0)];
+        while let Some((i, next)) = stack.last_mut() {
+            let conns = &elements[*i].src_conns;
+            if *next == conns.len() {
+                color[*i] = 2;
+                stack.pop();
+                continue;
+            }
+            let k = conns[*next].0;
+            budget.work(1)?;
+            *next += 1;
+            if !anim(k) {
+                continue;
+            }
+            if color[k] == 1 {
+                return Err("animation: connection cycle".into());
+            }
+            if color[k] == 0 {
+                color[k] = 1;
+                stack.push((k, 0));
+            }
+        }
+    }
+    Ok(())
+}
+/// Element-indexed helper and owner membership, built once per projection.
+pub(crate) fn helper_index(
+    n: usize,
+    pairs: &[(usize, usize)],
+) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
+    let mut helper = vec![None; n];
+    let mut owner = vec![None; n];
+    for &(o, h) in pairs {
+        helper[o] = Some(h);
+        owner[h] = Some(o);
+    }
+    (helper, owner)
+}
+pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), String> {
+    let budget = Budget::new(
+        limits.max_allocation,
+        limits.max_animation_work,
+        Path::Curves,
+    );
+    budget.charge(scn.doc.nodes.len(), 64)?;
+    budget.charge(scn.elements.len(), 1024)?;
+    budget.work(scn.doc.nodes.len() + scn.elements.len())?;
+    for e in &scn.elements {
+        budget.charge(e.src_conns.len(), 128)?;
+        for (_, prop) in &e.src_conns {
+            budget.charge(prop.len(), 8)?;
+        }
+    }
+    let children = child_index(&scn.doc);
+    preflight_curves(&scn.doc, &scn.elements, &children, limits, &budget)?;
+    validate_cycles(&scn.elements, &budget)?;
     let mut a = std::mem::take(&mut scn.animation);
     a.ids = scn.elements.iter().map(|e| e.source_id).collect();
-    let mut retained_keys = 0usize;
     let mut authored = vec![BTreeMap::new(); scn.elements.len()];
     let mut defaults = vec![BTreeMap::new(); scn.elements.len()];
-    let r = Reader { s: scn, children };
+    let (helper_for, owner_for) = helper_index(scn.elements.len(), &scn.scale_helpers);
+    let r = Reader {
+        s: scn,
+        children,
+        budget,
+    };
+    let channel_index: BTreeMap<_, _> = scn
+        .deformers
+        .channels
+        .iter()
+        .map(|(k, c)| (*k, c))
+        .collect();
     for (i, e) in scn.elements.iter().enumerate() {
         let Some(n) = e.node else {
             continue;
@@ -429,8 +580,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             let layers = node_layers(
                 &scn.doc,
                 n,
-                scn.scale_helpers.iter().any(|&(_, h)| h == i),
-                scn.scale_helpers.iter().any(|&(o, _)| o == i),
+                owner_for[i].is_some(),
+                helper_for[i].is_some(),
                 limits,
             )?;
             for p in &layers.authored {
@@ -443,12 +594,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             }
         }
         if e.ty == T::BlendChannel {
-            let weight = scn
-                .deformers
-                .channels
-                .iter()
-                .find(|(k, _)| *k == i)
-                .map_or(0.0, |(_, c)| c.weight);
+            let weight = channel_index.get(&i).map_or(0.0, |c| c.weight);
             let percent = if scn.doc.nodes[n].name == b"Shape" {
                 let owner = scn.doc.nodes[n].parent.ok_or("animation: shape owner")?;
                 let l = scene_property::layers(
@@ -487,31 +633,13 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 });
         }
         if e.ty == T::AnimCurve {
-            let tick_node = r
-                .child(n, b"KeyTime")
-                .ok_or("animation: missing key times")?;
-            let raw = &scn.doc.properties[scn.doc.nodes[tick_node].properties.clone()];
-            let count = match raw.first() {
-                Some(crate::syntax::Property::Array { count, .. }) => *count,
-                Some(crate::syntax::Property::AsciiArray(v)) => v.len(),
-                _ => raw.len(),
-            };
-            if count > limits.max_keys {
-                return Err("animation: key limit".into());
-            }
-            retained_keys = retained_keys
-                .checked_add(count)
-                .ok_or("animation: key count overflow")?;
-            // Include keys and the parallel temporary reconstruction arrays.
-            if retained_keys
-                .checked_mul(128)
-                .is_none_or(|b| b > limits.max_allocation)
-            {
-                return Err("animation: aggregate key allocation limit".into());
-            }
             a.curves
                 .push(r.curve(i, n, limits.max_allocation, limits.max_keys)?);
         }
+    }
+    let mut curve_index = vec![None; scn.elements.len()];
+    for (k, c) in a.curves.iter().enumerate() {
+        curve_index[c.element] = Some(k);
     }
     for (i, e) in scn.elements.iter().enumerate() {
         if e.ty != T::AnimValue {
@@ -536,10 +664,11 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 .or_else(|| get(plain))
                 .map_or(0.0, |p| p.components[0]);
         }
+        r.budget.sort_work(e.dst_conns.len())?;
         let mut conns = e.dst_conns.clone();
         conns.sort_by(|a, b| a.1.cmp(&b.1));
         for (src, name) in conns {
-            if let Some(k) = a.curves.iter().position(|v| v.element == src) {
+            if let Some(k) = curve_index[src] {
                 let c = match name.as_slice() {
                     b"Y" | b"d|Y" => 1,
                     b"Z" | b"d|Z" => 2,
@@ -553,7 +682,13 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         }
         a.values.push(v);
     }
+    let mut value_index = vec![None; scn.elements.len()];
+    for (k, v) in a.values.iter().enumerate() {
+        value_index[v.element] = Some(k);
+    }
+    r.budget.path.set(Path::Layers);
     for v in &a.values {
+        r.budget.work(scn.elements[v.element].src_conns.len())?;
         for (dst, name) in &scn.elements[v.element].src_conns {
             if name.is_empty() {
                 continue;
@@ -606,19 +741,27 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             values: Vec::new(),
             bindings: Vec::new(),
         };
+        r.budget.sort_work(e.dst_conns.len())?;
+        // Precharge the dedup set and value list before the first insertion.
+        r.budget.charge(e.dst_conns.len(), 80)?;
+        let mut seen = BTreeSet::new();
         for (src, name) in &e.dst_conns {
             if !name.is_empty() {
                 continue;
             }
-            let Some(value) = a.values.iter().position(|v| v.element == *src) else {
+            let Some(value) = value_index[*src] else {
                 continue;
             };
-            if layer.values.contains(&value) {
+            if !seen.insert(value) {
                 continue;
             }
             layer.values.push(value);
+            r.budget.work(scn.elements[*src].src_conns.len())?;
             for (dst, prop) in &scn.elements[*src].src_conns {
                 if !prop.is_empty() {
+                    r.budget
+                        .charge(1, std::mem::size_of::<AnimationBinding>() * 4)?;
+                    r.budget.charge(prop.len(), 2)?;
                     layer.bindings.push(AnimationBinding {
                         element: *dst,
                         source_id: scn.elements[*dst].source_id.unwrap_or(0),
@@ -628,11 +771,16 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 }
             }
         }
+        r.budget.sort_work(layer.bindings.len())?;
         layer
             .bindings
             .sort_by(|a, b| a.element.cmp(&b.element).then(a.property.cmp(&b.property)));
         layer.weight_is_animated = get(b"Weight").is_some_and(|p| p.flags & 0x2000 != 0);
         a.layers.push(layer);
+    }
+    let mut layer_index = vec![None; scn.elements.len()];
+    for (k, l) in a.layers.iter().enumerate() {
+        layer_index[l.element] = Some(k);
     }
     for (i, e) in scn.elements.iter().enumerate() {
         if e.ty != T::AnimStack {
@@ -645,13 +793,16 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         let (time_begin, time_end) = bounds.map_or((0.0, 0.0), |(b, e)| {
             (b.value_int as f64 / KTIME, e.value_int as f64 / KTIME)
         });
+        r.budget.sort_work(e.dst_conns.len())?;
+        r.budget.charge(e.dst_conns.len(), 80)?;
+        let mut seen = BTreeSet::new();
         let mut layers = Vec::new();
         for (src, name) in &e.dst_conns {
             if !name.is_empty() {
                 continue;
             }
-            if let Some(k) = a.layers.iter().position(|l| l.element == *src) {
-                if !layers.contains(&k) {
+            if let Some(k) = layer_index[*src] {
+                if seen.insert(k) {
                     layers.push(k);
                 }
             }
@@ -672,13 +823,21 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             a.properties.insert((i, name.clone()), p.clone());
         }
     }
+    let mut node_element = vec![None; scn.doc.nodes.len()];
+    for (i, e) in scn.elements.iter().enumerate() {
+        if let Some(n) = e.node {
+            node_element[n].get_or_insert(i);
+        }
+    }
+    let mut node_slot = vec![None; scn.elements.len()];
+    for (k, n) in a.nodes.iter().enumerate() {
+        node_slot[n.element] = Some(k);
+    }
     // Property-to-property links (including generated legacy shape channels).
     for (i, e) in scn.elements.iter().enumerate() {
         if e.ty == T::BlendChannel && e.node.is_some_and(|n| scn.doc.nodes[n].name == b"Shape") {
             let owner = scn.doc.nodes[e.node.unwrap()].parent;
-            if let Some(owner) =
-                owner.and_then(|n| scn.elements.iter().position(|e| e.node == Some(n)))
-            {
+            if let Some(owner) = owner.and_then(|n| node_element[n]) {
                 if a.properties.contains_key(&(owner, e.name.clone())) {
                     a.connections
                         .insert((i, b"DeformPercent".to_vec()), (owner, e.name.clone()));
@@ -699,8 +858,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         .iter()
         .map(|(_, c)| {
             (
-                c.bone_node
-                    .and_then(|e| a.nodes.iter().position(|n| n.element == e)),
+                c.bone_node.and_then(|e| node_slot[e]),
                 if c.bone_node.is_some() {
                     c.geometry_to_bone.0
                 } else {
@@ -848,6 +1006,16 @@ pub(crate) fn scale_helpers(
     ascii: bool,
     limits: &DumpLimits,
 ) -> Result<Vec<(usize, usize)>, String> {
+    let budget = Budget::new(
+        limits.max_allocation,
+        limits.max_animation_work,
+        Path::Helpers,
+    );
+    budget.charge(doc.nodes.len(), 64)?;
+    budget.charge(elements.len(), 512)?;
+    budget.work(doc.nodes.len() + elements.len())?;
+    let dom_children = child_index(doc);
+    preflight_curves(doc, elements, &dom_children, limits, &budget)?;
     let n = elements.len();
     let mut original = vec![0; n];
     let mut scale = vec![[1.0; 3]; n];
@@ -895,25 +1063,35 @@ pub(crate) fn scale_helpers(
             }
         }
     }
+    let mut ranges = vec![None; n];
+    for (i, e) in elements.iter().enumerate() {
+        if e.ty != T::AnimCurve {
+            continue;
+        }
+        let node = e.node.ok_or("animation: curve source")?;
+        let value_node = dom_children[node]
+            .iter()
+            .copied()
+            .find(|&c| doc.nodes[c].name == b"KeyValueFloat")
+            .ok_or("animation: missing curve array")?;
+        budget.work(crate::canon_dom::data_len(doc, value_node)?)?;
+        let values = crate::canon_dom::node_data(doc, value_node, ascii);
+        ranges[i] = Some(match values {
+            crate::canon_dom::NodeData::Reals(v) => v
+                .into_iter()
+                .fold(None::<(f64, f64)>, |acc, x| {
+                    Some(acc.map_or((x, x), |(a, b)| {
+                        (if a < x { a } else { x }, if b > x { b } else { x })
+                    }))
+                })
+                .unwrap_or((0.0, 0.0)),
+            _ => (0.0, 0.0),
+        });
+    }
+    budget.work(connections.len())?;
     for (src, dst, prop) in connections.iter() {
         if elements[*src].ty == T::AnimCurve && elements[*dst].ty == T::AnimValue {
-            let node = elements[*src].node.ok_or("animation: curve source")?;
-            let values = doc
-                .nodes
-                .iter()
-                .position(|d| d.parent == Some(node) && d.name == b"KeyValueFloat")
-                .map(|i| crate::canon_dom::node_data(doc, i, ascii));
-            let (min, max) = match values {
-                Some(crate::canon_dom::NodeData::Reals(v)) => v
-                    .into_iter()
-                    .fold(None::<(f64, f64)>, |acc, x| {
-                        Some(acc.map_or((x, x), |(a, b)| {
-                            (if a < x { a } else { x }, if b > x { b } else { x })
-                        }))
-                    })
-                    .unwrap_or((0.0, 0.0)),
-                _ => (0.0, 0.0),
-            };
+            let (min, max) = ranges[*src].ok_or("animation: curve range")?;
             let c = match prop.as_slice() {
                 b"Y" | b"d|Y" => 1,
                 b"Z" | b"d|Z" => 2,
@@ -932,6 +1110,7 @@ pub(crate) fn scale_helpers(
             }
         }
     }
+    budget.work(connections.len())?;
     for (src, dst, prop) in connections.iter() {
         if elements[*src].ty == T::AnimValue && prop == b"Lcl Scaling" {
             animated[*dst] |= !has_constant[*src]
@@ -976,6 +1155,7 @@ pub(crate) fn scale_helpers(
     for owner in initial {
         let mut pending = children[owner].clone();
         while let Some(i) = pending.pop() {
+            budget.work(1)?;
             if (parent[i] != Some(owner) || original[i] == 2) && original[i] != 0 && !recursive[i] {
                 recursive[i] = true;
                 required[i] = true;
@@ -990,6 +1170,7 @@ pub(crate) fn scale_helpers(
             if elements.len() >= limits.index.max_objects {
                 return Err("animation: helper object limit".into());
             }
+            budget.charge(1, 1024)?;
             let e = &elements[i];
             let helper = elements.len();
             elements.push(crate::canon_scene::Element {
@@ -1008,6 +1189,7 @@ pub(crate) fn scale_helpers(
             pairs.push((i, helper));
         }
     }
+    budget.work(connections.len())?;
     for (src, dst, prop) in connections.iter_mut() {
         if let Some(h) = helpers.get(*dst).copied().flatten() {
             let redirect = match elements[*src].ty {
@@ -1055,9 +1237,134 @@ pub(crate) fn node_layers<'a>(
                 if p.name == b"Lcl Scaling" || p.name == b"GeometricScaling" {
                     p.value_real[..3].fill(1.0);
                 }
-                p.value_int = p.value_real[0] as i64;
+                p.value_int = crate::numeric::saturating_i64(p.value_real[0]);
             }
         }
     }
     Ok(l)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::Property;
+
+    const INPUT: &[u8] = br#"; FBX 7.4.0
+Objects: {
+ AnimationCurve: 1, "AnimCurve::C", "" {
+ KeyTime: *2 { a: 0,46186158000 }
+ KeyValueFloat: *2 { a: 0,10 }
+ KeyAttrFlags: *1 { a: 4 }
+ KeyAttrDataFloat: *4 { a: 0,0,0,0 }
+ KeyAttrRefCount: *1 { a: 2 }
+ }
+ AnimationCurveNode: 2, "AnimCurveNode::T", "" { }
+ AnimationLayer: 3, "AnimLayer::L", "" { }
+ AnimationStack: 4, "AnimStack::S", "" { }
+ Model: 5, "Model::N", "Null" { }
+}
+Connections: {
+ C: "OP",1,2,"d|X"
+ C: "OO",2,3
+ C: "OO",3,4
+ C: "OP",2,5,"Lcl Translation"
+}
+"#;
+    #[test]
+    fn every_curve_array_is_preflighted_before_helper_decoding() {
+        for name in [
+            b"KeyTime".as_slice(),
+            b"KeyValueFloat",
+            b"KeyAttrFlags",
+            b"KeyAttrDataFloat",
+            b"KeyAttrRefCount",
+        ] {
+            let limits = DumpLimits::default();
+            let mut s = crate::canon_scene::project_with(INPUT, &limits, true).unwrap();
+            let c = s.doc.nodes.iter().position(|n| n.name == name).unwrap();
+            let p = s.doc.nodes[c].properties.start;
+            // Impossible binary payload must be rejected using its declared count,
+            // before node_data can discard the bytes as empty or allocate them.
+            s.doc.properties[p] = Property::Array {
+                kind: b'd',
+                count: usize::MAX,
+                big_endian: false,
+                bytes: Vec::new().into(),
+            };
+            let mut connections = Vec::new();
+            let error = scale_helpers(&s.doc, &mut s.elements, &mut connections, false, &limits)
+                .unwrap_err();
+            assert!(
+                error.contains("key limit")
+                    || error.contains("mismatched")
+                    || error.contains("allocation"),
+                "{name:?}: {error}"
+            );
+        }
+        let s = crate::canon_scene::project_with(INPUT, &DumpLimits::default(), true).unwrap();
+        let children = child_index(&s.doc);
+        let budget = Budget::new(0, usize::MAX, Path::Curves);
+        assert!(preflight_curves(
+            &s.doc,
+            &s.elements,
+            &children,
+            &DumpLimits::default(),
+            &budget
+        )
+        .unwrap_err()
+        .contains("allocation limit"));
+        let mut elements = s.elements.clone();
+        let curve = elements
+            .iter()
+            .find(|e| e.ty == T::AnimCurve)
+            .unwrap()
+            .clone();
+        // Each curve fits alone, but their combined reconstruction does not.
+        elements.push(curve);
+        let budget = Budget::new(2500, usize::MAX, Path::Curves);
+        assert!(preflight_curves(
+            &s.doc,
+            &elements,
+            &children,
+            &DumpLimits::default(),
+            &budget
+        )
+        .unwrap_err()
+        .contains("allocation limit"));
+    }
+
+    #[test]
+    fn multiplicative_bindings_are_charged_before_copying() {
+        let mut s = crate::canon_scene::project_with(INPUT, &DumpLimits::default(), true).unwrap();
+        let value = s
+            .elements
+            .iter()
+            .position(|e| e.ty == T::AnimValue)
+            .unwrap();
+        let target = s
+            .elements
+            .iter()
+            .position(|e| e.ty == T::Node && e.node.is_some())
+            .unwrap();
+        let layer = s
+            .elements
+            .iter()
+            .position(|e| e.ty == T::AnimLayer)
+            .unwrap();
+        for _ in 0..32 {
+            let mut e = s.elements[layer].clone();
+            e.dst_conns = vec![(value, Vec::new())];
+            s.elements.push(e);
+        }
+        s.elements[value].src_conns = (0..128)
+            .map(|k| (target, format!("Property{k}").into_bytes()))
+            .collect();
+        let limits = DumpLimits {
+            max_allocation: 100_000,
+            ..Default::default()
+        };
+        assert!(project(&mut s, &limits)
+            .unwrap_err()
+            .contains("allocation limit"));
+    }
 }

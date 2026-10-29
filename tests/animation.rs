@@ -220,3 +220,117 @@ fn animated_integer_view_uses_reference_boundary_conversion() {
         i64::MIN
     );
 }
+
+#[test]
+fn extrapolation_uses_full_int32_type_and_rejects_overflow() {
+    use fbx_rs::ExtrapolationMode;
+    for (ty, repetition, valid) in [
+        ("338", "-1", true),
+        ("-174", "-1", true),
+        ("2147483647", "-1", true),
+        ("2147483648", "1", false),
+        ("82", "4294967296", false),
+        ("82", "-2147483649", false),
+    ] {
+        let input = fixture("0,46186158000", "0,10", "4", "0,0,0,0", "2").replace(
+            "  KeyTime:",
+            &format!(
+                "  Post-Extrapolation: {{ Type: {ty}\n Repetition: {repetition}\n }}\n  KeyTime:"
+            ),
+        );
+        let result = load(input.as_bytes(), &LoadOptions::default());
+        if valid {
+            let s = result.unwrap();
+            assert_eq!(
+                s.animation_curves()[0].post_extrapolation.mode,
+                ExtrapolationMode::Constant
+            );
+            assert_eq!(s.animation_curves()[0].evaluate(1.25, 0.0).unwrap(), 10.0);
+        } else {
+            assert!(result.unwrap_err().to_string().contains("extrapolation"));
+        }
+    }
+}
+
+#[test]
+fn animation_cycles_are_errors_including_disconnected_cycles() {
+    for edge in ["C: \"OO\",3,3", "C: \"OO\",2,3", "C: \"OP\",4,5,\"d|X\""] {
+        let input = fixture("0,46186158000", "0,10", "4", "0,0,0,0", "2")
+            .replace("Connections: {", &format!("Connections: {{\n {edge}"));
+        assert!(load(input.as_bytes(), &LoadOptions::default())
+            .unwrap_err()
+            .to_string()
+            .contains("connection cycle"));
+    }
+    let input = fixture("0,46186158000", "0,10", "4", "0,0,0,0", "2")
+        .replace(" C: \"OO\",3,2", " C: \"OO\",3,3");
+    assert!(load(input.as_bytes(), &LoadOptions::default()).is_err());
+}
+
+#[test]
+fn duplicate_connections_keep_first_binding_and_stable_value_order() {
+    let input = fixture("0,46186158000", "0,10", "4", "0,0,0,0", "2")
+        .replace(" C: \"OO\",4,3", " C: \"OO\",4,3\n C: \"OO\",4,3")
+        .replace(" C: \"OO\",3,2", " C: \"OO\",3,2\n C: \"OO\",3,2");
+    let s = load(input.as_bytes(), &LoadOptions::default()).unwrap();
+    assert_eq!(s.animation_stacks()[0].layers.len(), 1);
+    assert_eq!(s.animation_layers()[0].values.len(), 1);
+    assert_eq!(s.animation_layers()[0].bindings.len(), 1);
+    assert_eq!(
+        s.evaluate_property(None, 1, b"Lcl Translation", 0.5)
+            .unwrap()
+            .components[0],
+        5.0
+    );
+}
+
+#[test]
+fn animation_work_limit_and_public_key_constructors() {
+    use fbx_rs::{Extrapolation, ExtrapolationMode, Keyframe, Tangent};
+    let mut key = Keyframe::new(46_186_158_000, 7.0);
+    key.right = Tangent::new(0.25, 2.0);
+    assert_eq!(key.time, 1.0);
+    assert_eq!(key.right.dy, 2.0);
+    assert_eq!(
+        Extrapolation::new(ExtrapolationMode::Repeat, 3).repeat_count,
+        3
+    );
+    let input = fixture("0,46186158000", "0,10", "4", "0,0,0,0", "2");
+    let limits = Limits {
+        max_animation_work: 0,
+        ..Limits::default()
+    };
+    assert!(
+        load_with_limits(input.as_bytes(), &LoadOptions::default(), &limits)
+            .unwrap_err()
+            .to_string()
+            .contains("work limit")
+    );
+}
+
+#[test]
+fn indexed_binding_lookup_handles_last_property_and_first_duplicate() {
+    let mut connections = String::new();
+    for k in 0..128 {
+        connections.push_str(&format!(" C: \"OP\",4,1,\"Property{k:03}\"\n"));
+    }
+    let input = fixture("0,46186158000", "0,10", "4", "0,0,0,0", "2")
+        .replace("Connections: {", &format!("Connections: {{\n{connections}"));
+    let s = load(input.as_bytes(), &LoadOptions::default()).unwrap();
+    for name in [b"Property000".as_slice(), b"Property064", b"Property127"] {
+        assert_eq!(
+            s.evaluate_property(None, 1, name, 0.25).unwrap().components[0],
+            2.5
+        );
+    }
+    let input = with_layer(fixture("0,46186158000", "0,10", "4", "0,0,0,0", "2"), 2)
+        .replace(" C: \"OO\",6,2", " C: \"OO\",7,3");
+    let s = load(input.as_bytes(), &LoadOptions::default()).unwrap();
+    assert_eq!(s.animation_layers()[0].bindings.len(), 2);
+    assert_eq!(
+        s.evaluate_property(None, 1, b"Lcl Translation", 0.25)
+            .unwrap()
+            .components[0],
+        2.5
+    );
+}

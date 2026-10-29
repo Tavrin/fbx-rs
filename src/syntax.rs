@@ -259,7 +259,7 @@ fn parse_binary<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>, Er
         pos: 23,
         be: endian == 1,
     };
-    let version = r.num(4)? as u32;
+    let version = u32::try_from(r.num(4)?).map_err(|_| Error::InvalidFormat)?;
     if !supported_version(version) {
         return Err(Error::UnsupportedVersion { v: version });
     }
@@ -323,15 +323,25 @@ fn parse_binary<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>, Er
         }
         let start = doc.properties.len();
         for _ in 0..count {
-            let kind = r.num(1)? as u8;
+            let kind = u8::try_from(r.num(1)?).map_err(|_| Error::InvalidFormat)?;
             let property = match kind {
-                b'Y' => Property::I16(r.num(2)? as i16),
-                b'C' => Property::Bool(r.num(1)? as u8),
-                b'B' => Property::BoolAlt(r.num(1)? as u8),
-                b'I' => Property::I32(r.num(4)? as i32),
-                b'F' => Property::F32(r.num(4)? as u32),
+                b'Y' => Property::I16(i16::from_ne_bytes(
+                    u16::try_from(r.num(2)?)
+                        .map_err(|_| Error::InvalidFormat)?
+                        .to_ne_bytes(),
+                )),
+                b'C' => Property::Bool(u8::try_from(r.num(1)?).map_err(|_| Error::InvalidFormat)?),
+                b'B' => {
+                    Property::BoolAlt(u8::try_from(r.num(1)?).map_err(|_| Error::InvalidFormat)?)
+                }
+                b'I' => Property::I32(i32::from_ne_bytes(
+                    u32::try_from(r.num(4)?)
+                        .map_err(|_| Error::InvalidFormat)?
+                        .to_ne_bytes(),
+                )),
+                b'F' => Property::F32(u32::try_from(r.num(4)?).map_err(|_| Error::InvalidFormat)?),
                 b'D' => Property::F64(r.num(8)?),
-                b'L' => Property::I64(r.num(8)? as i64),
+                b'L' => Property::I64(i64::from_ne_bytes(r.num(8)?.to_ne_bytes())),
                 b'S' | b'R' => {
                     let n = r.usize(4)?;
                     if n > limits.max_string_length {
@@ -356,7 +366,7 @@ fn parse_binary<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>, Er
                             what: "array elements",
                         });
                     }
-                    let encoding = r.num(4)? as u32;
+                    let encoding = u32::try_from(r.num(4)?).map_err(|_| Error::InvalidFormat)?;
                     let compressed_len = r.usize(4)?;
                     let width = match kind {
                         b'f' | b'i' => 4,

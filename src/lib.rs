@@ -61,12 +61,21 @@
 //! unpublished `fbx-parity` crate. It is unstable, outside semver, and builds
 //! only from the source repository.
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
 #![warn(missing_docs)]
 
 mod animation;
 #[cfg(feature = "parity")]
 mod animation_canon;
 mod api;
+mod conversion_budget;
+mod numeric;
+#[cfg(test)]
+mod scaling_tests;
 mod scene_animation;
 pub use animation::{
     AnimationBinding, AnimationCurve, AnimationLayer, AnimationStack, AnimationValue,

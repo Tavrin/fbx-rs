@@ -166,7 +166,7 @@ pub fn camera(p: &PropertyLayers<'_>, units: &SceneUnits, projection_axes: [i64;
     let focal_length = real(p, b"FocalLength", 0.0);
     let mut ortho_extent = units.ortho_size_unit * real(p, b"OrthoZoom", 1.0);
 
-    let (fx, fy) = APERTURE_FORMATS[aperture_format as usize];
+    let (fx, fy) = APERTURE_FORMATS[usize::try_from(aperture_format).unwrap()];
     let mut film = [fx as f64 * 0.001, fy as f64 * 0.001];
     let mut squeeze_ratio = if aperture_format == 7 { 2.0 } else { 1.0 };
 

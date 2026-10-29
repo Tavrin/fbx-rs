@@ -253,7 +253,7 @@ pub(crate) fn f64_to_i64(x: f64) -> i64 {
         if x >= 9_223_372_036_854_775_808.0 {
             i64::MIN
         } else {
-            x as i64
+            crate::numeric::saturating_i64(x)
         }
     } else if x >= 0.0 {
         i64::MAX
@@ -265,7 +265,7 @@ fn f64_to_i32(x: f64) -> i32 {
     if x.is_nan() {
         i32::MIN
     } else if x.abs() <= 2_147_483_647.0 {
-        x as i32
+        i32::try_from(crate::numeric::saturating_i64(x)).unwrap()
     } else if x >= 0.0 {
         i32::MAX
     } else {
@@ -276,7 +276,7 @@ fn to_u8(x: f64) -> u8 {
     if x.is_nan() || x.abs() >= 2_147_483_648.0 {
         0
     } else {
-        (x as i64 & 0xff) as u8
+        crate::numeric::saturating_i64(x).to_le_bytes()[0]
     }
 }
 
@@ -299,7 +299,7 @@ enum Tok {
     Word(i64),
 }
 fn word(w: &[u8]) -> Tok {
-    Tok::Word(w.first().map_or(0, |&b| i64::from(b as i8)))
+    Tok::Word(w.first().map_or(0, |&b| i64::from(i8::from_ne_bytes([b]))))
 }
 fn ascii_tokens(p: &Property<'_>, out: &mut Vec<Tok>) {
     match p {
@@ -341,7 +341,7 @@ fn encode(target: u8, values: &[Num], boolean: bool) -> DomValue {
             b'c' | b'b' => bytes.push(match (v, boolean) {
                 (Num::I(i), true) => u8::from(i != 0),
                 (Num::F(f), true) => u8::from(f != 0.0),
-                (Num::I(i), false) => i as u8,
+                (Num::I(i), false) => i.to_le_bytes()[0],
                 (Num::F(f), false) => to_u8(f),
             }),
             b'i' => bytes.extend_from_slice(&num_i32(v).to_le_bytes()),
@@ -354,8 +354,8 @@ fn encode(target: u8, values: &[Num], boolean: bool) -> DomValue {
             ),
             b'f' => bytes.extend_from_slice(
                 &match v {
-                    Num::I(i) => i as f64 as f32,
-                    Num::F(f) => f as f32,
+                    Num::I(i) => crate::numeric::round_f32(i as f64),
+                    Num::F(f) => crate::numeric::round_f32(f),
                 }
                 .to_le_bytes(),
             ),
@@ -401,10 +401,12 @@ fn binary_num(kind: u8, big_endian: bool, c: &[u8]) -> Num {
     }
     let u = u64::from_le_bytes(w);
     match kind {
-        b'b' | b'c' => Num::I(i64::from(u as u8 as i8)),
-        b'i' => Num::I(i64::from(u as u32 as i32)),
-        b'l' => Num::I(u as i64),
-        b'f' => Num::F(f64::from(f32::from_bits(u as u32))),
+        b'b' | b'c' => Num::I(i64::from(i8::from_ne_bytes([u.to_le_bytes()[0]]))),
+        b'i' => Num::I(i64::from(i32::from_le_bytes(
+            u.to_le_bytes()[..4].try_into().unwrap(),
+        ))),
+        b'l' => Num::I(i64::from_ne_bytes(u.to_ne_bytes())),
+        b'f' => Num::F(f64::from(f32::from_bits(u32::try_from(u).unwrap()))),
         _ => Num::F(f64::from_bits(u)),
     }
 }
@@ -523,7 +525,9 @@ fn project(doc: &Document<'_>, i: usize, _state: St, parent: St, ascii: bool) ->
                 _ => {
                     for v in values {
                         nums.push(match v {
-                            Property::Bool(b) | Property::BoolAlt(b) => Num::I(i64::from(*b as i8)),
+                            Property::Bool(b) | Property::BoolAlt(b) => {
+                                Num::I(i64::from(i8::from_ne_bytes([*b])))
+                            }
                             Property::I16(x) => Num::I(i64::from(*x)),
                             Property::I32(x) => Num::I(i64::from(*x)),
                             Property::I64(x) => Num::I(*x),
@@ -548,7 +552,9 @@ fn project(doc: &Document<'_>, i: usize, _state: St, parent: St, ascii: bool) ->
                         _ => Num::I(0),
                     },
                     Tok::Int(v) | Tok::Word(v) => Num::I(v),
-                    Tok::Float(x) if accurate && target == b'i' => Num::F(f64::from(x as f32)),
+                    Tok::Float(x) if accurate && target == b'i' => {
+                        Num::F(f64::from(crate::numeric::round_f32(x)))
+                    }
                     Tok::Float(x) => Num::F(x),
                 });
             }
@@ -562,7 +568,7 @@ fn project(doc: &Document<'_>, i: usize, _state: St, parent: St, ascii: bool) ->
             Property::String(b) => out.push(DomValue::Str(string_view(b, raw_context), b.to_vec())),
             Property::Raw(b) => out.push(DomValue::Str(string_view(b, raw_context), b.to_vec())),
             Property::Bool(b) | Property::BoolAlt(b) => {
-                let v = i64::from(*b as i8);
+                let v = i64::from(i8::from_ne_bytes([*b]));
                 out.push(DomValue::Number(v, v as f64))
             }
             Property::I16(x) => out.push(DomValue::Number(i64::from(*x), f64::from(*x))),
@@ -660,7 +666,9 @@ pub(crate) fn node_data(doc: &Document<'_>, i: usize, ascii: bool) -> NodeData {
                     AsciiValue::I64(v) => Num::I(*v),
                     AsciiValue::F64(bits) => Num::F(f64::from_bits(*bits)),
                     AsciiValue::NegativeZero => Num::F(-0.0),
-                    AsciiValue::Bare(w) => Num::I(w.first().map_or(0, |&b| i64::from(b as i8))),
+                    AsciiValue::Bare(w) => {
+                        Num::I(w.first().map_or(0, |&b| i64::from(i8::from_ne_bytes([b]))))
+                    }
                 })
             };
             match target {
@@ -727,9 +735,9 @@ fn decode_base64(src: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(src.len() / 4 * 3 + 3);
     for g in src.as_chunks::<4>().0 {
         let (a, b, c, d) = (table(g[0]), table(g[1]), table(g[2]), table(g[3]));
-        out.push((a << 2 | b >> 4) as u8);
-        out.push((b << 4 | c >> 2) as u8);
-        out.push((c << 6 | d) as u8);
+        out.push(u8::try_from((a << 2 | b >> 4) & 0xff).unwrap());
+        out.push(u8::try_from((b << 4 | c >> 2) & 0xff).unwrap());
+        out.push(u8::try_from((c << 6 | d) & 0xff).unwrap());
     }
     if src.len() >= 4 {
         let end = &src[src.len() - 4..];
@@ -814,9 +822,14 @@ fn write_value<W: Write>(em: &mut Emitter<'_, W>, v: &DomValue) -> io::Result<()
     let (ty, s, int, float): (i64, &[u8], i64, f64) = match v {
         DomValue::Number(i, f) => (NUMBER, b"", *i, *f),
         DomValue::Str(s, _) => (STRING, s, 0, 0.0),
-        DomValue::Array(t, n, _) => (*t, b"", *n as i64, *n as f64),
-        DomValue::Bytes(b) => (BLOB, b"", b.len() as i64, b.len() as f64),
-        DomValue::Strings(v) => (ARRAY_BLOB, b"", v.len() as i64, v.len() as f64),
+        DomValue::Array(t, n, _) => (*t, b"", i64::try_from(*n).unwrap(), *n as f64),
+        DomValue::Bytes(b) => (BLOB, b"", i64::try_from(b.len()).unwrap(), b.len() as f64),
+        DomValue::Strings(v) => (
+            ARRAY_BLOB,
+            b"",
+            i64::try_from(v.len()).unwrap(),
+            v.len() as f64,
+        ),
     };
     em.leaf_raw("type", |b| {
         let _ = write!(
@@ -864,9 +877,19 @@ fn write_value<W: Write>(em: &mut Emitter<'_, W>, v: &DomValue) -> io::Result<()
                         w[..width].copy_from_slice(e);
                         let u = u64::from_le_bytes(w);
                         let _ = match *t {
-                            ARRAY_I32 => write!(Wr(b), "{{\"i64\":\"{}\"}}", u as u32 as i32),
-                            ARRAY_I64 => write!(Wr(b), "{{\"i64\":\"{}\"}}", u as i64),
-                            ARRAY_F32 => write!(Wr(b), "{{\"f32\":\"{:08x}\"}}", u as u32),
+                            ARRAY_I32 => write!(
+                                Wr(b),
+                                "{{\"i64\":\"{}\"}}",
+                                i32::from_le_bytes(u.to_le_bytes()[..4].try_into().unwrap())
+                            ),
+                            ARRAY_I64 => write!(
+                                Wr(b),
+                                "{{\"i64\":\"{}\"}}",
+                                i64::from_ne_bytes(u.to_ne_bytes())
+                            ),
+                            ARRAY_F32 => {
+                                write!(Wr(b), "{{\"f32\":\"{:08x}\"}}", u32::try_from(u).unwrap())
+                            }
                             _ => write!(Wr(b), "{{\"f64\":\"{u:016x}\"}}"),
                         };
                     }

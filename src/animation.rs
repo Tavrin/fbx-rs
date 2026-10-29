@@ -4,8 +4,19 @@ use crate::{Error, Matrix, Transform};
 use std::collections::BTreeMap;
 
 /// Interpolation from a key to the next key.
+///
+/// Match with a fallback so future interpolation modes remain compatible:
+/// ```compile_fail
+/// # use fbx_rs::Interpolation;
+/// let mode = Interpolation::Linear;
+/// match mode {
+///     Interpolation::ConstantPrevious | Interpolation::ConstantNext => {},
+///     Interpolation::Linear | Interpolation::Cubic => {},
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Interpolation {
     /// Hold the previous value.
     ConstantPrevious,
@@ -18,6 +29,7 @@ pub enum Interpolation {
 }
 /// A curve handle, stored at the source's single precision.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct Tangent {
     /// Time displacement in seconds.
     pub dx: f32,
@@ -26,6 +38,7 @@ pub struct Tangent {
 }
 /// One authored curve key.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Keyframe {
     /// Source time in FBX ticks (46,186,158,000 per second).
     pub ticks: i64,
@@ -43,6 +56,7 @@ pub struct Keyframe {
 /// Behaviour outside the curve's time range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum ExtrapolationMode {
     /// Hold the endpoint value.
     Constant,
@@ -57,6 +71,7 @@ pub enum ExtrapolationMode {
 }
 /// Extrapolation settings for one side of a curve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Extrapolation {
     /// Extrapolation operation.
     pub mode: ExtrapolationMode,
@@ -65,6 +80,7 @@ pub struct Extrapolation {
 }
 /// Owned animation curve; indices in animation values refer to this scene slice.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AnimationCurve {
     pub(crate) element: usize,
     /// Original object ID.
@@ -75,6 +91,31 @@ pub struct AnimationCurve {
     pub pre_extrapolation: Extrapolation,
     /// Behaviour after the last key.
     pub post_extrapolation: Extrapolation,
+}
+impl Tangent {
+    /// Construct a time/value handle.
+    pub const fn new(dx: f32, dy: f32) -> Self {
+        Self { dx, dy }
+    }
+}
+impl Keyframe {
+    /// Construct a linear key with zero tangent handles. Fields can be adjusted afterwards.
+    pub fn new(ticks: i64, value: f64) -> Self {
+        Self {
+            ticks,
+            time: ticks as f64 / KTIME,
+            value,
+            interpolation: Interpolation::Linear,
+            left: Tangent::new(0.0, 0.0),
+            right: Tangent::new(0.0, 0.0),
+        }
+    }
+}
+impl Extrapolation {
+    /// Construct an extrapolation setting; negative counts mean unlimited repetitions.
+    pub const fn new(mode: ExtrapolationMode, repeat_count: i32) -> Self {
+        Self { mode, repeat_count }
+    }
 }
 impl AnimationCurve {
     /// Evaluate in seconds. An empty curve returns `default_value`.
@@ -214,6 +255,7 @@ fn bezier_t(handle1: f64, handle2: f64, x0: f64) -> f64 {
 }
 /// Three component curves and their fallback values.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AnimationValue {
     pub(crate) element: usize,
     /// Original object ID.
@@ -225,6 +267,7 @@ pub struct AnimationValue {
 }
 /// A property driven by an animation value.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AnimationBinding {
     pub(crate) element: usize,
     /// ID of the target object.
@@ -236,6 +279,7 @@ pub struct AnimationBinding {
 }
 /// One animation layer.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AnimationLayer {
     pub(crate) element: usize,
     /// Original object ID.
@@ -261,6 +305,7 @@ pub struct AnimationLayer {
 }
 /// A named take and its ordered animation layers.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AnimationStack {
     pub(crate) element: usize,
     /// Original object ID.
@@ -276,6 +321,7 @@ pub struct AnimationStack {
 }
 /// Evaluated numeric and retained nonnumeric property values.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct EvaluatedProperty {
     /// ufbx property type discriminant.
     pub property_type: u8,
@@ -304,6 +350,7 @@ impl Default for EvaluatedProperty {
 }
 /// Transforms at one evaluation time. Indices match the loaded scene slices.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct EvaluatedNode {
     /// Evaluated local transform.
     pub local_transform: Transform,
@@ -318,6 +365,7 @@ pub struct EvaluatedNode {
 }
 /// Owned scene pose at one time; source mesh arrays remain unchanged.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct EvaluatedScene {
     /// Evaluated nodes, matching [`crate::Scene::nodes`].
     pub nodes: Vec<EvaluatedNode>,
@@ -421,16 +469,26 @@ impl Animation {
         }
         for (layer_ix, &ix) in layers.iter().enumerate() {
             let layer = &self.layers[ix];
+            let binding_ix = layer
+                .bindings
+                .partition_point(|b| (b.element, b.property.as_slice()) < (element, name));
             let Some(binding) = layer
                 .bindings
-                .iter()
-                .find(|b| b.element == element && b.property == name)
+                .get(binding_ix)
+                .filter(|b| b.element == element && b.property == name)
             else {
                 continue;
             };
             let mut weight = layer.weight;
             if layer.weight_is_animated && layer.blended {
-                if let Some(b) = layer.bindings.iter().find(|b| b.element == layer.element) {
+                let ix = layer
+                    .bindings
+                    .partition_point(|b| b.element < layer.element);
+                if let Some(b) = layer
+                    .bindings
+                    .get(ix)
+                    .filter(|b| b.element == layer.element)
+                {
                     weight = clamp_weight(self.value(b.value, time)[0] / 100.0);
                 }
             }

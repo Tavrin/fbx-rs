@@ -578,6 +578,11 @@ pub fn rust_scene_source_sha256() -> String {
             "parity/src/check_public.rs",
             include_bytes!("check_public.rs"),
         ),
+        ("src/numeric.rs", include_bytes!("../../src/numeric.rs")),
+        (
+            "src/conversion_budget.rs",
+            include_bytes!("../../src/conversion_budget.rs"),
+        ),
         ("src/lib.rs", include_bytes!("../../src/lib.rs")),
         ("src/syntax.rs", include_bytes!("../../src/syntax.rs")),
         (

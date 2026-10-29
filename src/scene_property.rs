@@ -235,9 +235,12 @@ fn number(p: &Property<'_>) -> Option<(i64, f64)> {
         Property::I16(v) => (i64::from(*v), f64::from(*v)),
         Property::I32(v) => (i64::from(*v), f64::from(*v)),
         Property::I64(v) => (*v, *v as f64),
-        Property::Bool(v) | Property::BoolAlt(v) => (i64::from(*v as i8), f64::from(*v as i8)),
+        Property::Bool(v) | Property::BoolAlt(v) => (
+            i64::from(i8::from_ne_bytes([*v])),
+            f64::from(i8::from_ne_bytes([*v])),
+        ),
         Property::AsciiBare(v) => {
-            let n = v.first().copied().unwrap_or(0) as i8;
+            let n = i8::from_ne_bytes([v.first().copied().unwrap_or(0)]);
             (i64::from(n), f64::from(n))
         }
         Property::AsciiNegativeZero => (0, -0.0),
@@ -258,7 +261,7 @@ fn float_int(v: f64) -> i64 {
     if v.is_nan() || v == 9_223_372_036_854_775_808.0 {
         i64::MIN
     } else {
-        v as i64
+        crate::numeric::saturating_i64(v)
     }
 }
 

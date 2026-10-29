@@ -128,8 +128,34 @@ both byte orders of wide binary indices, allocation prechecks, duplicate
 connections, a reversed pose chain, and multiple static meshes with a nested
 shape. These stage budgets are not a process RSS limit.
 
+Animation helper detection and key reconstruction preflight every curve's five
+source array counts and charge their aggregate storage before decoding. Curve
+ranges are cached once, independent of connection fan-out. Element-indexed maps
+resolve curves, values, layers and helpers; sorted bindings support binary-search
+evaluation with stable first-occurrence behavior. Each copied layer binding and
+property name consumes the allocation budget, including vector growth and sort
+scratch. `Limits::max_animation_work` bounds traversal and sorting in each
+animation/helper stage (default 268,435,456 units).
+
+The crate denies truncating, sign-losing and potentially wrapping casts. Numeric
+storage bit patterns use explicit byte conversions; arithmetic narrowing checks
+its range. Two local floating-point casts have range proofs. Deterministic scaling
+regressions build deformer, pose, curve, layer and helper graphs at 32 and 256
+elements and bound charged work by the input ratio and sorting factor. These
+counters are conservative operation budgets, not wall-clock or RSS measurements.
+
 ## Deliberate differences from ufbx
 
+- Extrapolation types use the full signed 32-bit switch, as in ufbx's
+  `ufbxi_read_extrapolation`: unknown representable values select constant
+  extrapolation. Types or repetition counts outside that range return an error
+  rather than wrapping into a valid setting. Negative representable repetition
+  counts normalize to unlimited. Animation-connection cycles, including
+  disconnected cycles and self-links, return errors instead of being ignored.
+- Scalar mesh metadata outside signed 32-bit range is treated as absent rather
+  than wrapping. Mesh source array and material counts above the signed 32-bit
+  index domain return errors before decoding or deriving indices. Stored index
+  sentinels and class identifier words retain their original bit patterns.
 - An integer outside the signed 32-bit index range becomes an invalid index
   sentinel and sparse deformer conversion returns an error. ufbx 0.23.1's
   binary array conversion casts a 64-bit integer to 32 bits, so an invalid

@@ -56,7 +56,7 @@ fn curve_samples(samples: &mut Vec<Sample>, c: &AnimationCurve) -> io::Result<()
                 (k.ticks - 1) as f64 / KTIME,
                 "tick-before-key",
                 k.ticks - 1,
-                KTIME as i64,
+                46_186_158_000,
             )?;
         }
         if k.ticks < i64::MAX {
@@ -64,7 +64,7 @@ fn curve_samples(samples: &mut Vec<Sample>, c: &AnimationCurve) -> io::Result<()
                 (k.ticks + 1) as f64 / KTIME,
                 "tick-after-key",
                 k.ticks + 1,
-                KTIME as i64,
+                46_186_158_000,
             )?;
         }
         if let Some(next) = c.keys.get(i + 1).filter(|n| n.time > k.time) {
@@ -105,7 +105,7 @@ fn take_samples(samples: &mut Vec<Sample>, begin: f64, end: f64) -> io::Result<(
     if !frames.is_finite() || frames > 200_000.0 {
         return Err(io::Error::other("30 Hz grid work limit"));
     }
-    for i in 0..frames as i64 {
+    for i in 0..crate::numeric::saturating_i64(frames) {
         put(begin + i as f64 / 30.0, "grid-from-take-start", i, 30)?;
     }
     put(end, "take-end", 0, 1)

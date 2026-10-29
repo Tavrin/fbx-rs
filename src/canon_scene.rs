@@ -32,6 +32,8 @@ pub struct DumpLimits {
     pub max_allocation: usize,
     /// Bound on deformer traversal, lookup and sorting work.
     pub max_deformer_work: usize,
+    /// Maximum animation traversal, lookup and sorting work per stage.
+    pub max_animation_work: usize,
     pub max_line: usize,
     pub max_output: usize,
 }
@@ -46,6 +48,7 @@ impl Default for DumpLimits {
             max_properties: 1 << 20,
             max_allocation: 512 << 20,
             max_deformer_work: 1 << 28,
+            max_animation_work: 1 << 28,
             max_line: 64 << 20,
             // 8 GiB, saturated to the address space on 32-bit targets (wasm32).
             max_output: usize::try_from(8u64 << 30).unwrap_or(usize::MAX),
@@ -227,7 +230,7 @@ fn element_type(name: &[u8], sub: &[u8]) -> Option<ElementType> {
 }
 
 /// One canonical element: identity, typed projection and source binding.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Element {
     pub key: String,
     pub ordinal: usize,
@@ -825,6 +828,8 @@ pub(crate) fn project_with<'a>(
     if lean {
         return project_rest(scene, input, limits, &oo);
     }
+    let (helper_for, owner_for) =
+        crate::scene_animation::helper_index(scene.elements.len(), &scene.scale_helpers);
     for (i, e) in scene.elements.iter_mut().enumerate() {
         let mut header = Obj::new()
             .with("type", V::I(e.ty as i64))
@@ -848,8 +853,8 @@ pub(crate) fn project_with<'a>(
                 crate::scene_animation::node_layers(
                     &scene.doc,
                     n,
-                    scene.scale_helpers.iter().any(|&(_, h)| h == i),
-                    scene.scale_helpers.iter().any(|&(o, _)| o == i),
+                    owner_for[i].is_some(),
+                    helper_for[i].is_some(),
                     limits,
                 )?
             };
@@ -905,7 +910,7 @@ fn project_rest<'a>(
     limits: &DumpLimits,
     oo: &[(usize, usize)],
 ) -> Result<CanonScene<'a>, String> {
-    let links = project_graph(&mut scene, oo);
+    let links = project_graph(&mut scene, oo, limits)?;
     project_globals(&mut scene, input, limits)?;
     project_transforms(&mut scene, &links, oo, limits)?;
     if !scene.lean {
@@ -1072,9 +1077,21 @@ fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<
 
 /// Node hierarchy and attribute links from object-object connections
 /// (ufbx `ufbxi_finalize_scene` node linking; order follows connections).
-fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
+fn project_graph(
+    scene: &mut CanonScene<'_>,
+    oo: &[(usize, usize)],
+    limits: &DumpLimits,
+) -> Result<Links, String> {
     use ElementType::*;
     let n = scene.elements.len();
+    let budget = crate::conversion_budget::Budget::new(
+        limits.max_allocation,
+        limits.max_animation_work,
+        crate::conversion_budget::Path::Helpers,
+    );
+    budget.charge(n, 256)?;
+    budget.charge(oo.len(), 64)?;
+    budget.work(n + oo.len())?;
     let mut parent = vec![None; n];
     let mut children = vec![Vec::new(); n];
     let mut attribs = vec![Vec::new(); n];
@@ -1097,22 +1114,30 @@ fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
             instances[src].push(dst);
         }
     }
+    let (_, owner_for) = crate::scene_animation::helper_index(n, &scene.scale_helpers);
     // ufbxi_cmp_node_less puts scale helpers before ordinary siblings.
     for list in &mut children {
-        list.sort_by_key(|i| !scene.scale_helpers.iter().any(|&(_, h)| h == *i));
+        budget.sort_work(list.len())?;
+        list.sort_by_key(|i| owner_for[*i].is_none());
     }
     let mut depth = vec![0u64; n];
+    let mut done = vec![false; n];
+    let mut path = Vec::new();
     for i in 0..n {
-        let mut d = 0;
-        let mut p = parent[i];
-        while let Some(q) = p {
-            d += 1;
-            if d > n as u64 {
+        let mut at = Some(i);
+        while let Some(k) = at {
+            budget.work(1)?;
+            if done[k] {
                 break;
             }
-            p = parent[q];
+            done[k] = true;
+            path.push(k);
+            at = parent[k];
         }
-        depth[i] = d;
+        let base = at.map_or(0, |k| depth[k] + 1);
+        for (d, k) in (base..).zip(path.drain(..).rev()) {
+            depth[k] = d;
+        }
     }
     let effective_parent: Vec<Option<usize>> = (0..n)
         .map(|i| parent[i].or(if i == 0 { None } else { Some(0) }))
@@ -1128,13 +1153,13 @@ fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
         t.children = children;
         t.node_materials = materials;
         t.attribs = attribs.clone();
-        return Links {
+        return Ok(Links {
             parent: effective_parent,
             depth: (0..n)
                 .map(|i| depth[i] + u64::from(i != 0 && parent[i].is_none()))
                 .collect(),
             attribs,
-        };
+        });
     }
     for i in 0..n {
         let ty = scene.elements[i].ty;
@@ -1221,7 +1246,7 @@ fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
             }
         }
     }
-    Links {
+    Ok(Links {
         parent: (0..n)
             .map(|i| parent[i].or(if i == 0 { None } else { Some(0) }))
             .collect(),
@@ -1229,7 +1254,7 @@ fn project_graph(scene: &mut CanonScene<'_>, oo: &[(usize, usize)]) -> Links {
             .map(|i| depth[i] + u64::from(i != 0 && parent[i].is_none()))
             .collect(),
         attribs,
-    }
+    })
 }
 
 /// Node hierarchy facts shared by the graph and transform projections.
@@ -1257,6 +1282,7 @@ fn project_transforms(
     use ElementType::*;
     let n = scene.elements.len();
     let is_node: Vec<bool> = scene.elements.iter().map(|e| e.ty == Node).collect();
+    let (helper_for, owner_for) = crate::scene_animation::helper_index(n, &scene.scale_helpers);
     // Properties through the template chain (`ufbxi_find_*`).
     let mut layers = Vec::with_capacity(n);
     for e in &scene.elements {
@@ -1264,8 +1290,8 @@ fn project_transforms(
             (Node, Some(d)) => Some(crate::scene_animation::node_layers(
                 &scene.doc,
                 d,
-                scene.scale_helpers.iter().any(|&(_, h)| h == layers.len()),
-                scene.scale_helpers.iter().any(|&(o, _)| o == layers.len()),
+                owner_for[layers.len()].is_some(),
+                helper_for[layers.len()].is_some(),
                 limits,
             )?),
             _ => None,
@@ -1381,12 +1407,7 @@ fn project_transforms(
     let camera_post = post_rotation([4, 2, 1]);
     let order: Vec<usize> = {
         let mut v: Vec<usize> = (0..n).filter(|&i| is_node[i]).collect();
-        v.sort_by_key(|&i| {
-            (
-                links.depth[i],
-                !scene.scale_helpers.iter().any(|&(_, h)| h == i),
-            )
-        });
+        v.sort_by_key(|&i| (links.depth[i], owner_for[i].is_none()));
         v
     };
     let mut adjust = vec![Adjust::default(); n];
@@ -1493,27 +1514,13 @@ fn project_transforms(
                     adjust: *a,
                     rotation_order,
                     use_rotation_space: use_rs,
-                    translation_scale: links.parent[i].and_then(|p| {
-                        scene
-                            .scale_helpers
-                            .iter()
-                            .find(|&&(o, h)| o == p && h != i)
-                            .and_then(|&(_, h)| eval_slot[h])
-                    }),
-                    inherited_scale: scene
-                        .scale_helpers
-                        .iter()
-                        .any(|&(_, h)| h == i)
-                        .then(|| {
-                            links.parent[i].and_then(|p| inherit_node[p]).and_then(|p| {
-                                scene
-                                    .scale_helpers
-                                    .iter()
-                                    .find(|&&(o, _)| o == p)
-                                    .and_then(|&(_, h)| eval_slot[h])
-                            })
-                        })
-                        .flatten(),
+                    translation_scale: links.parent[i]
+                        .and_then(|p| helper_for[p].filter(|&h| h != i).and_then(|h| eval_slot[h])),
+                    inherited_scale: owner_for[i]
+                        .and_then(|_| links.parent[i])
+                        .and_then(|p| inherit_node[p])
+                        .and_then(|p| helper_for[p])
+                        .and_then(|h| eval_slot[h]),
                 };
             }
             let config = &eval_nodes[eval_slot[i].unwrap()];
@@ -1550,13 +1557,10 @@ fn project_transforms(
             )
         };
         obj.set("inherit_mode", V::I(0));
-        if let Some(&(_, h)) = scene.scale_helpers.iter().find(|&&(o, _)| o == i) {
+        if let Some(h) = helper_for[i] {
             obj.set("scale_helper", V::Ref(Some(h)));
         }
-        obj.set(
-            "is_scale_helper",
-            V::Bool(scene.scale_helpers.iter().any(|&(_, h)| h == i)),
-        );
+        obj.set("is_scale_helper", V::Bool(owner_for[i].is_some()));
         obj.set("original_inherit_mode", V::I(original[i]));
         obj.set("local_transform", tr(&state.local));
         obj.set("geometry_transform", tr(&state.geometry));
@@ -1758,7 +1762,8 @@ fn match_version_string(fmt: &[u8], s: &[u8], version: &mut [u32; 3]) -> bool {
         match c {
             b'a'..=b'z' => {
                 match s.get(pos) {
-                    Some(&b) if b == c || i32::from(b as i8) + 32 == i32::from(c) => {}
+                    Some(&b)
+                        if b == c || i32::from(i8::from_ne_bytes([b])) + 32 == i32::from(c) => {}
                     _ => return false,
                 }
                 pos += 1;
@@ -1954,7 +1959,7 @@ fn project_globals(
     let original_unit = find_real(b"OriginalUnitScaleFactor", unit);
     let time_mode = find_enum(b"TimeMode", 11, 17);
     let fps = if time_mode != 14 {
-        f64::from(FPS[time_mode as usize])
+        f64::from(FPS[usize::try_from(time_mode).unwrap()])
     } else {
         find_real(b"CustomFrameRate", 24.0)
     };

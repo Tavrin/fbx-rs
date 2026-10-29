@@ -766,8 +766,8 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
             out.warnings
                 .push(format!("{}: shader elements are not ported", key(m)));
         } else if shader_type == SHADER_UNKNOWN {
-            let a = find_int(&it.props, b"3dsMax|ClassIDa", 0) as u64 as u32;
-            let b = find_int(&it.props, b"3dsMax|ClassIDb", 0) as u64 as u32;
+            let a = crate::numeric::low_word(find_int(&it.props, b"3dsMax|ClassIDa", 0));
+            let b = crate::numeric::low_word(find_int(&it.props, b"3dsMax|ClassIDb", 0));
             let known: Option<(i64, &[u8])> = match (a, b) {
                 (0x3d6b_1cec, 0xdead_c001) => {
                     Some((SHADER_3DS_MAX_PHYSICAL_MATERIAL, b"3dsMax|Parameters|"))
@@ -852,8 +852,16 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
             .and_then(|v| videos.iter().position(|&x| items[x].element == v))
             .map_or_else(Vec::new, |k| vids[k].1.clone());
         // ufbxi_finalize_shader_texture: only the detection is ported.
-        let classid = (find_int(&it.props, b"3dsMax|ClassIDa", 0) as u64 as u32 as u64) << 32
-            | find_int(&it.props, b"3dsMax|ClassIDb", 0) as u64 as u32 as u64;
+        let classid = (u64::from(crate::numeric::low_word(find_int(
+            &it.props,
+            b"3dsMax|ClassIDa",
+            0,
+        )))) << 32
+            | u64::from(crate::numeric::low_word(find_int(
+                &it.props,
+                b"3dsMax|ClassIDb",
+                0,
+            )));
         let max_texture = find(&it.props, b"3dsMax|MaxTexture").map_or(&b""[..], |p| p.value_str);
         if max_texture == b"MULTIOUTPUT_TO_OSLMap"
             || classid == 0x896e_f2fc_44bd_743f
