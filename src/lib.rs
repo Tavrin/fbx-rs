@@ -1,4 +1,4 @@
-//! A pure-Rust FBX loader whose static scenes match ufbx 0.23.1 exactly.
+//! A pure-Rust FBX loader with skins, blend shapes and animation evaluation.
 //!
 //! [`load`] parses a binary or ASCII FBX file (versions 7100 to 7700) and
 //! converts it into an owned [`Scene`]: the node hierarchy with local and
@@ -172,3 +172,8 @@ pub use api::{
     Material, MaterialMap, Matrix, Mesh, MeshPart, Node, Scene, SceneSettings, SpaceConversion,
     Texture, Transform, Unsupported, UnsupportedKind, UvSet, VertexAttribute,
 };
+
+// Compile the public usage examples as part of the crate doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme {}

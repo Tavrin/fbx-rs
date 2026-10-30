@@ -1,10 +1,10 @@
 [package]
 name = "fbx-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-description = "Pure-Rust loader for static FBX 7.x scenes, verified against ufbx"
+description = "Pure-Rust loader for FBX 7.x scenes, skins and animation, verified against ufbx"
 repository = "https://github.com/Tavrin/fbx-rs"
 readme = "README.md"
 keywords = ["fbx", "3d", "mesh", "gamedev", "import"]

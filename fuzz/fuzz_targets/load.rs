@@ -136,7 +136,13 @@ fn walk(scene: &Scene) {
         let mut times = vec![0.0, -1.0e9, 1.0e9, f64::MAX, f64::MIN];
         if let (Some(first), Some(last)) = (curve.keys.first(), curve.keys.last()) {
             times.extend([first.time - 1.0, last.time + 1.0, last.time * 3.0]);
-            times.extend(curve.keys.iter().take(8).flat_map(|k| [k.time, k.time + 1e-4]));
+            times.extend(
+                curve
+                    .keys
+                    .iter()
+                    .take(8)
+                    .flat_map(|k| [k.time, k.time + 1e-4]),
+            );
         }
         for t in times.into_iter().filter(|t| t.is_finite()) {
             assert!(curve.evaluate(t, 0.0).is_ok());
