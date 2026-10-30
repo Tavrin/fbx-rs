@@ -143,7 +143,7 @@ fn number(p: &Property<'_>) -> Option<f64> {
         Property::F32(v) => Some(f64::from(f32::from_bits(*v))),
         Property::F64(v) => Some(f64::from_bits(*v)),
         Property::Bool(v) | Property::BoolAlt(v) => Some(f64::from(i8::from_ne_bytes([*v]))),
-        Property::AsciiBare(v) => v.first().map(|&b| f64::from(i8::from_ne_bytes([b]))),
+        Property::AsciiBare(v) => Some(crate::syntax::bare_number(v).1),
         Property::AsciiNegativeZero => Some(-0.0),
         _ => None,
     }
@@ -155,6 +155,7 @@ fn scalar(p: &[Property<'_>], authored: bool) -> Option<Number> {
         Property::I16(v) => i64::from(*v),
         Property::I32(v) => i64::from(*v),
         Property::I64(v) => *v,
+        Property::AsciiBare(v) => crate::syntax::bare_number(v).0,
         _ => {
             if value.is_nan() {
                 i64::MIN
@@ -387,20 +388,7 @@ fn content<'a>(
         return Err(Error::LimitExceeded("embedded bytes"));
     }
     let mut out = Vec::new();
-    let requested = used
-        .checked_add(total)
-        .ok_or(Error::LimitExceeded("allocation"))?;
-    if requested > limits.max_allocation {
-        return Err(Error::LimitExceeded("allocation"));
-    }
-    out.try_reserve_exact(total)
-        .map_err(|_| Error::AllocationFailed)?;
-    *used = used
-        .checked_add(out.capacity())
-        .ok_or(Error::LimitExceeded("allocation"))?;
-    if *used > limits.max_allocation {
-        return Err(Error::LimitExceeded("allocation"));
-    }
+    crate::scene::reserve(&mut out, total, used, limits.max_allocation)?;
     for part in p {
         let data = match part {
             Property::Raw(v) => *v,
@@ -487,16 +475,8 @@ pub fn extract<'a>(
         return Err(Error::LimitExceeded("allocation"));
     }
     let mut entries = Vec::new();
-    entries
-        .try_reserve_exact(count)
-        .map_err(|_| Error::AllocationFailed)?;
-    let mut used = entries
-        .capacity()
-        .checked_mul(size_of::<Surface<'_>>())
-        .ok_or(Error::LimitExceeded("allocation"))?;
-    if used > limits.max_allocation {
-        return Err(Error::LimitExceeded("allocation"));
-    }
+    let mut used = 0;
+    crate::scene::reserve(&mut entries, count, &mut used, limits.max_allocation)?;
     let mut material_default = MaterialProperties::default();
     let mut template = None;
     for (i, n) in doc.nodes.iter().enumerate() {

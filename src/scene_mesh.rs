@@ -106,7 +106,7 @@ impl NumericArray<'_> {
                 AsciiValue::I64(v) => Some(*v as f64),
                 AsciiValue::F64(v) => Some(f64::from_bits(*v)),
                 AsciiValue::NegativeZero => Some(-0.0),
-                _ => None,
+                AsciiValue::Bare(w) => Some(crate::syntax::bare_number(w).1),
             },
             _ => match self.word(index)? {
                 (b'd', v) => Some(f64::from_bits(v)),
@@ -125,6 +125,7 @@ impl NumericArray<'_> {
             Property::AsciiArray(a) => match a.get(index)? {
                 AsciiValue::I64(v) => Some(*v),
                 AsciiValue::NegativeZero => Some(0),
+                AsciiValue::Bare(w) => Some(crate::syntax::bare_number(w).0),
                 _ => None,
             },
             _ => match self.word(index)? {
@@ -308,25 +309,9 @@ pub fn extract<'a>(
     }
     let mut meshes = Vec::new();
     let mut layers = Vec::new();
-    meshes
-        .try_reserve_exact(mesh_count)
-        .map_err(|_| Error::AllocationFailed)?;
-    layers
-        .try_reserve_exact(layer_count)
-        .map_err(|_| Error::AllocationFailed)?;
-    let actual = meshes
-        .capacity()
-        .checked_mul(size_of::<Mesh<'_>>())
-        .and_then(|v| {
-            layers
-                .capacity()
-                .checked_mul(size_of::<Layer<'_>>())
-                .and_then(|w| v.checked_add(w))
-        })
-        .ok_or(Error::LimitExceeded("allocation"))?;
-    if actual > limits.max_allocation {
-        return Err(Error::LimitExceeded("allocation"));
-    }
+    let mut used = 0;
+    crate::scene::reserve(&mut meshes, mesh_count, &mut used, limits.max_allocation)?;
+    crate::scene::reserve(&mut layers, layer_count, &mut used, limits.max_allocation)?;
     for (object, obj) in index.objects.iter().enumerate() {
         let n = &doc.nodes[obj.node];
         let p = doc
@@ -685,43 +670,11 @@ impl Mesh<'_> {
         let mut edges = Vec::new();
         let mut reflex = Vec::new();
         let mut clipped = Vec::new();
-        points
-            .try_reserve_exact(count)
-            .map_err(|_| Error::AllocationFailed)?;
-        edges
-            .try_reserve_exact(count)
-            .map_err(|_| Error::AllocationFailed)?;
-        reflex
-            .try_reserve_exact(count)
-            .map_err(|_| Error::AllocationFailed)?;
-        clipped
-            .try_reserve_exact(count)
-            .map_err(|_| Error::AllocationFailed)?;
-        let actual = points
-            .capacity()
-            .checked_mul(size_of::<[f64; 2]>())
-            .and_then(|v| {
-                edges
-                    .capacity()
-                    .checked_mul(size_of::<[usize; 2]>())
-                    .and_then(|w| v.checked_add(w))
-            })
-            .and_then(|v| {
-                reflex
-                    .capacity()
-                    .checked_mul(size_of::<usize>())
-                    .and_then(|w| v.checked_add(w))
-            })
-            .and_then(|v| {
-                clipped
-                    .capacity()
-                    .checked_mul(size_of::<bool>())
-                    .and_then(|w| v.checked_add(w))
-            })
-            .ok_or(Error::LimitExceeded("allocation"))?;
-        if actual > limits.max_allocation {
-            return Err(Error::LimitExceeded("allocation"));
-        }
+        let mut used = 0;
+        crate::scene::reserve(&mut points, count, &mut used, limits.max_allocation)?;
+        crate::scene::reserve(&mut edges, count, &mut used, limits.max_allocation)?;
+        crate::scene::reserve(&mut reflex, count, &mut used, limits.max_allocation)?;
+        crate::scene::reserve(&mut clipped, count, &mut used, limits.max_allocation)?;
         let mut work = 0usize;
         let mut charge = |amount: usize| -> Result<(), Error> {
             work = work

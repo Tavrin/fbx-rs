@@ -92,6 +92,7 @@ fn number(p: &Property<'_>) -> Option<f64> {
         Property::F32(v) => Some(f64::from(f32::from_bits(*v))),
         Property::F64(v) => Some(f64::from_bits(*v)),
         Property::AsciiNegativeZero => Some(-0.0),
+        Property::AsciiBare(v) => Some(crate::syntax::bare_number(v).1),
         _ => None,
     }
 }
@@ -163,17 +164,7 @@ pub fn authored(
         return Err(Error::LimitExceeded("allocation"));
     }
     let mut models = Vec::new();
-    models
-        .try_reserve_exact(count)
-        .map_err(|_| Error::AllocationFailed)?;
-    if models
-        .capacity()
-        .checked_mul(size_of::<Option<Transform>>())
-        .ok_or(Error::LimitExceeded("allocation"))?
-        > max_allocation
-    {
-        return Err(Error::LimitExceeded("allocation"));
-    }
+    crate::scene::reserve(&mut models, count, &mut 0, max_allocation)?;
     // ufbx selects the first Model ObjectType and its first PropertyTemplate.
     let mut template = Transform::default();
     let mut template_node = None;
@@ -444,32 +435,10 @@ pub fn world_matrices(
     let mut world = Vec::new();
     let mut state = Vec::new();
     let mut path = Vec::new();
-    world
-        .try_reserve_exact(n)
-        .map_err(|_| Error::AllocationFailed)?;
-    state
-        .try_reserve_exact(n)
-        .map_err(|_| Error::AllocationFailed)?;
-    path.try_reserve_exact(n)
-        .map_err(|_| Error::AllocationFailed)?;
-    let actual = world
-        .capacity()
-        .checked_mul(size_of::<Option<Matrix>>())
-        .and_then(|v| {
-            state
-                .capacity()
-                .checked_mul(size_of::<WorldState>())
-                .and_then(|w| v.checked_add(w))
-        })
-        .and_then(|v| {
-            path.capacity()
-                .checked_mul(size_of::<usize>())
-                .and_then(|w| v.checked_add(w))
-        })
-        .ok_or(Error::LimitExceeded("allocation"))?;
-    if actual > max_allocation {
-        return Err(Error::LimitExceeded("allocation"));
-    }
+    let mut used = 0;
+    crate::scene::reserve(&mut world, n, &mut used, max_allocation)?;
+    crate::scene::reserve(&mut state, n, &mut used, max_allocation)?;
+    crate::scene::reserve(&mut path, n, &mut used, max_allocation)?;
     world.resize(n, None);
     state.resize(
         n,

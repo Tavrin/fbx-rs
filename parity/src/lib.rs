@@ -584,6 +584,10 @@ pub fn rust_scene_source_sha256() -> String {
             include_bytes!("../../src/conversion_budget.rs"),
         ),
         ("src/lib.rs", include_bytes!("../../src/lib.rs")),
+        (
+            "src/allocation.rs",
+            include_bytes!("../../src/allocation.rs"),
+        ),
         ("src/syntax.rs", include_bytes!("../../src/syntax.rs")),
         (
             "src/syntax/ascii.rs",

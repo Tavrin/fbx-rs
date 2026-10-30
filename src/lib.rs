@@ -68,6 +68,7 @@
 )]
 #![warn(missing_docs)]
 
+mod allocation;
 mod animation;
 #[cfg(feature = "parity")]
 mod animation_canon;

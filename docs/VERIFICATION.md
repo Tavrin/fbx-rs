@@ -157,6 +157,36 @@ property name consumes the allocation budget, including vector growth and sort
 scratch. `Limits::max_animation_work` bounds traversal and sorting in each
 animation/helper stage (default 268,435,456 units).
 
+Authored property extraction indexes unsupported value kinds once over the
+stored property table; shared and overlapping caller-constructed ranges use
+constant-time prefix queries. The sum of selected range lengths and the actual
+indexed/string/comparison work each have a 67,108,864-unit cap per extraction.
+String validation, flag scanning, and fallible in-place heap sorting charge byte
+work before scanning, including long shared strings. Scratch index capacity and
+returned property capacity share the allocation budget. The deterministic
+property regression uses 1,000 and 8,000 shared ranges; its actual-work counter
+excludes the separate conservative range-length admission charge.
+
+All explicit fallible vector reservations use one exact-reservation helper.
+It preflights requested storage, reserves the entire remaining accounting
+envelope before invoking the allocator, and refunds unused capacity only after
+checking the actual capacity and before use. Growth keeps old storage charged
+while reserving new storage. Tests inject over-capacity reservations and verify
+that the envelope is already charged inside the allocator callback. Capacities
+beyond that envelope return an error before use. This bounds accepted Rust
+capacities, not allocator-private rounding/metadata, allocations performed inside
+the allocator, or process RSS; safe Rust does not control those internals.
+
+ASCII special numbers follow ufbx 0.23.1's `ufbxi_parse_inf_nan` and token reader:
+case-insensitive infinity and signed quiet NaN (including NaN payload spelling),
+and legacy one-digit `d.#INF`, `d.#NAN`, `d.#IND` with optional trailing digits.
+NaN sign bits are preserved. Bare special words keep integer zero; signed
+numeric tokens use the normal float-to-integer conversion. Bare words of 64 or
+more bytes keep the first-character numeric fallback, matching ufbx. Scalar,
+retained-DOM, authored-property, and numeric-array consumers share these rules.
+`1.#QNAN`, `1.#SNAN` and arbitrary suffixes such as `1.#BANANA` return errors,
+as in the pinned oracle. These spellings were previously accepted as NaN.
+
 The crate denies truncating, sign-losing and potentially wrapping casts. Numeric
 storage bit patterns use explicit byte conversions; arithmetic narrowing checks
 its range. Two local floating-point casts have range proofs. Deterministic scaling
@@ -166,6 +196,11 @@ counters are conservative operation budgets, not wall-clock or RSS measurements.
 
 ## Deliberate differences from ufbx
 
+- Resource admission for caller-constructed property DOMs rejects excessive
+  aggregate range lengths, string/comparison work, or shared output/index
+  capacity with `LimitExceeded`. Valid values within these budgets retain their
+  ordering and last-duplicate semantics. The capacity accounting above applies
+  before use; allocator-internal storage is outside this contract.
 - Extrapolation types use the full signed 32-bit switch, as in ufbx's
   `ufbxi_read_extrapolation`: unknown representable values select constant
   extrapolation. Types or repetition counts outside that range return an error

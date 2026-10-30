@@ -56,7 +56,7 @@ fn magic_comment_version_takes_precedence() {
 
 #[test]
 fn special_float_tokens() {
-    let input = b"; FBX 7.4.0 project file\nV: 1.#INF, -1.#INF, -1.#IND, 1.#QNAN\nW: 1#INF\n";
+    let input = b"; FBX 7.4.0 project file\nV: 1.#INF, -1.#INF, -1.#IND, 1.#NAN\nW: 1#INF\n";
     let limits = Limits::default();
     assert_eq!(parse(input, &limits).unwrap_err(), Error::UnsupportedSyntax);
     let doc = parse(&input[..input.len() - 9], &limits).unwrap();
@@ -66,7 +66,7 @@ fn special_float_tokens() {
         [
             bits(f64::INFINITY),
             bits(f64::NEG_INFINITY),
-            bits(f64::NAN),
+            bits(f64::from_bits(0xfff8000000000000)),
             bits(f64::NAN)
         ]
     );
@@ -241,4 +241,47 @@ fn preserves_negative_zero_integer_tokens() {
         doc.properties[2],
         Property::AsciiArray(vec![AsciiValue::NegativeZero, AsciiValue::I64(0)])
     );
+}
+
+#[test]
+fn pinned_special_number_spellings_and_nan_sign() {
+    let cases = [
+        ("+inf", 0x7ff0000000000000),
+        ("-INF", 0xfff0000000000000),
+        ("+Infinity", 0x7ff0000000000000),
+        ("-nan", 0xfff8000000000000),
+        ("+NaN(payload123)", 0x7ff8000000000000),
+        ("1.#INF", 0x7ff0000000000000),
+        ("-1.#IND", 0xfff8000000000000),
+        ("9.#nAn000", 0x7ff8000000000000),
+        ("+0.#iNf00", 0x7ff0000000000000),
+    ];
+    for (token, bits) in cases {
+        let input = format!("; FBX 7.4.0\nV: {token}\nA: *1 {{ a: {token} }}\n");
+        let doc = parse(input.as_bytes(), &Limits::default()).unwrap();
+        assert_eq!(doc.properties[0], Property::F64(bits), "{token}");
+        assert_eq!(
+            doc.properties[1],
+            Property::AsciiArray(vec![AsciiValue::F64(bits)]),
+            "{token}"
+        );
+    }
+    for token in [
+        "1.#QNAN",
+        "1.#SNAN",
+        "1.#BANANA",
+        "1.#INFjunk",
+        "12.#INF",
+        "1#INF",
+        "+infinite",
+        "+nan(bad_payload)",
+    ] {
+        for body in [format!("V: {token}"), format!("A: *1 {{ a: {token} }}")] {
+            let input = format!("; FBX 7.4.0\n{body}\n");
+            assert!(
+                parse(input.as_bytes(), &Limits::default()).is_err(),
+                "{token}"
+            );
+        }
+    }
 }
