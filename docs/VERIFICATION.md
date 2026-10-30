@@ -259,6 +259,18 @@ textures expose child texture indices, blend modes and alpha, plus the flattened
 unique file-texture list. The canonical schema already covers these fields;
 `check-public` also compares their public projection against canonical records.
 
+PBR mappings cover FBX Lambert/Phong and the unknown-shader Phong fallback,
+plus class-ID-identified 3ds Max Physical, PBR Metal/Rough, PBR Spec/Gloss,
+glTF and OpenPBR materials. These include property prefixes, texture suffixes,
+texture enable switches, default/explicit features and roughness/glossiness
+remapping. Shader-element bindings (Arnold, OSL, ShaderFX/Stingray), shader
+textures and Blender-specific Phong mapping remain unported.
+
+`MaterialMap` remains exhaustive for 0.1.x compatibility. Making it
+non-exhaustive is planned for 0.2.0; callers can currently construct and
+exhaustively destructure it. The newly added material record types are
+non-exhaustive.
+
 Baking follows the pinned 0.23.1 key-time generation and independent channel
 reduction: authored times, nonlinear segment samples, default stepped-key
 handling, quaternion antipodal correction, and per-channel reduction passes.
@@ -268,8 +280,14 @@ candidate-key cap is charged before adding times, including duplicate times and
 keys removed by reduction; it is deliberately more conservative than an output
 key count. Vector capacities are precharged and reserved fallibly. Numeric
 property evaluation borrows lookup keys and avoids copying retained string/blob
-values. Node sampling evaluates its own properties and scale dependencies, not
-the whole scene for every node key. Evaluation work is separately capped.
+values. Node sampling caches each node's static transform inputs once per bake and
+samples only the inputs needed by each channel, including pivots for translation
+and inherited scaling dependencies. Unrelated properties are sampled only for
+their own baked channel. RotationOrder is resolved once per sample and reused
+across rotation layers. Evaluation work charges static input lookups, node and
+dependency visits, each evaluated property, each layer visited for that property,
+connection traversal and animated layer weights. The work limit is therefore
+stricter than the former node-visit count.
 
 The bake API implements a subset of ufbx options. Maximum sample-rate culling,
 custom step handling, transform overrides and configurable evaluate flags are
@@ -291,7 +309,7 @@ property and index errors preserve that type without constructing a diagnostic.
 Other allocated diagnostics use a fallible formatter.
 
 Ordered property/connection indexes use a private balanced tree in a fallible
-vector arena. Lookup is logarithmic; sorted iteration and range lookup use parent
+vector arena. Lookup is logarithmic; sorted iteration uses parent
 indices without scratch allocations. Stable conversion sorts reserve decorated
 ordinal buffers before sorting, retaining the original tie order. DOM ancestor
 state uses a fixed-size stack. Array decoding, lossy text, paths and embedded

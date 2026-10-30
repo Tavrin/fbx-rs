@@ -16,8 +16,8 @@
 //! Not ported (no corpus input reaches them; each is reported on stderr and
 //! leaves the affected record as far as computed): shader elements
 //! (`Implementation`/`BindingTable`), shader textures
-//! (`ufbxi_finalize_shader_texture`), PBR mapping tables other than the FBX
-//! Lambert/Phong ones, and the 6x00-style `LayerElement*Texture` patch.
+//! (`ufbxi_finalize_shader_texture`), PBR mapping tables requiring shader elements
+//! (Arnold, OSL, ShaderFX), Blender-specific Phong mapping, and the 6x00-style `LayerElement*Texture` patch.
 use crate::canon::{s, Obj, V};
 use crate::canon_dom::{node_content, node_data, node_string, NodeData};
 use crate::canon_scene::ElementType;
@@ -159,6 +159,9 @@ fn feature(name: &str) -> usize {
 /// `ufbxi_shader_mapping_flag`.
 const DEFAULT_W_1: u8 = 0x1;
 const WIDEN_TO_RGB: u8 = 0x2;
+const MULTIPLY_VALUE: u8 = 0x4;
+const FEATURE_INVERTED: u8 = 0x1;
+const FEATURE_IF_AROUND_1: u8 = 0x8;
 /// `ufbxi_mat_transform`.
 #[derive(Clone, Copy, PartialEq)]
 enum MatTransform {
@@ -244,6 +247,223 @@ const PHONG_PBR_MAPPING: &[Mapping] = &[
     ("normal_map", 0, N, "NormalMap"),
 ];
 
+/// `ufbxi_3ds_max_physical_material_pbr_mapping` (ufbx 0.23.1).
+const PHYSICAL_PBR_MAPPING: &[Mapping] = &[
+    ("base_factor", 0, N, "base_weight"),
+    ("base_color", DEFAULT_W_1, N, "base_color"),
+    ("roughness", 0, N, "roughness"),
+    ("diffuse_roughness", 0, N, "diff_rough"),
+    ("diffuse_roughness", 0, N, "diff_roughness"),
+    ("metalness", 0, N, "metalness"),
+    ("specular_factor", 0, N, "reflectivity"),
+    ("specular_color", DEFAULT_W_1, N, "refl_color"),
+    ("specular_anisotropy", 0, N, "anisotropy"),
+    ("specular_rotation", 0, N, "aniso_angle"),
+    ("specular_rotation", 0, N, "anisoangle"),
+    ("specular_ior", 0, N, "trans_ior"),
+    ("transmission_factor", 0, N, "transparency"),
+    ("transmission_color", DEFAULT_W_1, N, "trans_color"),
+    ("transmission_depth", 0, N, "trans_depth"),
+    ("transmission_roughness", 0, N, "trans_rough"),
+    ("transmission_roughness", 0, N, "trans_roughness"),
+    ("subsurface_factor", 0, N, "scattering"),
+    ("subsurface_tint_color", DEFAULT_W_1, N, "sss_color"),
+    ("subsurface_color", DEFAULT_W_1, N, "sss_scatter_color"),
+    ("subsurface_radius", WIDEN_TO_RGB, N, "sss_depth"),
+    ("subsurface_scale", 0, N, "sss_scale"),
+    ("coat_factor", 0, N, "coat"),
+    ("coat_factor", 0, N, "coating"),
+    ("coat_color", DEFAULT_W_1, N, "coat_color"),
+    ("coat_roughness", 0, N, "coat_rough"),
+    ("coat_roughness", 0, N, "coat_roughness"),
+    ("coat_ior", 0, N, "coat_ior"),
+    ("coat_normal", 0, N, "coat_bump"),
+    ("coat_normal", 0, N, "clearcoat_bump_map_amt"),
+    (
+        "coat_affect_base_color",
+        DEFAULT_W_1,
+        N,
+        "coat_affect_color",
+    ),
+    ("coat_affect_base_roughness", 0, N, "coat_affect_roughness"),
+    ("emission_factor", 0, N, "emission"),
+    ("emission_color", DEFAULT_W_1, N, "emit_color"),
+    ("opacity", WIDEN_TO_RGB, N, "cutout"),
+    ("normal_map", 0, N, "bump"),
+    ("normal_map", 0, N, "bump_map_amt"),
+    ("displacement_map", 0, N, "displacement"),
+    ("displacement_map", 0, N, "displacement_map_amt"),
+    ("subsurface_type", 0, N, "subsurfaceType"),
+];
+
+/// `ufbxi_3ds_max_physical_material_features` (ufbx 0.23.1).
+const PHYSICAL_FEATURES: &[Mapping] = &[
+    ("thin_walled", 0, N, "thin_walled"),
+    ("specular", 0, N, "material_mode"),
+    ("diffuse_roughness", 0, N, "material_mode"),
+    (
+        "transmission_roughness",
+        FEATURE_INVERTED,
+        N,
+        "trans_roughness_lock",
+    ),
+    ("roughness_as_glossiness", 0, N, "roughness_inv"),
+    (
+        "transmission_roughness_as_glossiness",
+        0,
+        N,
+        "trans_roughness_inv",
+    ),
+    ("coat_roughness_as_glossiness", 0, N, "coat_roughness_inv"),
+];
+
+/// `ufbxi_3ds_max_pbr_metal_rough_pbr_mapping` (ufbx 0.23.1).
+const METAL_ROUGH_PBR_MAPPING: &[Mapping] = &[
+    ("base_color", DEFAULT_W_1, N, "base_color"),
+    ("base_color", DEFAULT_W_1, N, "baseColor"),
+    ("roughness", 0, N, "roughness"),
+    ("roughness", 0, N, "Roughness_Map"),
+    ("metalness", 0, N, "metalness"),
+    ("ambient_occlusion", 0, N, "ao"),
+    ("normal_map", 0, N, "norm"),
+    ("emission_color", DEFAULT_W_1, N, "emit_color"),
+    ("displacement_map", 0, N, "displacement"),
+    ("displacement_map", 0, N, "displacement_amt"),
+    ("opacity", WIDEN_TO_RGB, N, "opacity"),
+];
+
+/// `ufbxi_3ds_max_pbr_spec_gloss_pbr_mapping` (ufbx 0.23.1).
+const SPEC_GLOSS_PBR_MAPPING: &[Mapping] = &[
+    ("base_color", DEFAULT_W_1, N, "base_color"),
+    ("base_color", DEFAULT_W_1, N, "baseColor"),
+    ("specular_color", DEFAULT_W_1, N, "Specular"),
+    ("specular_color", DEFAULT_W_1, N, "specular"),
+    ("roughness", 0, N, "glossiness"),
+    ("ambient_occlusion", 0, N, "ao"),
+    ("normal_map", 0, N, "norm"),
+    ("emission_color", DEFAULT_W_1, N, "emit_color"),
+    ("displacement_map", 0, N, "displacement"),
+    ("displacement_map", 0, N, "displacement_amt"),
+    ("opacity", WIDEN_TO_RGB, N, "opacity"),
+];
+
+/// `ufbxi_3ds_max_pbr_features` (ufbx 0.23.1).
+const MAX_PBR_FEATURES: &[Mapping] = &[(
+    "roughness_as_glossiness",
+    FEATURE_IF_AROUND_1,
+    N,
+    "useGlossiness",
+)];
+
+/// `ufbxi_gltf_material_pbr_mapping` (ufbx 0.23.1).
+const GLTF_PBR_MAPPING: &[Mapping] = &[
+    ("base_color", DEFAULT_W_1, N, "main|baseColor"),
+    ("roughness", 0, N, "main|roughness"),
+    ("metalness", 0, N, "main|metalness"),
+    ("normal_map", 0, N, "main|normal"),
+    ("ambient_occlusion", 0, N, "main|ambientOcclusion"),
+    ("emission_color", DEFAULT_W_1, N, "main|emission"),
+    ("emission_color", DEFAULT_W_1, N, "main|emissionColor"),
+    ("opacity", WIDEN_TO_RGB, N, "main|Alpha"),
+    ("coat_factor", 0, N, "extension|clearcoat"),
+    ("coat_roughness", 0, N, "extension|clearcoatRoughness"),
+    ("coat_normal", 0, N, "extension|clearcoatNormal"),
+    ("sheen_color", DEFAULT_W_1, N, "extension|sheenColor"),
+    ("sheen_roughness", 0, N, "extension|sheenRoughness"),
+    ("specular_factor", 0, N, "extension|specular"),
+    ("specular_factor", 0, N, "extension|Specular"),
+    ("specular_color", DEFAULT_W_1, N, "extension|specularcolor"),
+    ("specular_color", DEFAULT_W_1, N, "extension|specularColor"),
+    ("transmission_factor", 0, N, "extension|transmission"),
+    ("specular_ior", 0, N, "extension|indexOfRefraction"),
+];
+
+/// `ufbxi_gltf_material_features` (ufbx 0.23.1).
+const GLTF_FEATURES: &[Mapping] = &[
+    ("double_sided", 0, N, "main|DoubleSided"),
+    ("sheen", 0, N, "extension|enableSheen"),
+    ("coat", 0, N, "extension|enableClearCoat"),
+    ("transmission", 0, N, "extension|enableTransmission"),
+    ("ior", 0, N, "extension|enableIndexOfRefraction"),
+    ("specular", 0, N, "extension|enableSpecular"),
+    ("unlit", 0, N, "extension|unlit"),
+];
+
+/// `ufbxi_openpbr_material_pbr_mapping` (ufbx 0.23.1).
+const OPENPBR_MAPPING: &[Mapping] = &[
+    ("base_factor", 0, N, "base_weight"),
+    ("base_color", DEFAULT_W_1, N, "base_color"),
+    ("roughness", 0, N, "specular_roughness"),
+    ("diffuse_roughness", 0, N, "base_diffuse_roughness"),
+    ("metalness", 0, N, "base_metalness"),
+    ("specular_factor", 0, N, "specular_weight"),
+    ("specular_color", DEFAULT_W_1, N, "specular_color"),
+    ("specular_anisotropy", 0, N, "specular_roughness_anisotropy"),
+    ("specular_ior", 0, N, "specular_ior"),
+    ("transmission_factor", 0, N, "transmission_weight"),
+    ("transmission_color", DEFAULT_W_1, N, "transmission_color"),
+    ("transmission_depth", 0, N, "transmission_depth"),
+    (
+        "transmission_scatter",
+        WIDEN_TO_RGB,
+        N,
+        "transmission_scatter",
+    ),
+    (
+        "transmission_scatter_anisotropy",
+        0,
+        N,
+        "transmission_scatter_anisotropy",
+    ),
+    (
+        "transmission_dispersion",
+        0,
+        N,
+        "transmission_dispersion_scale",
+    ),
+    ("subsurface_factor", 0, N, "subsurface_weight"),
+    ("subsurface_color", DEFAULT_W_1, N, "subsurface_color"),
+    (
+        "subsurface_radius",
+        WIDEN_TO_RGB,
+        N,
+        "subsurface_radius_scale",
+    ),
+    ("subsurface_scale", 0, N, "subsurface_radius"),
+    (
+        "subsurface_anisotropy",
+        0,
+        N,
+        "subsurface_scatter_anisotropy",
+    ),
+    ("coat_factor", 0, N, "coat_weight"),
+    ("coat_color", DEFAULT_W_1, N, "coat_color"),
+    ("coat_roughness", 0, N, "coat_roughness"),
+    ("coat_anisotropy", 0, N, "coat_roughness_anisotropy"),
+    ("coat_ior", 0, N, "coat_ior"),
+    ("coat_normal", 0, N, "coat_normal_map"),
+    ("sheen_factor", 0, N, "fuzz_weight"),
+    ("sheen_color", DEFAULT_W_1, N, "fuzz_color"),
+    ("sheen_roughness", 0, N, "fuzz_roughness"),
+    ("emission_factor", 0, N, "emission_weight"),
+    ("emission_factor", MULTIPLY_VALUE, N, "emission_luminance"),
+    ("emission_color", DEFAULT_W_1, N, "emission_color"),
+    ("thin_film_factor", 0, N, "thin_film_weight"),
+    ("thin_film_thickness", 0, N, "thin_film_thickness"),
+    ("thin_film_ior", 0, N, "thin_film_ior"),
+    ("normal_map", 0, N, "bump"),
+    ("normal_map", 0, N, "bump_map_amt"),
+    ("displacement_map", 0, N, "displacement"),
+    ("displacement_map", 0, N, "displacement_map_amt"),
+    ("coat_normal", 0, N, "coat_bump"),
+    ("coat_normal", 0, N, "coat_bump_map_amt"),
+    ("tangent_map", 0, N, "geometry_tangent_map"),
+    ("opacity", WIDEN_TO_RGB, N, "geometry_opacity"),
+];
+
+/// `ufbxi_openpbr_material_features` (ufbx 0.23.1).
+const OPENPBR_FEATURES: &[Mapping] = &[("thin_walled", 0, N, "geometry_thin_walled")];
+
 /// `ufbx_shader_type` values used here.
 const SHADER_UNKNOWN: i64 = 0;
 const SHADER_FBX_LAMBERT: i64 = 1;
@@ -254,16 +474,101 @@ const SHADER_3DS_MAX_PBR_SPEC_GLOSS: i64 = 7;
 const SHADER_GLTF_MATERIAL: i64 = 8;
 const SHADER_OPENPBR_MATERIAL: i64 = 9;
 
-/// `ufbxi_shader_pbr_mappings[shader_type]` (mapping, default features) for
-/// the ported shader types.
-fn pbr_mapping(shader_type: i64) -> Option<(&'static [Mapping], &'static [&'static str])> {
-    const PHONG_FEATURES: &[&str] = &["diffuse", "specular", "emission", "transmission"];
-    const LAMBERT_FEATURES: &[&str] = &["diffuse", "emission", "transmission"];
+struct ShaderMapping {
+    maps: &'static [Mapping],
+    features: &'static [Mapping],
+    defaults: &'static [&'static str],
+    prefix: &'static [u8],
+    texture_suffix: &'static [u8],
+    enabled_suffix: &'static [u8],
+}
+/// `ufbxi_shader_pbr_mappings[shader_type]` for the ported shader types.
+fn pbr_mapping(shader_type: i64) -> Option<ShaderMapping> {
+    let mut m = ShaderMapping {
+        maps: &[],
+        features: &[],
+        defaults: &[],
+        prefix: b"",
+        texture_suffix: b"",
+        enabled_suffix: b"",
+    };
     match shader_type {
-        SHADER_UNKNOWN | SHADER_FBX_PHONG => Some((PHONG_PBR_MAPPING, PHONG_FEATURES)),
-        SHADER_FBX_LAMBERT => Some((LAMBERT_PBR_MAPPING, LAMBERT_FEATURES)),
-        _ => None,
+        SHADER_UNKNOWN | SHADER_FBX_PHONG => {
+            m.maps = PHONG_PBR_MAPPING;
+            m.defaults = &["diffuse", "specular", "emission", "transmission"];
+        }
+        SHADER_FBX_LAMBERT => {
+            m.maps = LAMBERT_PBR_MAPPING;
+            m.defaults = &["diffuse", "emission", "transmission"];
+        }
+        SHADER_3DS_MAX_PHYSICAL_MATERIAL => {
+            m.maps = PHYSICAL_PBR_MAPPING;
+            m.features = PHYSICAL_FEATURES;
+            m.defaults = &[
+                "pbr",
+                "metalness",
+                "diffuse",
+                "coat",
+                "sheen",
+                "transmission",
+                "opacity",
+                "ior",
+            ];
+            m.prefix = b"3dsMax|Parameters|";
+            m.texture_suffix = b"_map";
+            m.enabled_suffix = b"_map_on";
+        }
+        SHADER_3DS_MAX_PBR_METAL_ROUGH | SHADER_3DS_MAX_PBR_SPEC_GLOSS => {
+            m.maps = if shader_type == SHADER_3DS_MAX_PBR_METAL_ROUGH {
+                METAL_ROUGH_PBR_MAPPING
+            } else {
+                SPEC_GLOSS_PBR_MAPPING
+            };
+            m.features = MAX_PBR_FEATURES;
+            m.defaults = if shader_type == SHADER_3DS_MAX_PBR_METAL_ROUGH {
+                &["pbr", "metalness", "diffuse", "opacity"]
+            } else {
+                &["pbr", "specular", "diffuse", "opacity"]
+            };
+            m.prefix = b"3dsMax|main|";
+            m.texture_suffix = b"_map";
+        }
+        SHADER_GLTF_MATERIAL => {
+            m.maps = GLTF_PBR_MAPPING;
+            m.features = GLTF_FEATURES;
+            m.defaults = &[
+                "pbr",
+                "metalness",
+                "diffuse",
+                "emission",
+                "opacity",
+                "ambient_occlusion",
+            ];
+            m.prefix = b"3dsMax|";
+            m.texture_suffix = b"Map";
+        }
+        SHADER_OPENPBR_MATERIAL => {
+            m.maps = OPENPBR_MAPPING;
+            m.features = OPENPBR_FEATURES;
+            m.defaults = &[
+                "pbr",
+                "metalness",
+                "diffuse",
+                "specular",
+                "coat",
+                "sheen",
+                "transmission",
+                "opacity",
+                "ior",
+                "diffuse_roughness",
+            ];
+            m.prefix = b"3dsMax|Parameters|";
+            m.texture_suffix = b"_map";
+            m.enabled_suffix = b"_map_on";
+        }
+        _ => return None,
     }
+    Some(m)
 }
 
 /// `ufbx_material_map`.
@@ -581,20 +886,50 @@ fn prop_texture(textures: &[MaterialTexture], name: &[u8]) -> Option<usize> {
         .map(|t| t.texture)
 }
 
-/// `ufbxi_fetch_mapping_maps` without shader bindings (identity binding).
+// Fixed scratch names preserve the loader's fallible-allocation contract.
+fn mapping_name<'a>(buf: &'a mut [u8; 512], prefix: &[u8], name: &str, suffix: &[u8]) -> &'a [u8] {
+    let mut len = 0;
+    for part in [prefix, name.as_bytes(), suffix] {
+        buf[len..len + part.len()].copy_from_slice(part);
+        len += part.len();
+    }
+    &buf[..len]
+}
+#[derive(Clone, Copy)]
+enum Fetch {
+    ValuesAndTextures,
+    Textures,
+    TextureEnabled,
+}
+struct MappingSource<'a> {
+    prefix: &'a [u8],
+    suffix: &'a [u8],
+    fetch: Fetch,
+}
+/// `ufbxi_fetch_mapping_maps` without shader-element bindings (identity binding).
 fn fetch_mapping_maps(
     props: &PropertyLayers<'_>,
     textures: &[MaterialTexture],
     maps: &mut [Map],
     index: fn(&str) -> usize,
     mappings: &[Mapping],
+    source: MappingSource<'_>,
 ) {
     for &(target, flags, transform, name) in mappings {
         let map = &mut maps[index(target)];
-        let prop = find(props, name.as_bytes());
-        if let Some(p) = prop.filter(|p| p.kind != Type::Reference) {
-            map.value = p.value_real;
-            map.int = p.value_int;
+        let mut scratch = [0; 512];
+        let name = mapping_name(&mut scratch, source.prefix, name, source.suffix);
+        let prop = find(props, name);
+        if let Some(p) = prop.filter(|p| {
+            p.kind != Type::Reference && matches!(source.fetch, Fetch::ValuesAndTextures)
+        }) {
+            if flags & MULTIPLY_VALUE != 0 {
+                map.value[0] *= p.value_real[0];
+                map.int = crate::canon_dom::f64_to_i64(map.value[0]);
+            } else {
+                map.value = p.value_real;
+                map.int = p.value_int;
+            }
             map.has_value = true;
             if transform == MatTransform::UnknownShininess {
                 // ufbxi_mat_transform_unknown_shininess
@@ -626,7 +961,11 @@ fn fetch_mapping_maps(
                 0
             };
         }
-        if let Some(t) = prop_texture(textures, name.as_bytes()) {
+        if matches!(source.fetch, Fetch::TextureEnabled) {
+            if let Some(p) = prop {
+                map.texture_enabled = p.value_int != 0;
+            }
+        } else if let Some(t) = prop_texture(textures, name) {
             map.texture = Some(t);
             map.texture_enabled = true;
         }
@@ -658,13 +997,77 @@ fn fetch_maps(
     let mut fbx_maps = a.filled(FBX_MAPS.len(), Map::default())?;
     let mut pbr_maps = a.filled(PBR_MAPS.len(), Map::default())?;
     let mut features = a.filled(FEATURES.len(), (false, false))?;
-    fetch_mapping_maps(props, textures, &mut fbx_maps, fbx, BASE_FBX_MAPPING);
+    fetch_mapping_maps(
+        props,
+        textures,
+        &mut fbx_maps,
+        fbx,
+        BASE_FBX_MAPPING,
+        MappingSource {
+            prefix: b"",
+            suffix: b"",
+            fetch: Fetch::ValuesAndTextures,
+        },
+    );
     match pbr_mapping(shader_type) {
-        Some((mapping, defaults)) => {
-            for f in defaults {
+        Some(m) => {
+            for f in m.defaults {
                 features[feature(f)].0 = true;
             }
-            fetch_mapping_maps(props, textures, &mut pbr_maps, pbr, mapping);
+            if !m.texture_suffix.is_empty() {
+                fetch_mapping_maps(
+                    props,
+                    textures,
+                    &mut pbr_maps,
+                    pbr,
+                    m.maps,
+                    MappingSource {
+                        prefix: m.prefix,
+                        suffix: m.texture_suffix,
+                        fetch: Fetch::Textures,
+                    },
+                );
+            }
+            fetch_mapping_maps(
+                props,
+                textures,
+                &mut pbr_maps,
+                pbr,
+                m.maps,
+                MappingSource {
+                    prefix: m.prefix,
+                    suffix: b"",
+                    fetch: Fetch::ValuesAndTextures,
+                },
+            );
+            if !m.enabled_suffix.is_empty() {
+                fetch_mapping_maps(
+                    props,
+                    textures,
+                    &mut pbr_maps,
+                    pbr,
+                    m.maps,
+                    MappingSource {
+                        prefix: m.prefix,
+                        suffix: m.enabled_suffix,
+                        fetch: Fetch::TextureEnabled,
+                    },
+                );
+            }
+            for &(target, flags, _, name) in m.features {
+                let mut scratch = [0; 512];
+                let name = mapping_name(&mut scratch, m.prefix, name, b"");
+                if let Some(p) = find(props, name).filter(|p| p.kind != Type::Reference) {
+                    let mut enabled = p.value_int != 0;
+                    if flags & FEATURE_INVERTED != 0 {
+                        enabled = !enabled;
+                    }
+                    if flags & FEATURE_IF_AROUND_1 != 0 {
+                        enabled = (0.5..=1.5).contains(&p.value_real[0]);
+                    }
+                    features[feature(target)] = (enabled, true);
+                }
+            }
         }
         None => a.push(
             warnings,

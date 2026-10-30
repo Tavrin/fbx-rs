@@ -5,7 +5,7 @@ use crate::Error;
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
-use std::ops::{Index, RangeFrom};
+use std::ops::Index;
 
 #[derive(Clone)]
 struct Node<K, V> {
@@ -257,25 +257,6 @@ impl<K: Ord, V> Map<K, V> {
         }
         Ok(map)
     }
-    pub fn range(&self, range: RangeFrom<K>) -> Range<'_, K, V> {
-        let mut at = self.root;
-        let mut start = None;
-        while let Some(i) = at {
-            let key = &self.nodes[i].pair.as_ref().expect("occupied node").0;
-            if *key < range.start {
-                at = self.nodes[i].right;
-            } else {
-                start = Some(i);
-                at = self.nodes[i].left;
-            }
-        }
-        Range {
-            cursor: Cursor {
-                map: self,
-                at: start,
-            },
-        }
-    }
 }
 impl<K: Ord, V> Index<&K> for Map<K, V> {
     type Output = V;
@@ -312,15 +293,6 @@ impl<'a, K, V> Iterator for Iter<'a, K, V> {
     }
 }
 impl<K, V> ExactSizeIterator for Iter<'_, K, V> {}
-pub(crate) struct Range<'a, K, V> {
-    cursor: Cursor<'a, K, V>,
-}
-impl<'a, K, V> Iterator for Range<'a, K, V> {
-    type Item = (&'a K, &'a V);
-    fn next(&mut self) -> Option<Self::Item> {
-        self.cursor.next()
-    }
-}
 impl<'a, K, V> IntoIterator for &'a Map<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V>;
@@ -407,10 +379,7 @@ mod tests {
         for i in 0..1009 {
             assert_eq!(map.get(&i), Some(&(i * 2)));
         }
-        assert_eq!(
-            map.range(500..).map(|(&k, _)| k).collect::<Vec<_>>(),
-            (500..1009).collect::<Vec<_>>()
-        );
+
         assert_eq!(
             map.into_iter().collect::<Vec<_>>(),
             (0..1009).map(|i| (i, i * 2)).collect::<Vec<_>>()
@@ -436,10 +405,7 @@ mod tests {
                 map.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>(),
                 (0..n).map(|i| (i, i * 3)).collect::<Vec<_>>()
             );
-            assert_eq!(
-                map.range(n / 2..).map(|(&k, _)| k).collect::<Vec<_>>(),
-                (n / 2..n).collect::<Vec<_>>()
-            );
+
             assert_eq!(
                 map.into_iter().collect::<Vec<_>>(),
                 (0..n).map(|i| (i, i * 3)).collect::<Vec<_>>()

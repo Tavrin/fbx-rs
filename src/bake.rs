@@ -1,6 +1,6 @@
 //! Bounded animation baking. Key time generation and reduction follow ufbx
 //! 0.23.1. See `docs/VERIFICATION.md` for remaining compatibility boundaries.
-use crate::animation::{Animation, KTIME};
+use crate::animation::{Animation, BakeSample, TransformChannel, KTIME};
 use crate::api_alloc::Budget;
 use crate::{AnimationBinding, Error, Interpolation};
 use std::cell::Cell;
@@ -32,7 +32,8 @@ pub struct BakeOptions {
     pub max_keys: usize,
     /// Aggregate requested vector capacity for this bake (bytes).
     pub max_allocation: usize,
-    /// Maximum node evaluations, including nodes evaluated for dependencies.
+    /// Maximum evaluation work: static input lookups, node/dependency visits,
+    /// and property evaluations and their layer/connection/animated-weight visits.
     pub max_evaluation_work: usize,
 }
 impl Default for BakeOptions {
@@ -469,6 +470,9 @@ pub(crate) fn bake(
         min: Cell::new(f64::INFINITY),
         max: Cell::new(f64::NEG_INFINITY),
     };
+    let inputs = c
+        .budget
+        .try_collect((0..a.nodes.len()).map(|i| a.node_inputs(i, &|n| c.work(n))))?;
     let mut bindings = Vec::new();
     for &l in layers {
         for b in &a.layers[l].bindings {
@@ -553,7 +557,16 @@ pub(crate) fn bake(
             c.budget.reserve(&mut rk, r.len())?;
             c.budget.reserve(&mut sk, s.len())?;
             for time in t {
-                let transform = a.bake_transform(c.layers, node, c.sample(time), &|n| c.work(n))?;
+                let transform = a.bake_transform(
+                    &inputs,
+                    node,
+                    TransformChannel::Translation,
+                    &BakeSample {
+                        layers: c.layers,
+                        time: c.sample(time),
+                        work: &|n| c.work(n),
+                    },
+                )?;
                 tk.push(BakedKey {
                     time: time.time,
                     flags: time.flags,
@@ -561,7 +574,16 @@ pub(crate) fn bake(
                 });
             }
             for time in r {
-                let transform = a.bake_transform(c.layers, node, c.sample(time), &|n| c.work(n))?;
+                let transform = a.bake_transform(
+                    &inputs,
+                    node,
+                    TransformChannel::Rotation,
+                    &BakeSample {
+                        layers: c.layers,
+                        time: c.sample(time),
+                        work: &|n| c.work(n),
+                    },
+                )?;
                 rk.push(BakedKey {
                     time: time.time,
                     flags: time.flags,
@@ -569,7 +591,16 @@ pub(crate) fn bake(
                 });
             }
             for time in s {
-                let transform = a.bake_transform(c.layers, node, c.sample(time), &|n| c.work(n))?;
+                let transform = a.bake_transform(
+                    &inputs,
+                    node,
+                    TransformChannel::Scale,
+                    &BakeSample {
+                        layers: c.layers,
+                        time: c.sample(time),
+                        work: &|n| c.work(n),
+                    },
+                )?;
                 sk.push(BakedKey {
                     time: time.time,
                     flags: time.flags,
@@ -606,8 +637,10 @@ pub(crate) fn bake(
                 let mut keys = Vec::new();
                 c.budget.reserve(&mut keys, times.len())?;
                 for time in times {
-                    c.work(1)?;
-                    let p = a.numeric_property(layers, element, &first.property, c.sample(time))?;
+                    let p =
+                        a.bake_property(layers, element, &first.property, c.sample(time), &|n| {
+                            c.work(n)
+                        })?;
                     keys.push(BakedKey {
                         time: time.time,
                         flags: time.flags,
@@ -736,11 +769,147 @@ mod tests {
             let b = bake(&a, None, &BakeOptions::default()).unwrap();
             assert_eq!(b.nodes.len(), n);
             let work = EVAL_WORK.with(Cell::get);
-            assert_eq!(work, 6 * n);
+            assert_eq!(work, 25 * n + 15);
             eprintln!("bake nodes={n} evaluations={work}");
             counts.push(work);
         }
-        assert_eq!(counts[1], 8 * counts[0]);
+        assert!(counts[1] <= 8 * counts[0]);
+    }
+    fn animated_property(a: &mut Animation, name: &[u8], value: usize) {
+        a.layers[0].bindings.push(AnimationBinding {
+            element: 1,
+            source_id: 1,
+            property: name.to_vec(),
+            value,
+        });
+        a.layers[0]
+            .bindings
+            .sort_unstable_by(|a, b| (a.element, &a.property).cmp(&(b.element, &b.property)));
+        a.properties
+            .try_insert(
+                (1, name.to_vec()),
+                EvaluatedProperty {
+                    flags: 0x2000,
+                    ..Default::default()
+                },
+                &Budget::new(usize::MAX),
+            )
+            .unwrap();
+    }
+    #[test]
+    fn bake_scaling_keys_and_unrelated_properties() {
+        let mut counts = Vec::new();
+        for n in [128, 1024] {
+            let mut a = synthetic(1);
+            a.curves[0].keys = (0..n)
+                .map(|k| Keyframe::new(i64::try_from(k).unwrap() * 46_186_158, k as f64))
+                .collect();
+            a.values.push(AnimationValue {
+                element: 0,
+                source_id: 0,
+                default_value: [42.0; 3],
+                curves: [None; 3],
+            });
+            for p in 0..n {
+                animated_property(&mut a, format!("Unrelated{p:04}").as_bytes(), 1);
+            }
+            EVAL_WORK.with(|w| w.set(0));
+            let b = bake(&a, None, &BakeOptions::default()).unwrap();
+            let work = EVAL_WORK.with(Cell::get);
+            assert_eq!(b.properties.len(), n);
+            assert!(b
+                .properties
+                .iter()
+                .all(|p| p.keys.iter().all(|k| k.value == [42.0; 3])));
+            assert!(work <= 12 * n + 100, "{work}");
+            eprintln!("bake keys/properties={n} work={work}");
+            // Exact budget succeeds, one unit less fails before doing the work.
+            let opts = BakeOptions {
+                max_evaluation_work: work,
+                ..Default::default()
+            };
+            assert_eq!(bake(&a, None, &opts).unwrap(), b);
+            assert_eq!(
+                bake(
+                    &a,
+                    None,
+                    &BakeOptions {
+                        max_evaluation_work: work - 1,
+                        ..opts
+                    }
+                ),
+                Err(Error::ResourceLimit("bake evaluation work"))
+            );
+            counts.push(work);
+        }
+        assert!(counts[1] <= 10 * counts[0]);
+    }
+    #[test]
+    fn bake_scaling_rotation_layers_and_animated_order() {
+        let mut counts = Vec::new();
+        for n in [32, 256] {
+            let mut a = synthetic(1);
+            a.layers[0].bindings.clear();
+            a.node_order = vec![0, 1];
+            a.values[0].default_value = [0.0, 20.0, 30.0];
+            a.values.push(AnimationValue {
+                element: 0,
+                source_id: 0,
+                default_value: [5.0, 0.0, 0.0],
+                curves: [None; 3],
+            });
+            animated_property(&mut a, b"Lcl Rotation", 0);
+            animated_property(&mut a, b"RotationOrder", 1);
+            a.values.push(AnimationValue {
+                element: 0,
+                source_id: 0,
+                default_value: [0.0; 3],
+                curves: [None; 3],
+            });
+            a.layers[0].compose_rotation = true;
+            for i in 1..n {
+                let mut l = a.layers[0].clone();
+                l.element = i + 2;
+                for b in &mut l.bindings {
+                    if b.property == b"RotationOrder" {
+                        b.value = 2;
+                    }
+                }
+                l.additive = true;
+                l.weight = 0.01;
+                a.layers.push(l);
+                a.stacks[0].layers.push(i);
+            }
+            let layers = a.stack_layers(None).unwrap();
+            let work = Cell::new(0);
+            let rotation = a
+                .bake_property(layers, 1, b"Lcl Rotation", 0.5, &|n| {
+                    work.set(work.get() + n);
+                    Ok(())
+                })
+                .unwrap();
+            // One layer scan for rotation and one for RotationOrder, independent
+            // of the number of later rotation layers.
+            assert_eq!(work.get(), 2 * (n + 1));
+            let pose = a.states(layers, 0.5).unwrap();
+            let q = sn::euler_to_quat(
+                [
+                    rotation.components[0],
+                    rotation.components[1],
+                    rotation.components[2],
+                ],
+                5,
+            );
+            assert_eq!(pose[1].local.rotation, q);
+            EVAL_WORK.with(|w| w.set(0));
+            let b = bake(&a, None, &BakeOptions::default()).unwrap();
+            assert!(!b.nodes[0].rotation_keys.is_empty());
+            let work = EVAL_WORK.with(Cell::get);
+            assert!(work < 1000 * n);
+            eprintln!("bake rotation layers={n} work={work}");
+            counts.push(work);
+        }
+        assert!(counts[1] <= 10 * counts[0]);
     }
     #[test]
     fn bake_reservation_sweep_and_work_cap() {

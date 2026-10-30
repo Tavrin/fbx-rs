@@ -675,8 +675,13 @@ pub struct MaterialMap {
     pub feature_disabled: bool,
 }
 
-/// A material: the FBX (Lambert/Phong) maps and the PBR maps derived from
-/// them or from a known shader (3ds Max Physical, Arnold, Stingray, ...).
+/// A material with FBX maps and derived PBR maps.
+///
+/// PBR mappings cover FBX Lambert/Phong (also the unknown-shader fallback),
+/// 3ds Max Physical Material, 3ds Max PBR Metal/Rough and Spec/Gloss, glTF
+/// Material, and OpenPBR Material identified by their 3ds Max class IDs.
+/// Shader-element bindings (including Arnold, OSL and ShaderFX/Stingray)
+/// and Blender-specific Phong mapping are not implemented.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Material {
     pub(crate) base: ElementInfo,
