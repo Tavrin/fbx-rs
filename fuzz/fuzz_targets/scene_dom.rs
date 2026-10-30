@@ -6,40 +6,42 @@ use fbx_rs::{
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    // Complete canonical conversion of the raw input under small limits.
+    // Complete canonical conversion of the raw input under small limits. They are
+    // just large enough for every supported corpus file (skins, blend shapes and
+    // animation included) to convert, so the seeds reach those paths.
     let dump_limits = fbx_rs::canon_scene::DumpLimits {
         syntax: fbx_rs::syntax::Limits {
             max_depth: 16,
-            max_nodes: 256,
-            max_properties: 1024,
-            max_array_elements: 4096,
-            max_decompressed_bytes: 32768,
+            max_nodes: 2048,
+            max_properties: 8192,
+            max_array_elements: 65536,
+            max_decompressed_bytes: 262144,
             max_string_length: 8192,
-            max_allocation: 131072,
+            max_allocation: 1 << 20,
         },
         index: scene::Limits {
-            max_objects: 256,
-            max_connections: 256,
-            max_allocation: 131072,
+            max_objects: 1024,
+            max_connections: 2048,
+            max_allocation: 1 << 20,
         },
         draft: scene_draft::Limits {
-            max_allocation: 131072,
+            max_allocation: 1 << 20,
             index: scene::Limits {
-                max_objects: 256,
-                max_connections: 256,
-                max_allocation: 131072,
+                max_objects: 1024,
+                max_connections: 2048,
+                max_allocation: 1 << 20,
             },
             mesh: scene_mesh::Limits {
                 max_meshes: 256,
                 max_layers: 256,
-                max_allocation: 131072,
+                max_allocation: 1 << 20,
             },
         },
-        max_properties: 1024,
+        max_properties: 8192,
         max_keys: 4096,
         max_deformer_work: 1 << 20,
         max_animation_work: 1 << 20,
-        max_allocation: 131072,
+        max_allocation: 1 << 20,
         max_line: 1 << 20,
         max_output: 64 << 20,
     };
