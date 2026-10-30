@@ -122,7 +122,8 @@ fuzz_target!(|data: &[u8]| {
             match data[0] & 3 {
                 0 => parsed.nodes[i].parent = Some(usize::MAX),
                 1 => parsed.nodes[i].properties = usize::MAX..usize::MAX,
-                2 => parsed.nodes[i].properties = 1..0,
+                // Intentionally reversed: exercise malformed property spans.
+                2 => parsed.nodes[i].properties = std::ops::Range { start: 1, end: 0 },
                 _ => parsed.nodes[i].parent = Some(i),
             }
             let _ = scene_draft::build_static(&parsed, encoding, &draft_limits, &surface_limits);
@@ -141,7 +142,7 @@ fuzz_target!(|data: &[u8]| {
         b"C",
         b"AnimationStack",
     ];
-    for chunk in data.chunks_exact(4).take(64) {
+    for chunk in data.as_chunks::<4>().0.iter().take(64) {
         let pos = doc.properties.len();
         doc.properties.push(Property::I64(i64::from(chunk[0])));
         let start = if chunk[1] & 0x80 == 0 {

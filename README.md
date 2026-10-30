@@ -2,9 +2,9 @@
 
 A pure-Rust loader for FBX files. It reads binary and ASCII FBX 7.x files
 into an owned scene: nodes, meshes, materials, textures, cameras and
-lights. Every value it returns is the value [ufbx](https://github.com/ufbx/ufbx)
-0.23.1 produces for the same file and import options, checked bit for bit on
-a test corpus.
+lights, skins, blend shapes and animation. On the verification corpus,
+316/316 supported files are bit-exact against
+[ufbx](https://github.com/ufbx/ufbx) 0.23.1 with the same import options.
 
 ## What it does
 
@@ -44,7 +44,7 @@ fbx-rs = "0.1"
 
 ## Usage
 
-```rust
+```no_run
 let bytes = std::fs::read("model.fbx")?;
 let scene = fbx_rs::load(&bytes, &fbx_rs::LoadOptions::default())?;
 for node in scene.nodes() {
@@ -56,15 +56,17 @@ for node in scene.nodes() {
 for item in scene.unsupported() {
     println!("not converted: {:?}", item.kind);
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The unreleased deformer API reads skin weights by control point, rather than
-polygon corner. Each
-vertex's influence range includes every stored weight, without normalization
-or a maximum-influence reduction:
+## Reading skins and animation
+
+Skin influences are indexed by control point. Each range contains all stored
+weights, without normalization or a limit on influences. Animation time is in
+seconds; `None` selects the default stack, and a stack index selects a named take.
 
 ```rust
-# fn read_weights(scene: &fbx_rs::Scene) {
+# fn read_skin_and_animation(scene: &fbx_rs::Scene) -> Result<(), fbx_rs::Error> {
 for mesh in scene.meshes() {
     for &index in mesh.skin_deformers() {
         let skin = &scene.skin_deformers()[index];
@@ -75,32 +77,10 @@ for mesh in scene.meshes() {
             }
         }
     }
-    for &index in mesh.blend_deformers() {
-        for &channel in &scene.blend_deformers()[index].channels {
-            let channel = &scene.blend_channels()[channel];
-            for target in &channel.keyframes {
-                let shape = &scene.blend_shapes()[target.shape];
-                println!("{}: {} offsets, contribution {}", channel.name,
-                         shape.offset_vertices.len(), target.effective_weight);
-            }
-        }
-    }
-}
-# }
-```
-
-The unreleased animation API evaluates in seconds. `None` selects the default
-stack; an explicit stack index selects a named take:
-
-```rust
-# fn pose(scene: &fbx_rs::Scene) -> Result<(), fbx_rs::Error> {
-if scene.nodes().len() > 1 {
-    let transform = scene.evaluate_transform(None, 1, 0.5)?;
-    println!("position at 0.5 seconds: {:?}", transform.translation);
 }
 let pose = scene.evaluate(None, 0.5)?;
 for (node, evaluated) in scene.nodes().iter().zip(&pose.nodes) {
-    println!("{}: {:?}", node.name(), evaluated.node_to_world);
+    println!("{} at 0.5 seconds: {:?}", node.name(), evaluated.node_to_world);
 }
 # Ok(())
 # }
@@ -116,11 +96,11 @@ lower-level `fbx_rs::syntax::parse` returns the raw node/property tree.
 
 ## Status and limits
 
-The published 0.1 release covers static scenes; the unreleased source also
-exposes stored deformers and animation evaluation. On a corpus of 340 FBX files
-(see [docs/VERIFICATION.md](docs/VERIFICATION.md)), all 316 supported files have
-results equal to ufbx 0.23.1, including authored curves and evaluated samples.
-There are no deferred animation differences or unexplained differences.
+Version 0.1.1 covers static scenes, stored deformers and animation evaluation.
+On a corpus of 340 FBX files (see [docs/VERIFICATION.md](docs/VERIFICATION.md)),
+316/316 supported files are bit-exact against ufbx 0.23.1, including authored
+curves and evaluated samples. Deliberate differences for malformed inputs and
+Blender weight order are described in that verification report.
 The 24 remaining files are FBX 6.1 or older and are rejected. Camera and light
 modes that the corpus does not contain are ported but not exercised. The parser
 and loader are fuzzed with libFuzzer; the latest animation changes have regression
