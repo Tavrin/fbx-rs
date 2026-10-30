@@ -9,6 +9,7 @@ pub(crate) enum Path {
     Helpers,
 }
 pub(crate) struct Budget {
+    allocation: crate::api_alloc::Budget,
     used: Cell<usize>,
     work: Cell<usize>,
     allocation_limit: usize,
@@ -18,6 +19,7 @@ pub(crate) struct Budget {
 impl Budget {
     pub fn new(allocation_limit: usize, work_limit: usize, path: Path) -> Self {
         Self {
+            allocation: crate::api_alloc::Budget::new(allocation_limit),
             used: Cell::new(0),
             work: Cell::new(0),
             allocation_limit,
@@ -25,7 +27,7 @@ impl Budget {
             path: Cell::new(path),
         }
     }
-    pub fn charge(&self, count: usize, width: usize) -> Result<(), String> {
+    pub fn charge(&self, count: usize, width: usize) -> Result<(), crate::Error> {
         let used = count
             .checked_mul(width)
             .and_then(|n| self.used.get().checked_add(n))
@@ -36,7 +38,7 @@ impl Budget {
         self.used.set(used);
         Ok(())
     }
-    pub fn work(&self, count: usize) -> Result<(), String> {
+    pub fn work(&self, count: usize) -> Result<(), crate::Error> {
         let work = self
             .work
             .get()
@@ -49,7 +51,7 @@ impl Budget {
         record(self.path.get(), count);
         Ok(())
     }
-    pub fn sort_work(&self, count: usize) -> Result<(), String> {
+    pub fn sort_work(&self, count: usize) -> Result<(), crate::Error> {
         self.work(
             count
                 .checked_mul(usize::try_from(usize::BITS - count.leading_zeros()).unwrap() + 1)
@@ -65,3 +67,10 @@ pub(crate) fn record(path: Path, count: usize) {
 }
 #[cfg(test)]
 thread_local! { pub(crate) static COUNTERS: std::cell::RefCell<[usize; 5]> = const { std::cell::RefCell::new([0; 5]) }; }
+
+impl std::ops::Deref for Budget {
+    type Target = crate::api_alloc::Budget;
+    fn deref(&self) -> &Self::Target {
+        &self.allocation
+    }
+}

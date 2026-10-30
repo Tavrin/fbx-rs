@@ -109,6 +109,28 @@ impl Obj {
         self.set(name, v);
         self
     }
+    pub(crate) fn try_set(
+        &mut self,
+        name: &'static str,
+        v: V,
+        a: &crate::api_alloc::Budget,
+    ) -> Result<&mut Self, crate::Error> {
+        if let Some(slot) = self.0.iter_mut().find(|(n, _)| *n == name) {
+            slot.1 = v;
+        } else {
+            a.push(&mut self.0, (name, v))?;
+        }
+        Ok(self)
+    }
+    pub(crate) fn try_with(
+        mut self,
+        name: &'static str,
+        v: V,
+        a: &crate::api_alloc::Budget,
+    ) -> Result<Self, crate::Error> {
+        self.try_set(name, v, a)?;
+        Ok(self)
+    }
     pub fn get(&self, name: &str) -> Option<&V> {
         self.0.iter().find(|(n, _)| *n == name).map(|(_, v)| v)
     }

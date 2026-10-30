@@ -24,6 +24,7 @@ use crate::canon_scene::ElementType;
 use crate::scene_node::{self as sn, Transform};
 use crate::scene_property::{AuthoredProperty, PropertyLayers, Type};
 use crate::syntax::Document;
+use crate::{api_alloc::Budget, Error};
 
 const NO_INDEX: u64 = u32::MAX as u64;
 /// `ufbx_load_opts.path_separator` default on the reference platform (Linux).
@@ -119,7 +120,7 @@ pub(crate) const PBR_MAPS: [&str; 56] = [
     "transmission_glossiness",
 ];
 /// `ufbx_material_features` field order (`UFBX_MATERIAL_FEATURE_*`).
-const FEATURES: [&str; 23] = [
+pub(crate) const FEATURES: [&str; 23] = [
     "pbr",
     "metalness",
     "diffuse",
@@ -294,10 +295,10 @@ impl Map {
 
 /// `ufbx_material_texture`.
 #[derive(Debug, Clone)]
-struct MaterialTexture {
-    material_prop: Vec<u8>,
-    shader_prop: Vec<u8>,
-    texture: usize,
+pub(crate) struct MaterialTexture {
+    pub(crate) material_prop: Vec<u8>,
+    pub(crate) shader_prop: Vec<u8>,
+    pub(crate) texture: usize,
 }
 
 /// File name fields shared by videos, textures and texture files.
@@ -338,6 +339,7 @@ pub struct Item<'p> {
 /// Scene facts the projection depends on.
 pub struct Env<'a, 'd> {
     pub doc: &'a Document<'d>,
+    pub(crate) allocation: &'a Budget,
     pub children: &'a [Vec<usize>],
     pub ascii: bool,
     /// `metadata.original_file_path` (`DocumentUrl`): UTF-8 view and raw bytes.
@@ -364,6 +366,9 @@ pub struct Output {
 
 /// The material values the public `Scene` exposes.
 pub(crate) struct LeanMaterial {
+    pub(crate) features: Vec<(bool, bool)>,
+    pub(crate) properties: Vec<crate::SourceProperty>,
+    pub(crate) attachments: Vec<MaterialTexture>,
     pub(crate) shading_model: Vec<u8>,
     /// In [`FBX_MAPS`] order.
     pub(crate) fbx: Vec<Map>,
@@ -374,6 +379,8 @@ pub(crate) struct LeanMaterial {
 /// The texture values the public `Scene` exposes.
 pub(crate) struct LeanTexture {
     pub(crate) layered: bool,
+    pub(crate) layers: Vec<(usize, i64, f64)>,
+    pub(crate) file_textures: Vec<usize>,
     pub(crate) filename: Vec<u8>,
     pub(crate) relative_filename: Vec<u8>,
     pub(crate) absolute_filename: Vec<u8>,
@@ -390,49 +397,58 @@ impl Env<'_, '_> {
             .find(|&c| self.doc.nodes[c].name == name)
     }
     /// `ufbxi_find_val1(node, name, "S")`: assigns only when present.
-    fn val_str(&self, node: usize, name: &[u8], dst: &mut Vec<u8>) {
+    fn val_str(&self, node: usize, name: &[u8], dst: &mut Vec<u8>) -> Result<(), Error> {
         if let Some(c) = self.child(node, name) {
-            if let Some((Some(view), _)) = node_string(self.doc, c, self.ascii) {
+            if let Some((Some(view), _)) = node_string(self.doc, c, self.ascii, self.allocation)? {
                 *dst = view;
             }
         }
+        Ok(())
     }
     /// `ufbxi_find_val1(node, name, "b")`: assigns only when present.
-    fn val_blob(&self, node: usize, name: &[u8], dst: &mut Vec<u8>) {
+    fn val_blob(&self, node: usize, name: &[u8], dst: &mut Vec<u8>) -> Result<(), Error> {
         if let Some(c) = self.child(node, name) {
-            if let Some((_, raw)) = node_string(self.doc, c, self.ascii) {
+            if let Some((_, raw)) = node_string(self.doc, c, self.ascii, self.allocation)? {
                 *dst = raw;
             }
         }
+        Ok(())
     }
     /// The four file name reads shared by `ufbxi_read_texture` and
     /// `ufbxi_read_video`.
-    fn read_names(&self, node: usize) -> Names {
+    fn read_names(&self, node: usize) -> Result<Names, Error> {
         let mut n = Names::default();
-        self.val_str(node, b"FileName", &mut n.absolute);
-        self.val_str(node, b"Filename", &mut n.absolute);
-        self.val_str(node, b"RelativeFileName", &mut n.relative);
-        self.val_str(node, b"RelativeFilename", &mut n.relative);
-        self.val_blob(node, b"FileName", &mut n.raw_absolute);
-        self.val_blob(node, b"Filename", &mut n.raw_absolute);
-        self.val_blob(node, b"RelativeFileName", &mut n.raw_relative);
-        self.val_blob(node, b"RelativeFilename", &mut n.raw_relative);
-        n
+        self.val_str(node, b"FileName", &mut n.absolute)?;
+        self.val_str(node, b"Filename", &mut n.absolute)?;
+        self.val_str(node, b"RelativeFileName", &mut n.relative)?;
+        self.val_str(node, b"RelativeFilename", &mut n.relative)?;
+        self.val_blob(node, b"FileName", &mut n.raw_absolute)?;
+        self.val_blob(node, b"Filename", &mut n.raw_absolute)?;
+        self.val_blob(node, b"RelativeFileName", &mut n.raw_relative)?;
+        self.val_blob(node, b"RelativeFilename", &mut n.raw_relative)?;
+        Ok(n)
     }
     /// `ufbxi_resolve_filenames` for the string and the raw views.
-    fn resolve(&self, n: &mut Names) {
+    fn resolve(&self, n: &mut Names) -> Result<(), Error> {
         if n.relative.is_empty() {
-            absolute_to_relative(&mut n.relative, &self.original_file_path.0, &n.absolute);
+            absolute_to_relative(
+                &mut n.relative,
+                &self.original_file_path.0,
+                &n.absolute,
+                self.allocation,
+            )?;
         }
-        n.filename = resolve_relative_filename(&n.relative);
+        n.filename = resolve_relative_filename(&n.relative, self.allocation)?;
         if n.raw_relative.is_empty() {
             absolute_to_relative(
                 &mut n.raw_relative,
                 &self.original_file_path.1,
                 &n.raw_absolute,
-            );
+                self.allocation,
+            )?;
         }
-        n.raw_filename = resolve_relative_filename(&n.raw_relative);
+        n.raw_filename = resolve_relative_filename(&n.raw_relative, self.allocation)?;
+        Ok(())
     }
 }
 
@@ -448,16 +464,21 @@ fn next_path_segment(data: &[u8], begin: usize, length: usize) -> usize {
 
 /// `ufbxi_absolute_to_relative_path`: `src` relative to the directory of
 /// `rel`, written to `dst` only when both are non-empty and share a root.
-fn absolute_to_relative(dst: &mut Vec<u8>, rel: &[u8], src: &[u8]) {
+fn absolute_to_relative(
+    dst: &mut Vec<u8>,
+    rel: &[u8],
+    src: &[u8],
+    a: &Budget,
+) -> Result<(), Error> {
     if rel.is_empty() || src.is_empty() || rel[0] != src[0] {
-        return;
+        return Ok(());
     }
     let mut rel_length = rel.len();
     while rel_length > 0 && !is_separator(rel[rel_length - 1]) {
         rel_length -= 1;
     }
     if rel_length == 0 {
-        return;
+        return Ok(());
     }
     let separator = rel[rel_length - 1];
     let src_length = src.len();
@@ -474,32 +495,36 @@ fn absolute_to_relative(dst: &mut Vec<u8>, rel: &[u8], src: &[u8]) {
     let mut out = Vec::new();
     while rel_begin < rel_length {
         let rel_end = next_path_segment(rel, rel_begin, rel_length);
+        a.reserve(&mut out, 3)?;
         out.extend_from_slice(&[b'.', b'.', separator]);
         rel_begin = rel_end + 1;
     }
     while src_begin < src_length {
         let src_end = next_path_segment(src, src_begin, src_length);
+        a.reserve(&mut out, src_end - src_begin)?;
         out.extend_from_slice(&src[src_begin..src_end]);
         if src_end < src_length {
-            out.push(separator);
+            a.push(&mut out, separator)?;
         }
         src_begin = src_end + 1;
     }
     *dst = out;
+    Ok(())
 }
 
 /// `ufbxi_resolve_relative_filename` with the import profile's empty
 /// `metadata.relative_root` (the scene is loaded from memory without a
 /// file name, so the prefix is always empty).
-fn resolve_relative_filename(src: &[u8]) -> Vec<u8> {
+fn resolve_relative_filename(src: &[u8], a: &Budget) -> Result<Vec<u8>, Error> {
     let start = src.iter().position(|&c| !is_separator(c));
     let Some(start) = start else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    src[start..]
-        .iter()
-        .map(|&c| if is_separator(c) { PATH_SEPARATOR } else { c })
-        .collect()
+    a.collect(
+        src[start..]
+            .iter()
+            .map(|&c| if is_separator(c) { PATH_SEPARATOR } else { c }),
+    )
 }
 
 fn find<'a, 'p>(props: &'a PropertyLayers<'p>, name: &[u8]) -> Option<&'a AuthoredProperty<'p>> {
@@ -621,16 +646,18 @@ fn update_factor(maps: &mut [Map], factor: usize, color: usize) {
 }
 
 /// `ufbxi_fetch_maps`: (fbx maps, pbr maps, features as (enabled, explicit)).
+type MaterialMaps = (Vec<Map>, Vec<Map>, Vec<(bool, bool)>);
 fn fetch_maps(
     key: &str,
     shader_type: i64,
     props: &PropertyLayers<'_>,
     textures: &[MaterialTexture],
     warnings: &mut Vec<String>,
-) -> (Vec<Map>, Vec<Map>, Vec<(bool, bool)>) {
-    let mut fbx_maps = vec![Map::default(); FBX_MAPS.len()];
-    let mut pbr_maps = vec![Map::default(); PBR_MAPS.len()];
-    let mut features = vec![(false, false); FEATURES.len()];
+    a: &Budget,
+) -> Result<MaterialMaps, Error> {
+    let mut fbx_maps = a.filled(FBX_MAPS.len(), Map::default())?;
+    let mut pbr_maps = a.filled(PBR_MAPS.len(), Map::default())?;
+    let mut features = a.filled(FEATURES.len(), (false, false))?;
     fetch_mapping_maps(props, textures, &mut fbx_maps, fbx, BASE_FBX_MAPPING);
     match pbr_mapping(shader_type) {
         Some((mapping, defaults)) => {
@@ -639,9 +666,12 @@ fn fetch_maps(
             }
             fetch_mapping_maps(props, textures, &mut pbr_maps, pbr, mapping);
         }
-        None => warnings.push(format!(
-            "{key}: PBR mapping for shader type {shader_type} is not ported"
-        )),
+        None => a.push(
+            warnings,
+            a.format(format_args!(
+                "{key}: PBR mapping for shader type {shader_type} is not ported"
+            ))?,
+        )?,
     }
     for (f, c) in [
         ("diffuse_factor", "diffuse_color"),
@@ -695,7 +725,7 @@ fn fetch_maps(
             pbr_maps[gloss].value[0] = 1.0 - pbr_maps[rough].value[0];
         }
     }
-    (fbx_maps, pbr_maps, features)
+    Ok((fbx_maps, pbr_maps, features))
 }
 
 /// A `UFBX_LIST_TYPE` value.
@@ -726,7 +756,12 @@ struct Texture {
 }
 
 /// Project every material, texture and video, in ufbx's typed order.
-pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
+pub fn project(
+    env: &Env<'_, '_>,
+    items: &[Item<'_>],
+    allocation_limit: usize,
+) -> Result<Output, crate::Error> {
+    let budget = crate::api_alloc::Budget::new(allocation_limit);
     let mut out = Output {
         records: Vec::new(),
         texture_files: Vec::new(),
@@ -734,23 +769,24 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
         textures: Vec::new(),
         warnings: Vec::new(),
     };
+    let a = &budget;
     // Typed order is source order (element ordinal == DOM node + 1).
-    let typed = |ty: ElementType| {
-        let mut v: Vec<usize> = (0..items.len()).filter(|&i| items[i].ty == ty).collect();
-        v.sort_by_key(|&i| items[i].node);
-        v
+    let typed = |ty: ElementType| -> Result<Vec<usize>, Error> {
+        let mut v: Vec<usize> = a.collect((0..items.len()).filter(|&i| items[i].ty == ty))?;
+        a.stable_sort(&mut v, |&i, &j| items[i].node.cmp(&items[j].node))?;
+        Ok(v)
     };
-    let videos = typed(ElementType::Video);
-    let textures = typed(ElementType::Texture);
-    let materials = typed(ElementType::Material);
-    let key = |i: usize| format!("element {}", items[i].element);
+    let videos = typed(ElementType::Video)?;
+    let textures = typed(ElementType::Texture)?;
+    let materials = typed(ElementType::Material)?;
+    let key = |i: usize| a.format(format_args!("element {}", items[i].element));
 
     // ufbxi_read_material and the first finalize pass.
     let mut mats = Vec::new();
     for &m in &materials {
         let it = &items[m];
         let mut shading_model = Vec::new();
-        env.val_str(it.node, b"ShadingModel", &mut shading_model);
+        env.val_str(it.node, b"ShadingModel", &mut shading_model)?;
         let mut shader_type = match shading_model.as_slice() {
             b"lambert" | b"Lambert" => SHADER_FBX_LAMBERT,
             b"phong" | b"Phong" => SHADER_FBX_PHONG,
@@ -763,8 +799,10 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
             .copied()
             .find(|&d| env.types[d] == ElementType::Shader);
         if shader.is_some() {
-            out.warnings
-                .push(format!("{}: shader elements are not ported", key(m)));
+            a.push(
+                &mut out.warnings,
+                a.format(format_args!("{}: shader elements are not ported", key(m)?))?,
+            )?;
         } else if shader_type == SHADER_UNKNOWN {
             let a = crate::numeric::low_word(find_int(&it.props, b"3dsMax|ClassIDa", 0));
             let b = crate::numeric::low_word(find_int(&it.props, b"3dsMax|ClassIDb", 0));
@@ -790,48 +828,62 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
             }
         }
         // ufbxi_fetch_textures (no node search): connections without src prop.
-        let tex: Vec<MaterialTexture> = it
-            .dst
-            .iter()
-            .filter(|(src, _)| env.types[*src] == ElementType::Texture)
-            .map(|(src, prop)| MaterialTexture {
-                material_prop: prop.clone(),
-                shader_prop: prop.clone(),
-                texture: *src,
-            })
-            .collect();
-        mats.push((m, shading_model, shader_type, prefix.to_vec(), tex));
+        let tex: Vec<MaterialTexture> = a.try_collect(
+            it.dst
+                .iter()
+                .filter(|(src, _)| env.types[*src] == ElementType::Texture)
+                .map(|(src, prop)| {
+                    Ok(MaterialTexture {
+                        material_prop: a.bytes(prop)?,
+                        shader_prop: a.bytes(prop)?,
+                        texture: *src,
+                    })
+                }),
+        )?;
+        a.push(
+            &mut mats,
+            (m, shading_model, shader_type, a.bytes(prefix)?, tex),
+        )?;
     }
 
     // ufbxi_resolve_file_content.
-    let mut vids: Vec<(Names, Vec<u8>)> = videos
-        .iter()
-        .map(|&v| {
-            let it = &items[v];
-            let mut names = env.read_names(it.node);
-            let content = env
-                .child(it.node, b"Content")
-                .map_or_else(Vec::new, |c| node_content(env.doc, c, env.ascii));
-            env.resolve(&mut names);
-            (names, content)
-        })
-        .collect();
-    for i in 0..vids.len() {
-        if !vids[i].1.is_empty() {
-            continue;
+    let mut vids: Vec<(Names, Vec<u8>)> = a.try_collect(videos.iter().map(|&v| {
+        let it = &items[v];
+        let mut names = env.read_names(it.node)?;
+        let content = env
+            .child(it.node, b"Content")
+            .map(|c| node_content(env.doc, c, env.ascii, env.allocation))
+            .transpose()?
+            .unwrap_or_default();
+        env.resolve(&mut names)?;
+        Ok((names, content))
+    }))?;
+    let mut providers = crate::fallible_map::Map::new();
+    for (i, (names, content)) in vids.iter().enumerate() {
+        if !content.is_empty() && !names.absolute.is_empty() {
+            providers.try_get_or_insert_with(a.bytes(&names.absolute)?, a, || Ok(i))?;
         }
-        let name = vids[i].0.absolute.clone();
-        if let Some(j) = (0..vids.len()).find(|&j| {
-            !vids[j].1.is_empty() && !vids[j].0.absolute.is_empty() && vids[j].0.absolute == name
-        }) {
-            vids[i].1 = vids[j].1.clone();
+    }
+    for i in 0..vids.len() {
+        if vids[i].1.is_empty() {
+            if let Some(&j) = providers.get(vids[i].0.absolute.as_slice()) {
+                vids[i].1 = a.bytes(&vids[j].1)?;
+            }
         }
     }
 
     // Texture finalize pass.
     let mut texs: Vec<Texture> = Vec::new();
-    let tex_of = |element: usize| textures.iter().position(|&t| items[t].element == element);
-    let mut file_keys: Vec<(bool, Vec<u8>)> = Vec::new();
+    let mut tex_slot = a.filled(env.types.len(), None)?;
+    for (k, &t) in textures.iter().enumerate() {
+        tex_slot[items[t].element] = Some(k);
+    }
+    let mut video_slot = a.filled(env.types.len(), None)?;
+    for (k, &v) in videos.iter().enumerate() {
+        video_slot[items[v].element] = Some(k);
+    }
+    let tex_of = |element: usize| tex_slot[element];
+    let mut file_keys = crate::fallible_map::Map::new();
     let mut files: Vec<Names> = Vec::new();
     let mut file_content: Vec<Vec<u8>> = Vec::new();
     for &t in &textures {
@@ -840,7 +892,7 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
         let mut names = if layered {
             Names::default()
         } else {
-            env.read_names(it.node)
+            env.read_names(it.node)?
         };
         let video = it
             .dst
@@ -849,8 +901,10 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
             .map(|(s, _)| *s)
             .find(|&s| env.types[s] == ElementType::Video);
         let content = video
-            .and_then(|v| videos.iter().position(|&x| items[x].element == v))
-            .map_or_else(Vec::new, |k| vids[k].1.clone());
+            .and_then(|v| video_slot[v])
+            .map(|k| a.bytes(&vids[k].1))
+            .transpose()?
+            .unwrap_or_default();
         // ufbxi_finalize_shader_texture: only the detection is ported.
         let classid = (u64::from(crate::numeric::low_word(find_int(
             &it.props,
@@ -872,10 +926,12 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
                 && names.absolute.is_empty()
                 && video.is_none())
         {
-            out.warnings
-                .push(format!("{}: shader textures are not ported", key(t)));
+            a.push(
+                &mut out.warnings,
+                a.format(format_args!("{}: shader textures are not ported", key(t)?))?,
+            )?;
         }
-        env.resolve(&mut names);
+        env.resolve(&mut names)?;
         let mut layers = Vec::new();
         if layered {
             for (s, p) in &it.dst {
@@ -886,17 +942,17 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
                 let lp = &items[textures[k]].props;
                 let alpha = find_real(lp, b"Texture alpha", 1.0);
                 let mode = find_enum(lp, b"BlendMode", 0, BLEND_OVERLAY);
-                layers.push((k, mode, alpha));
+                a.push(&mut layers, (k, mode, alpha))?;
             }
             if let Some(c) = env.child(it.node, b"Alphas") {
-                if let NodeData::Reals(a) = node_data(env.doc, c, env.ascii) {
+                if let NodeData::Reals(a) = node_data(env.doc, c, env.ascii, env.allocation)? {
                     for (l, x) in layers.iter_mut().zip(a) {
                         l.2 = x;
                     }
                 }
             }
             if let Some(c) = env.child(it.node, b"BlendModes") {
-                if let NodeData::Ints(m) = node_data(env.doc, c, env.ascii) {
+                if let NodeData::Ints(m) = node_data(env.doc, c, env.ascii, env.allocation)? {
                     for (l, x) in layers.iter_mut().zip(m) {
                         if x >= 0 && i64::from(x) < BLEND_OVERLAY {
                             l.1 = i64::from(x);
@@ -918,22 +974,19 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
             file_textures: Vec::new(),
         };
         let file_key = if !tx.names.raw_absolute.is_empty() {
-            Some((false, tx.names.raw_absolute.clone()))
+            Some((false, a.bytes(&tx.names.raw_absolute)?))
         } else if !tx.names.raw_relative.is_empty() {
-            Some((true, tx.names.raw_relative.clone()))
+            Some((true, a.bytes(&tx.names.raw_relative)?))
         } else {
             None
         };
         if let Some(fk) = file_key {
-            let index = match file_keys.iter().position(|k| *k == fk) {
-                Some(i) => i,
-                None => {
-                    file_keys.push(fk);
-                    files.push(Names::default());
-                    file_content.push(Vec::new());
-                    file_keys.len() - 1
-                }
-            };
+            let index = *file_keys.try_get_or_insert_with(fk, a, || {
+                let index = files.len();
+                a.push(&mut files, Names::default())?;
+                a.push(&mut file_content, Vec::new())?;
+                Ok(index)
+            })?;
             tx.file_index = index as u64;
             tx.has_file = true;
             let (f, n) = (&mut files[index], &tx.names);
@@ -947,28 +1000,63 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
                 (&mut file_content[index], &tx.content),
             ] {
                 if dst.is_empty() {
-                    dst.clone_from(src);
+                    *dst = a.bytes(src)?;
                 }
             }
         }
-        texs.push(tx);
+        a.push(&mut texs, tx)?;
     }
 
     // Second material pass: sort textures, fetch maps.
     for (m, shading_model, shader_type, prefix, mut tex) in mats {
-        tex.sort_by(|a, b| a.material_prop.cmp(&b.material_prop));
+        a.stable_sort(&mut tex, |a, b| a.material_prop.cmp(&b.material_prop))?;
         let it = &items[m];
         let (fbx_maps, pbr_maps, features) =
-            fetch_maps(&key(m), shader_type, &it.props, &tex, &mut out.warnings);
+            fetch_maps(&key(m)?, shader_type, &it.props, &tex, &mut out.warnings, a)?;
         if env.lean {
-            out.materials.push((
-                it.element,
-                LeanMaterial {
-                    shading_model,
-                    fbx: fbx_maps,
-                    pbr: pbr_maps,
-                },
-            ));
+            budget.push(
+                &mut out.materials,
+                (
+                    it.element,
+                    LeanMaterial {
+                        features,
+                        properties: {
+                            let mut props = budget.try_collect(
+                                it.props
+                                    .authored
+                                    .iter()
+                                    .map(|p| (p, 0usize))
+                                    .chain(it.props.defaults.iter().flatten().map(|p| (p, 1usize)))
+                                    .enumerate()
+                                    .map(|(ordinal, (p, layer))| {
+                                        Ok((
+                                            layer,
+                                            ordinal,
+                                            crate::SourceProperty {
+                                                name: budget.bytes(p.name)?,
+                                                property_type: p.kind as u8,
+                                                flags: p.flags,
+                                                value_int: p.value_int,
+                                                value_real: p.value_real,
+                                                value_str: budget.bytes(p.value_str)?,
+                                                value_blob: budget.bytes(p.value_blob)?,
+                                            },
+                                        ))
+                                    }),
+                            )?;
+                            props.sort_unstable_by(|a, b| {
+                                (&a.2.name, a.0, a.1).cmp(&(&b.2.name, b.0, b.1))
+                            });
+                            props.dedup_by(|a, b| a.2.name == b.2.name);
+                            budget.collect(props.into_iter().map(|(_, _, p)| p))?
+                        },
+                        attachments: tex,
+                        shading_model,
+                        fbx: fbx_maps,
+                        pbr: pbr_maps,
+                    },
+                ),
+            )?;
             continue;
         }
         let feature_obj = {
@@ -1009,16 +1097,23 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
     // ufbxi_fetch_file_textures (no shader textures).
     const STARTED: u8 = 1;
     const FINISHED: u8 = 2;
-    let mut states = vec![0u8; texs.len()];
-    let mut stack: Vec<usize> = (0..texs.len()).collect();
-    let dedup = |list: Vec<usize>| {
+    let mut states = budget.filled(texs.len(), 0u8)?;
+    let mut stack = budget.collect(0..texs.len())?;
+    let mut marks = budget.filled(texs.len(), 0usize)?;
+    let mut generation = 0usize;
+    let mut dedup = |list: Vec<usize>| -> Result<Vec<usize>, crate::Error> {
+        generation = generation
+            .checked_add(1)
+            .ok_or(crate::Error::ResourceLimit("texture traversal"))?;
         let mut seen = Vec::new();
+        budget.reserve(&mut seen, list.len())?;
         for t in list {
-            if !seen.contains(&t) {
+            if marks[t] != generation {
+                marks[t] = generation;
                 seen.push(t);
             }
         }
-        seen
+        Ok(seen)
     };
     while let Some(t) = stack.pop() {
         if states[t] == FINISHED {
@@ -1028,57 +1123,72 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
             states[t] = FINISHED;
             let mut deps = Vec::new();
             if !texs[t].layered {
-                deps.push(t);
+                budget.push(&mut deps, t)?;
             }
             for &(l, _, _) in &texs[t].layers {
                 if !texs[l].file_textures.is_empty() {
-                    deps.push(l);
+                    budget.push(&mut deps, l)?;
                 }
             }
-            let deps = dedup(deps);
+            let deps = dedup(deps)?;
             texs[t].file_textures = if deps.len() == 1 {
-                texs[deps[0]].file_textures.clone()
+                budget.collect(texs[deps[0]].file_textures.iter().copied())?
             } else {
                 dedup(
-                    deps.iter()
-                        .flat_map(|&d| texs[d].file_textures.clone())
-                        .collect(),
-                )
+                    budget.collect(
+                        deps.iter()
+                            .flat_map(|&d| texs[d].file_textures.iter().copied()),
+                    )?,
+                )?
             };
         } else {
             if !texs[t].layered {
-                texs[t].file_textures = vec![t];
+                texs[t].file_textures = budget.collect([t])?;
                 states[t] = FINISHED;
                 continue;
             }
             states[t] = STARTED;
-            stack.push(t);
-            stack.extend(texs[t].layers.iter().map(|l| l.0));
+            budget.push(&mut stack, t)?;
+            for &(child, _, _) in &texs[t].layers {
+                budget.push(&mut stack, child)?;
+            }
         }
     }
 
     // Texture records with ufbxi_update_texture.
     if env.lean {
         // Videos and texture files are not part of the public scene.
+        let texture_elements = budget.collect(texs.iter().map(|tx| items[tx.item].element))?;
         for tx in texs {
             let it = &items[tx.item];
-            out.textures.push((
-                it.element,
-                LeanTexture {
-                    layered: tx.layered,
-                    filename: tx.names.filename,
-                    relative_filename: tx.names.relative,
-                    absolute_filename: tx.names.absolute,
-                    content: tx.content,
-                    uv_set: find(&it.props, b"UVSet").map_or(Vec::new(), |p| p.value_str.to_vec()),
-                    wrap: [
-                        find_enum(&it.props, b"WrapModeU", 0, 1),
-                        find_enum(&it.props, b"WrapModeV", 0, 1),
-                    ],
-                },
-            ));
+            budget.push(
+                &mut out.textures,
+                (
+                    it.element,
+                    LeanTexture {
+                        layers: budget.collect(
+                            tx.layers
+                                .iter()
+                                .map(|&(t, m, a)| (texture_elements[t], m, a)),
+                        )?,
+                        file_textures: budget
+                            .collect(tx.file_textures.iter().map(|&t| texture_elements[t]))?,
+                        layered: tx.layered,
+                        filename: tx.names.filename,
+                        relative_filename: tx.names.relative,
+                        absolute_filename: tx.names.absolute,
+                        content: tx.content,
+                        uv_set: budget
+                            .bytes(find(&it.props, b"UVSet").map_or(&b""[..], |p| p.value_str))?,
+                        wrap: [
+                            find_enum(&it.props, b"WrapModeU", 0, 1),
+                            find_enum(&it.props, b"WrapModeV", 0, 1),
+                        ],
+                    },
+                ),
+            )?;
         }
-        return out;
+        return Ok(out);
     }
     for tx in &texs {
         let it = &items[tx.item];
@@ -1143,7 +1253,7 @@ pub fn project(env: &Env<'_, '_>, items: &[Item<'_>]) -> Output {
             V::Obj(o)
         })
         .collect();
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1158,14 +1268,22 @@ mod tests {
             &mut rel,
             b"D:\\proj\\scenes\\a.fbx",
             b"D:\\proj\\tex\\b.png",
-        );
+            &Budget::new(usize::MAX),
+        )
+        .unwrap();
         assert_eq!(rel, b"..\\tex\\b.png");
         // Different roots leave the relative name untouched.
         let mut rel = b"keep".to_vec();
-        absolute_to_relative(&mut rel, b"/x/a.fbx", b"C:/b.png");
+        absolute_to_relative(&mut rel, b"/x/a.fbx", b"C:/b.png", &Budget::new(usize::MAX)).unwrap();
         assert_eq!(rel, b"keep");
         // Empty relative root: leading separators dropped, separators unified.
-        assert_eq!(resolve_relative_filename(b"\\\\tex\\b.png"), b"tex/b.png");
-        assert_eq!(resolve_relative_filename(b"//"), b"");
+        assert_eq!(
+            resolve_relative_filename(b"\\\\tex\\b.png", &Budget::new(usize::MAX)).unwrap(),
+            b"tex/b.png"
+        );
+        assert_eq!(
+            resolve_relative_filename(b"//", &Budget::new(usize::MAX)).unwrap(),
+            b""
+        );
     }
 }

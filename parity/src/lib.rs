@@ -584,6 +584,12 @@ pub fn rust_scene_source_sha256() -> String {
             include_bytes!("../../src/conversion_budget.rs"),
         ),
         ("src/lib.rs", include_bytes!("../../src/lib.rs")),
+        ("src/api_alloc.rs", include_bytes!("../../src/api_alloc.rs")),
+        ("src/bake.rs", include_bytes!("../../src/bake.rs")),
+        (
+            "src/fallible_map.rs",
+            include_bytes!("../../src/fallible_map.rs"),
+        ),
         (
             "src/allocation.rs",
             include_bytes!("../../src/allocation.rs"),

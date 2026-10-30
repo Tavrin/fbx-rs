@@ -19,6 +19,16 @@ pub(crate) fn reserve<T>(
     limit: usize,
 ) -> Result<(), Error> {
     reserve_with(v, additional, used, limit, |v, n, _| {
+        #[cfg(test)]
+        crate::api_alloc::FAIL_AFTER.with(|f| {
+            if let Some(left) = f.get() {
+                if left == 0 {
+                    return Err(Error::Failed);
+                }
+                f.set(Some(left - 1));
+            }
+            Ok(())
+        })?;
         v.try_reserve_exact(n).map_err(|_| Error::Failed)
     })
 }

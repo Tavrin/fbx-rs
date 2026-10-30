@@ -334,3 +334,64 @@ fn indexed_binding_lookup_handles_last_property_and_first_duplicate() {
         2.5
     );
 }
+
+#[test]
+fn bake_linear_channels_trim_and_aggregate_cap() {
+    let input = fixture("46186158000,92372316000", "0,10", "4", "0,0,0,0", "2")
+        .replace(
+            "\"\", 0\n   P: \"LocalStop",
+            "\"\", 46186158000\n   P: \"LocalStop",
+        )
+        .replace(
+            "\"LocalStop\", \"KTime\", \"Time\", \"\", 46186158000",
+            "\"LocalStop\", \"KTime\", \"Time\", \"\", 92372316000",
+        );
+    let scene = load(input.as_bytes(), &LoadOptions::default()).unwrap();
+    let mut opts = fbx_rs::BakeOptions::default();
+    opts.trim_start_time = true;
+    let bake = scene.bake_animation(None, &opts).unwrap();
+    assert_eq!(bake.nodes.len(), 1);
+    assert_eq!(bake.playback_duration, 1.0);
+    let node = &bake.nodes[0];
+    assert_eq!(node.translation_keys.len(), 2);
+    assert_eq!(node.translation_keys[0].time, 0.0);
+    assert_eq!(node.translation_keys[1].time, 1.0);
+    assert!(!node.constant_translation);
+    assert!(node.constant_rotation && node.constant_scale);
+    opts.max_keys = 5;
+    assert!(matches!(
+        scene.bake_animation(None, &opts),
+        Err(fbx_rs::Error::ResourceLimit("bake keys"))
+    ));
+    opts.max_keys = 16_000_000;
+    opts.max_allocation = 1;
+    assert!(matches!(
+        scene.bake_animation(None, &opts),
+        Err(fbx_rs::Error::ResourceLimit(_))
+    ));
+    opts.max_allocation = 768 << 20;
+    opts.resample_rate = f64::NAN;
+    assert!(scene.bake_animation(None, &opts).is_err());
+}
+
+#[test]
+fn bake_mixed_interpolation_and_multiple_layers_are_bounded() {
+    for flags in ["2", "4", "8"] {
+        let input = fixture("0,46186158000", "0,10", flags, "0,0,0,0", "2");
+        let input = input
+            .replace(
+                " AnimationCurveNode: 4",
+                " AnimationLayer: 30, \"AnimLayer::Extra\", \"\" { }\n AnimationCurveNode: 4",
+            )
+            .replace(" C: \"OO\",3,2", " C: \"OO\",3,2\n C: \"OO\",30,2");
+        let scene = load(input.as_bytes(), &LoadOptions::default()).unwrap();
+        let a = scene
+            .bake_animation(None, &fbx_rs::BakeOptions::default())
+            .unwrap();
+        assert!(!a.nodes[0].translation_keys.is_empty());
+        assert!(a.nodes[0]
+            .translation_keys
+            .iter()
+            .all(|k| k.time.is_finite()));
+    }
+}

@@ -1,7 +1,7 @@
 //! Animation records and deterministic evaluation, following ufbx 0.23.1.
+use crate::fallible_map::Map as BTreeMap;
 use crate::scene_node as sn;
 use crate::{Error, Matrix, Transform};
-use std::collections::BTreeMap;
 
 /// Interpolation from a key to the next key.
 ///
@@ -336,6 +336,19 @@ pub struct EvaluatedProperty {
     /// Blob value.
     pub value_blob: Vec<u8>,
 }
+impl EvaluatedProperty {
+    pub(crate) fn try_clone(&self, a: &crate::api_alloc::Budget) -> Result<Self, Error> {
+        Ok(Self {
+            property_type: self.property_type,
+            flags: self.flags,
+            value_int: self.value_int,
+            components: self.components,
+            value_str: a.bytes(&self.value_str)?,
+            value_blob: a.bytes(&self.value_blob)?,
+        })
+    }
+}
+
 impl Default for EvaluatedProperty {
     fn default() -> Self {
         Self {
@@ -387,6 +400,7 @@ pub(crate) struct NodeEval {
 }
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Animation {
+    pub allocation_limit: usize,
     pub curves: Vec<AnimationCurve>,
     pub values: Vec<AnimationValue>,
     pub layers: Vec<AnimationLayer>,
@@ -400,13 +414,53 @@ pub(crate) struct Animation {
     pub clusters: Vec<(Option<usize>, sn::Mat)>,
     pub connections: BTreeMap<(usize, Vec<u8>), (usize, Vec<u8>)>,
 }
+// Borrow tuple keys without allocating a temporary property-name Vec.
+trait PropertyKey {
+    fn parts(&self) -> (usize, &[u8]);
+}
+impl PropertyKey for (usize, Vec<u8>) {
+    fn parts(&self) -> (usize, &[u8]) {
+        (self.0, &self.1)
+    }
+}
+impl PropertyKey for (usize, &[u8]) {
+    fn parts(&self) -> (usize, &[u8]) {
+        *self
+    }
+}
+impl PartialEq for dyn PropertyKey + '_ {
+    fn eq(&self, b: &Self) -> bool {
+        self.parts() == b.parts()
+    }
+}
+impl Eq for dyn PropertyKey + '_ {}
+impl PartialOrd for dyn PropertyKey + '_ {
+    fn partial_cmp(&self, b: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(b))
+    }
+}
+impl Ord for dyn PropertyKey + '_ {
+    fn cmp(&self, b: &Self) -> std::cmp::Ordering {
+        self.parts().cmp(&b.parts())
+    }
+}
+impl<'a> std::borrow::Borrow<dyn PropertyKey + 'a> for (usize, Vec<u8>) {
+    fn borrow(&self) -> &(dyn PropertyKey + 'a) {
+        self
+    }
+}
+fn lookup<'a, V>(
+    map: &'a BTreeMap<(usize, Vec<u8>), V>,
+    element: usize,
+    name: &[u8],
+) -> Option<&'a V> {
+    map.get(&(element, name) as &dyn PropertyKey)
+}
 fn finite_time(time: f64) -> Result<(), Error> {
     if time.is_finite() {
         Ok(())
     } else {
-        Err(Error::Convert(
-            "animation: nonfinite evaluation time".into(),
-        ))
+        Err(Error::InvalidData("animation: nonfinite evaluation time"))
     }
 }
 impl Animation {
@@ -416,7 +470,7 @@ impl Animation {
                 .stacks
                 .get(i)
                 .map(|s| s.layers.as_slice())
-                .ok_or_else(|| Error::Convert("animation: stack index out of range".into())),
+                .ok_or(Error::InvalidData("animation: stack index out of range")),
             None => Ok(self
                 .default_stack
                 .map_or(&[], |i| self.stacks[i].layers.as_slice())),
@@ -436,34 +490,69 @@ impl Animation {
         element: usize,
         name: &[u8],
         time: f64,
-    ) -> EvaluatedProperty {
-        let mut p = self
-            .properties
-            .get(&(element, name.to_vec()))
-            .cloned()
-            .unwrap_or_default();
+    ) -> Result<EvaluatedProperty, Error> {
+        self.property_impl(layers, element, name, time, true)
+    }
+    pub(crate) fn numeric_property(
+        &self,
+        layers: &[usize],
+        element: usize,
+        name: &[u8],
+        time: f64,
+    ) -> Result<EvaluatedProperty, Error> {
+        self.property_impl(layers, element, name, time, false)
+    }
+    fn property_impl(
+        &self,
+        layers: &[usize],
+        element: usize,
+        name: &[u8],
+        time: f64,
+        retain_bytes: bool,
+    ) -> Result<EvaluatedProperty, Error> {
+        let budget = crate::api_alloc::Budget::new(self.allocation_limit);
+        let mut p = if let Some(p) = lookup(&self.properties, element, name) {
+            EvaluatedProperty {
+                property_type: p.property_type,
+                flags: p.flags,
+                value_int: p.value_int,
+                components: p.components,
+                value_str: if retain_bytes {
+                    budget.bytes(&p.value_str)?
+                } else {
+                    Vec::new()
+                },
+                value_blob: if retain_bytes {
+                    budget.bytes(&p.value_blob)?
+                } else {
+                    Vec::new()
+                },
+            }
+        } else {
+            EvaluatedProperty::default()
+        };
         if p.flags & 0xa000 == 0 {
-            return p;
+            return Ok(p);
         }
         // Follow property connections iteratively, as in ufbxi_evaluate_connected_prop.
         if p.flags & 0x8000 != 0 {
-            let mut key = (element, name.to_vec());
+            let mut key = (element, name);
             let mut connected = false;
             for _ in 0..1000 {
-                if let Some(next) = self.connections.get(&key) {
-                    key = next.clone();
+                if let Some(next) = lookup(&self.connections, key.0, key.1) {
+                    key = (next.0, &next.1);
                     connected = true;
                 } else {
                     break;
                 }
             }
-            if connected && !self.connections.contains_key(&key) {
-                let ep = self.property(layers, key.0, &key.1, time);
+            if connected && lookup(&self.connections, key.0, key.1).is_none() {
+                let ep = self.property_impl(layers, key.0, key.1, time, retain_bytes)?;
                 p.components = ep.components;
                 p.value_int = ep.value_int;
                 p.value_str = ep.value_str;
                 p.value_blob = ep.value_blob;
-                return p;
+                return Ok(p);
             }
             p.flags &= !0x8000;
         }
@@ -499,7 +588,7 @@ impl Animation {
             } else {
                 let order = if name == b"Lcl Rotation" {
                     valid_order(
-                        self.property(layers, element, b"RotationOrder", time)
+                        self.numeric_property(layers, element, b"RotationOrder", time)?
                             .value_int,
                     )
                 } else {
@@ -510,59 +599,125 @@ impl Animation {
             p.components[..3].copy_from_slice(&result);
         }
         p.value_int = crate::canon_dom::f64_to_i64(p.components[0]);
-        p
+        Ok(p)
     }
-    pub fn states(&self, layers: &[usize], time: f64) -> Vec<sn::NodeState> {
-        let mut states = vec![sn::root_state(); self.nodes.len()];
+    fn evaluated_props(
+        &self,
+        layers: &[usize],
+        i: usize,
+        time: f64,
+    ) -> Result<(sn::NodeProps, i64, bool), Error> {
+        let node = &self.nodes[i];
+        let mut props = node.props;
+        let mut order = node.rotation_order;
+
+        for ((element, name), p) in self.properties.range((node.element, Vec::new())..) {
+            if *element != node.element {
+                break;
+            }
+            if p.flags & 0xa000 == 0 {
+                continue;
+            }
+            let p = self.numeric_property(layers, *element, name, time)?;
+            let v = [p.components[0], p.components[1], p.components[2]];
+            match name.as_slice() {
+                b"Lcl Translation" => props.translation = v,
+                b"Lcl Rotation" => props.rotation = v,
+                b"Lcl Scaling" => props.scaling = v,
+                b"PreRotation" => props.pre_rotation = v,
+                b"PostRotation" => props.post_rotation = v,
+                b"GeometricTranslation" => props.geometric_translation = v,
+                b"GeometricRotation" => props.geometric_rotation = v,
+                b"GeometricScaling" => props.geometric_scaling = v,
+                b"RotationOffset" => props.rotation_offset = v,
+                b"RotationPivot" => props.rotation_pivot = v,
+                b"ScalingOffset" => props.scaling_offset = v,
+                b"ScalingPivot" => props.scaling_pivot = v,
+                b"RotationOrder" => order = valid_order(p.value_int),
+                _ => {}
+            }
+        }
+        let active = if lookup(&self.properties, node.element, b"RotationActive").is_some() {
+            self.numeric_property(layers, node.element, b"RotationActive", time)?
+                .value_int
+        } else {
+            1
+        };
+        let limit =
+            if lookup(&self.properties, node.element, b"RotationSpaceForLimitOnly").is_some() {
+                self.numeric_property(layers, node.element, b"RotationSpaceForLimitOnly", time)?
+                    .value_int
+            } else {
+                0
+            };
+        let use_rs = active != 0 && limit == 0;
+        Ok((props, order, use_rs))
+    }
+    fn evaluated_scale(
+        &self,
+        layers: &[usize],
+        mut i: usize,
+        time: f64,
+        work: &impl Fn(usize) -> Result<(), Error>,
+    ) -> Result<[f64; 3], Error> {
+        // Dependencies are already validated and acyclic at load time. Keep
+        // evaluation iterative so deep inheritance cannot overflow the stack.
+        let mut product = [1.0; 3];
+        let mut count = 0;
+        while i != 0 {
+            count += 1;
+            if count > self.nodes.len() {
+                return Err(Error::ResourceLimit("animation scale cycle"));
+            }
+            work(1)?;
+            let node = &self.nodes[i];
+            let (props, order, use_rs) = self.evaluated_props(layers, i, time)?;
+            let local = sn::get_transform(&props, order, use_rs, &node.adjust, None);
+            for (value, scale) in product.iter_mut().zip(local.scale) {
+                *value *= scale;
+            }
+            let Some(next) = node.inherited_scale else {
+                break;
+            };
+            i = next;
+        }
+        Ok(product)
+    }
+    pub(crate) fn bake_transform(
+        &self,
+        layers: &[usize],
+        i: usize,
+        time: f64,
+        work: &impl Fn(usize) -> Result<(), Error>,
+    ) -> Result<sn::Transform, Error> {
+        if i == 0 {
+            return Ok(sn::IDENTITY_TRANSFORM);
+        }
+        work(1)?;
+        let node = &self.nodes[i];
+        let (props, order, use_rs) = self.evaluated_props(layers, i, time)?;
+        let translation_scale = node
+            .translation_scale
+            .map(|k| self.evaluated_scale(layers, k, time, work))
+            .transpose()?;
+        let mut local = sn::get_transform(&props, order, use_rs, &node.adjust, translation_scale);
+        if let Some(k) = node.inherited_scale {
+            let scale = self.evaluated_scale(layers, k, time, work)?;
+            for (value, scale) in local.scale.iter_mut().zip(scale) {
+                *value *= scale;
+            }
+        }
+        Ok(local)
+    }
+    pub fn states(&self, layers: &[usize], time: f64) -> Result<Vec<sn::NodeState>, Error> {
+        let mut states = crate::api_alloc::Budget::new(self.allocation_limit)
+            .filled(self.nodes.len(), sn::root_state())?;
         for &i in &self.node_order {
             let node = &self.nodes[i];
             if i == 0 {
                 continue;
             }
-            let mut props = node.props;
-            let mut order = node.rotation_order;
-
-            for ((element, name), p) in self.properties.range((node.element, Vec::new())..) {
-                if *element != node.element {
-                    break;
-                }
-                if p.flags & 0xa000 == 0 {
-                    continue;
-                }
-                let p = self.property(layers, *element, name, time);
-                let v = [p.components[0], p.components[1], p.components[2]];
-                match name.as_slice() {
-                    b"Lcl Translation" => props.translation = v,
-                    b"Lcl Rotation" => props.rotation = v,
-                    b"Lcl Scaling" => props.scaling = v,
-                    b"PreRotation" => props.pre_rotation = v,
-                    b"PostRotation" => props.post_rotation = v,
-                    b"GeometricTranslation" => props.geometric_translation = v,
-                    b"GeometricRotation" => props.geometric_rotation = v,
-                    b"GeometricScaling" => props.geometric_scaling = v,
-                    b"RotationOffset" => props.rotation_offset = v,
-                    b"RotationPivot" => props.rotation_pivot = v,
-                    b"ScalingOffset" => props.scaling_offset = v,
-                    b"ScalingPivot" => props.scaling_pivot = v,
-                    b"RotationOrder" => order = valid_order(p.value_int),
-                    _ => {}
-                }
-            }
-            let active = self
-                .properties
-                .get(&(node.element, b"RotationActive".to_vec()))
-                .map_or(1, |_| {
-                    self.property(layers, node.element, b"RotationActive", time)
-                        .value_int
-                });
-            let limit = self
-                .properties
-                .get(&(node.element, b"RotationSpaceForLimitOnly".to_vec()))
-                .map_or(0, |_| {
-                    self.property(layers, node.element, b"RotationSpaceForLimitOnly", time)
-                        .value_int
-                });
-            let use_rs = active != 0 && limit == 0;
+            let (props, order, use_rs) = self.evaluated_props(layers, i, time)?;
             let translation_scale = node.translation_scale.map(|i| states[i].local.scale);
             let mut local =
                 sn::get_transform(&props, order, use_rs, &node.adjust, translation_scale);
@@ -574,39 +729,34 @@ impl Animation {
             let geometry = sn::get_geometry_transform(&props, &node.adjust);
             states[i] = sn::update_node(local, geometry, node.parent.map(|p| &states[p]));
         }
-        states
+        Ok(states)
     }
     pub fn evaluate(&self, stack: Option<usize>, time: f64) -> Result<EvaluatedScene, Error> {
         finite_time(time)?;
         let layers = self.stack_layers(stack)?;
-        let states = self.states(layers, time);
+        let states = self.states(layers, time)?;
+        let budget = crate::api_alloc::Budget::new(self.allocation_limit);
         Ok(EvaluatedScene {
-            nodes: states
-                .iter()
-                .map(|s| EvaluatedNode {
-                    local_transform: Transform {
-                        translation: s.local.translation,
-                        rotation: s.local.rotation,
-                        scale: s.local.scale,
-                    },
-                    node_to_parent: Matrix(s.node_to_parent),
-                    node_to_world: Matrix(s.node_to_world),
-                    geometry_to_node: Matrix(s.geometry_to_node),
-                    geometry_to_world: Matrix(s.geometry_to_world),
-                })
-                .collect(),
-            blend_weights: self
-                .channels
-                .iter()
-                .map(|&i| self.property(layers, i, b"DeformPercent", time).components[0] * 0.01)
-                .collect(),
-            skin_matrices: self
-                .clusters
-                .iter()
-                .map(|(bone, bind)| {
-                    Matrix(bone.map_or(*bind, |i| sn::matrix_mul(&states[i].node_to_world, bind)))
-                })
-                .collect(),
+            nodes: budget.collect(states.iter().map(|s| EvaluatedNode {
+                local_transform: Transform {
+                    translation: s.local.translation,
+                    rotation: s.local.rotation,
+                    scale: s.local.scale,
+                },
+                node_to_parent: Matrix(s.node_to_parent),
+                node_to_world: Matrix(s.node_to_world),
+                geometry_to_node: Matrix(s.geometry_to_node),
+                geometry_to_world: Matrix(s.geometry_to_world),
+            }))?,
+            blend_weights: budget.try_collect(self.channels.iter().map(|&i| {
+                Ok(self
+                    .numeric_property(layers, i, b"DeformPercent", time)?
+                    .components[0]
+                    * 0.01)
+            }))?,
+            skin_matrices: budget.collect(self.clusters.iter().map(|(bone, bind)| {
+                Matrix(bone.map_or(*bind, |i| sn::matrix_mul(&states[i].node_to_world, bind)))
+            }))?,
         })
     }
 }
@@ -681,7 +831,7 @@ fn combine(
         *result = value;
     }
 }
-fn slerp(a: sn::Quat, mut b: sn::Quat, t: f64) -> sn::Quat {
+pub(crate) fn slerp(a: sn::Quat, mut b: sn::Quat, t: f64) -> sn::Quat {
     let mut dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
     if dot < 0.0 {
         dot = -dot;

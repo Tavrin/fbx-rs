@@ -247,3 +247,74 @@ in the converter.
 - Inputs beyond the corpus: equivalence is shown on these 316 files, not
   proved in general.
 - Performance is measured separately and is not part of equivalence.
+
+
+## Public material and bake additions
+
+The public material projection retains all 23 computed feature flags with their
+explicitness bits, effective authored/template properties in byte-name order,
+and all texture attachments. Authored values override template defaults. String
+and blob values and attachment property names retain source bytes. Layered
+textures expose child texture indices, blend modes and alpha, plus the flattened
+unique file-texture list. The canonical schema already covers these fields;
+`check-public` also compares their public projection against canonical records.
+
+Baking follows the pinned 0.23.1 key-time generation and independent channel
+reduction: authored times, nonlinear segment samples, default stepped-key
+handling, quaternion antipodal correction, and per-channel reduction passes.
+Positive start trimming uses rounded FBX ticks. Playback bounds and duration
+retain the original stack range, as in the pinned implementation. The aggregate
+candidate-key cap is charged before adding times, including duplicate times and
+keys removed by reduction; it is deliberately more conservative than an output
+key count. Vector capacities are precharged and reserved fallibly. Numeric
+property evaluation borrows lookup keys and avoids copying retained string/blob
+values. Node sampling evaluates its own properties and scale dependencies, not
+the whole scene for every node key. Evaluation work is separately capped.
+
+The bake API implements a subset of ufbx options. Maximum sample-rate culling,
+custom step handling, transform overrides and configurable evaluate flags are
+not exposed. Scale-helper baking does not yet reproduce ufbx's resampled helper
+dependency scheduling and inclusion of otherwise unanimated sibling nodes.
+Spherical rotation reduction and floating-point arithmetic require exact oracle
+comparison before claiming interchangeability on a file. The source and reference
+probes are `examples/bake_dump.rs` and `reference/bake_probe.c`; they emit all times,
+values, flags, constant bits and playback/key bounds as exact IEEE-754 bit patterns.
+
+## Allocation refusal boundary
+
+`load_with_limits` uses checked fallible reservations throughout syntax parsing,
+graph construction, DOM conversion, transforms, geometry, deformers, materials,
+animation indexing and public ownership conversion. Evaluation and bake buffers
+follow the same rule. Allocator refusal returns `Error::Allocation`; it is never
+turned into a partially converted mesh warning. Allocation failures in parser,
+property and index errors preserve that type without constructing a diagnostic.
+Other allocated diagnostics use a fallible formatter.
+
+Ordered property/connection indexes use a private balanced tree in a fallible
+vector arena. Lookup is logarithmic; sorted iteration and range lookup use parent
+indices without scratch allocations. Stable conversion sorts reserve decorated
+ordinal buffers before sorting, retaining the original tie order. DOM ancestor
+state uses a fixed-size stack. Array decoding, lossy text, paths and embedded
+content reserve storage before copying or extending it.
+
+A thread-local test seam refuses the Nth reservation at the common allocator
+callback. Public projection and bake tests sweep that seam. Integration tests
+also use a real failing global allocator: they refuse the Nth allocation and
+all later allocations for combined ASCII and compressed binary scenes, pose
+and property evaluation, baking and invalid-input diagnostics. The fixtures
+include mesh UV/color layers, materials/templates, layered textures, embedded
+video content, skinning, blend shapes, a bind pose and an animated scale-helper
+hierarchy. Every refusal must return the typed allocation error, with the
+allocator still refusing during failure construction and cleanup. The separate
+20,001-node regression refuses the public node-array layout from the reported
+failure scenario.
+
+The contract covers the default public load/evaluation/bake paths. The unstable
+canonical dump writer's own value trees and output buffers, caller-invoked
+`Clone`/`Debug`/`Display`, test fixtures and allocator internals are outside it.
+Configured limits remain per-stage conservative capacity/work bounds, not a
+process-RSS bound. Conversion growth conservatively charges adopted old vector
+capacity before reserving new storage; no allocator-private metadata or rounding
+is included in these Rust-visible capacities. Executable tests establish the
+covered fixtures and allocation points; the full path guarantee also depends on
+the source audit of the remaining pre-reserved pushes, copies and error paths.

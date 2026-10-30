@@ -347,7 +347,12 @@ impl Camera {
 }
 
 /// `ufbxi_update_bone`; `is_root` is `ufbxi_read_bone`'s `Root` sub-type.
-pub fn bone(p: &PropertyLayers<'_>, units: &SceneUnits, is_root: bool) -> Obj {
+pub(crate) fn bone(
+    p: &PropertyLayers<'_>,
+    units: &SceneUnits,
+    is_root: bool,
+    a: &crate::api_alloc::Budget,
+) -> Result<Obj, crate::Error> {
     let unit = units.bone_prop_size_unit;
     let relative_length = if units.bone_prop_limb_length_relative {
         real(p, b"LimbLength", 1.0)
@@ -355,9 +360,9 @@ pub fn bone(p: &PropertyLayers<'_>, units: &SceneUnits, is_root: bool) -> Obj {
         1.0
     };
     Obj::new()
-        .with("radius", V::F(real(p, b"Size", unit) / unit))
-        .with("relative_length", V::F(relative_length))
-        .with("is_root", V::Bool(is_root))
+        .try_with("radius", V::F(real(p, b"Size", unit) / unit), a)?
+        .try_with("relative_length", V::F(relative_length), a)?
+        .try_with("is_root", V::Bool(is_root), a)
 }
 
 #[cfg(test)]

@@ -401,7 +401,7 @@ pub struct CanonScene<'a> {
 /// `ufbxi_update_anim_stack`: take bounds from LocalStart/LocalStop, else
 /// ReferenceStart/ReferenceStop, in KTime units of 46186158000 per second
 /// (the FBX 7 unit; `metadata.ktime_second` uses the same constant).
-fn project_takes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), String> {
+fn project_takes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), crate::Error> {
     const KTIME: f64 = 46_186_158_000.0;
     let mut takes = Vec::new();
     for e in scene.elements.iter_mut() {
@@ -410,7 +410,7 @@ fn project_takes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), 
         };
         let props =
             scene_property::layers(&scene.doc, d, limits.max_properties, limits.max_allocation)
-                .map_err(|err| format!("stack properties: {err:?}"))?;
+                .map_err(crate::api::property_error)?;
         let (mut begin, mut end) = (props.find(b"LocalStart"), props.find(b"LocalStop"));
         if begin.is_none() || end.is_none() {
             begin = props.find(b"ReferenceStart");
@@ -439,7 +439,10 @@ fn project_takes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), 
 /// modes, layer `anim_values`, and `scene.anim` (`ufbxi_update_anim`: the
 /// first stack in element order). The animation projection stage subsequently
 /// adds property lists (`anim_props`), curves and evaluation data.
-fn project_anim_structure(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), String> {
+fn project_anim_structure(
+    scene: &mut CanonScene<'_>,
+    limits: &DumpLimits,
+) -> Result<(), crate::Error> {
     use ElementType::*;
     let anim = |t0: f64, t1: f64, layers: &[usize]| {
         V::Obj(
@@ -453,21 +456,25 @@ fn project_anim_structure(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Re
         )
     };
     // `ufbxi_fetch_dst_elements(..., ignore_duplicates = true, ...)`.
-    let sources_of = |scene: &CanonScene<'_>, i: usize, ty: ElementType| {
-        let mut out: Vec<usize> = Vec::new();
-        for (src, prop) in dst_connections(&scene.elements[i]) {
-            if prop.is_empty() && scene.elements[src].ty == ty && !out.contains(&src) {
-                out.push(src);
+    let sources_of =
+        |scene: &CanonScene<'_>, i: usize, ty: ElementType| -> Result<Vec<usize>, crate::Error> {
+            let mut out: Vec<usize> = Vec::new();
+            for (src, prop) in dst_connections(
+                &scene.elements[i],
+                &crate::api_alloc::Budget::new(limits.max_allocation),
+            )? {
+                if prop.is_empty() && scene.elements[src].ty == ty && !out.contains(&src) {
+                    out.push(src);
+                }
             }
-        }
-        out
-    };
+            Ok(out)
+        };
     let mut first_stack: Option<(usize, usize)> = None;
     for i in 0..scene.elements.len() {
         let (ty, node) = (scene.elements[i].ty, scene.elements[i].node);
         match (ty, node) {
             (AnimStack, Some(node)) => {
-                let layers = sources_of(scene, i, AnimLayer);
+                let layers = sources_of(scene, i, AnimLayer)?;
                 let f = |name| match scene.elements[i].obj.get(name) {
                     Some(V::F(x)) => *x,
                     _ => 0.0,
@@ -484,14 +491,14 @@ fn project_anim_structure(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Re
                 }
             }
             (AnimLayer, Some(node)) => {
-                let values = sources_of(scene, i, AnimValue);
+                let values = sources_of(scene, i, AnimValue)?;
                 let props = scene_property::layers(
                     &scene.doc,
                     node,
                     limits.max_properties,
                     limits.max_allocation,
                 )
-                .map_err(|err| format!("layer properties: {err:?}"))?;
+                .map_err(crate::api::property_error)?;
                 let int = |name: &[u8]| props.find(name).map_or(0, |p| p.value_int);
                 let (blended, additive) = match int(b"BlendMode") {
                     0 => (true, true),
@@ -499,9 +506,12 @@ fn project_anim_structure(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Re
                     _ => (false, false),
                 };
                 // The ANIMATED flag marks a property an anim value drives.
-                let weight_animated = dst_connections(&scene.elements[i])
-                    .iter()
-                    .any(|(src, prop)| prop == b"Weight" && scene.elements[*src].ty == AnimValue);
+                let weight_animated = dst_connections(
+                    &scene.elements[i],
+                    &crate::api_alloc::Budget::new(limits.max_allocation),
+                )?
+                .iter()
+                .any(|(src, prop)| prop == b"Weight" && scene.elements[*src].ty == AnimValue);
                 let (weight, weight_is_animated) = match props.find(b"Weight") {
                     Some(p) => {
                         let mut w = p.value_real[0] / 100.0;
@@ -544,7 +554,7 @@ fn project_anim_structure(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Re
 
 /// Build the canonical projection of `input`.
 pub fn project<'a>(input: &'a [u8], limits: &DumpLimits) -> Result<CanonScene<'a>, String> {
-    project_with(input, limits, false)
+    project_with(input, limits, false).map_err(|e| e.to_string())
 }
 
 /// [`project`], or the lean variant used by the public `load` (see
@@ -553,16 +563,26 @@ pub(crate) fn project_with<'a>(
     input: &'a [u8],
     limits: &DumpLimits,
     lean: bool,
-) -> Result<CanonScene<'a>, String> {
-    let doc = syntax::parse(input, &limits.syntax).map_err(|e| format!("syntax: {e:?}"))?;
+) -> Result<CanonScene<'a>, crate::Error> {
+    let allocation = crate::api_alloc::Budget::new(limits.max_allocation);
+    let doc = syntax::parse(input, &limits.syntax).map_err(|e| match e {
+        syntax::Error::AllocationFailed => crate::Error::Allocation,
+        _ => match allocation.format(format_args!("syntax: {e:?}")) {
+            Ok(s) => crate::Error::Parse(s),
+            Err(e) => e,
+        },
+    })?;
     if !syntax::supported_version(doc.version) {
-        return Err(format!("syntax: UnsupportedVersion {}", doc.version));
+        return Err(crate::Error::Parse(allocation.format(format_args!(
+            "syntax: UnsupportedVersion {}",
+            doc.version
+        ))?));
     }
     let ascii = !input.starts_with(b"Kaydara FBX Binary  \x00\x1a");
     let (mut elements, mut connections, unsupported) = {
-        let index = scene::index(&doc, &limits.index).map_err(|e| format!("index: {e:?}"))?;
-        let mut elements = vec![Element {
-            key: "root".into(),
+        let index = scene::index(&doc, &limits.index).map_err(crate::api::scene_error)?;
+        let mut elements = allocation.collect([Element {
+            key: allocation.text(b"root")?,
             ordinal: usize::MAX,
             source_id: None,
             ty: ElementType::Node,
@@ -572,9 +592,9 @@ pub(crate) fn project_with<'a>(
             dst_conns: Vec::new(),
             instances: Vec::new(),
             obj: Obj::new(),
-        }];
+        }])?;
         // Object index -> element index.
-        let mut by_object = vec![None; index.objects.len()];
+        let mut by_object = allocation.filled(index.objects.len(), None)?;
         for (oi, o) in index.objects.iter().enumerate() {
             let p = props_of(&doc, o.node);
             let ty = match element_type(doc.nodes[o.node].name, string_of(p.get(2))) {
@@ -583,18 +603,21 @@ pub(crate) fn project_with<'a>(
             };
             let ordinal = o.node + 1;
             by_object[oi] = Some(elements.len());
-            elements.push(Element {
-                key: format!("id:{}:ordinal:{ordinal}", o.id),
-                ordinal,
-                source_id: Some(o.id),
-                ty,
-                node: Some(o.node),
-                name: object_name(string_of(p.get(1))).to_vec(),
-                src_conns: Vec::new(),
-                dst_conns: Vec::new(),
-                instances: Vec::new(),
-                obj: Obj::new(),
-            });
+            allocation.push(
+                &mut elements,
+                Element {
+                    key: allocation.format(format_args!("id:{}:ordinal:{ordinal}", o.id))?,
+                    ordinal,
+                    source_id: Some(o.id),
+                    ty,
+                    node: Some(o.node),
+                    name: allocation.bytes(object_name(string_of(p.get(1))))?,
+                    src_conns: Vec::new(),
+                    dst_conns: Vec::new(),
+                    instances: Vec::new(),
+                    obj: Obj::new(),
+                },
+            )?;
         }
         let mut connections = Vec::new();
         for c in &index.connections {
@@ -611,82 +634,86 @@ pub(crate) fn project_with<'a>(
                 ConnectionKind::Object => b"",
                 ConnectionKind::Property(p) => p,
             };
-            connections.push((src, dst, dst_prop.to_vec()));
+            allocation.push(&mut connections, (src, dst, allocation.bytes(dst_prop)?))?;
         }
-        let unsupported: Vec<(scene::UnsupportedKind, i64)> = index
-            .unsupported
-            .iter()
-            .map(|u| (u.kind, index.objects[u.object].id))
-            .collect();
-        let unsupported = unsupported
-            .into_iter()
-            .filter(|(kind, _)| {
-                !matches!(
-                    kind,
-                    scene::UnsupportedKind::Skin
-                        | scene::UnsupportedKind::SkinCluster
-                        | scene::UnsupportedKind::BlendShape
-                        | scene::UnsupportedKind::BlendShapeChannel
-                        | scene::UnsupportedKind::ShapeGeometry
-                        | scene::UnsupportedKind::LegacyShape
-                        | scene::UnsupportedKind::Pose
-                )
-            })
-            .collect();
+        let unsupported = allocation.collect(
+            index
+                .unsupported
+                .iter()
+                .map(|u| (u.kind, index.objects[u.object].id)),
+        )?;
+        let unsupported = allocation.collect(unsupported.into_iter().filter(|(kind, _)| {
+            !matches!(
+                kind,
+                scene::UnsupportedKind::Skin
+                    | scene::UnsupportedKind::SkinCluster
+                    | scene::UnsupportedKind::BlendShape
+                    | scene::UnsupportedKind::BlendShapeChannel
+                    | scene::UnsupportedKind::ShapeGeometry
+                    | scene::UnsupportedKind::LegacyShape
+                    | scene::UnsupportedKind::Pose
+            )
+        }))?;
         (elements, connections, unsupported)
     };
     // FBX 7.1 stores shapes inside the base Geometry. ufbx creates one
     // deformer and one channel/target pair per nested Shape.
     // Index nested shapes once; static meshes need no per-mesh DOM scan.
-    let mut legacy_shapes = std::collections::HashMap::<usize, Vec<usize>>::new();
-    for (i, n) in doc.nodes.iter().enumerate().take(if doc.version <= 7100 {
-        doc.nodes.len()
-    } else {
-        0
-    }) {
-        if let Some(parent) = n.parent.filter(|_| n.name == b"Shape") {
-            legacy_shapes.entry(parent).or_default().push(i);
-        }
-    }
-    let bases: Vec<(usize, usize)> = elements
-        .iter()
-        .enumerate()
-        .take(if legacy_shapes.is_empty() {
-            0
-        } else {
-            elements.len()
-        })
-        .filter_map(|(i, e)| {
-            (e.ty == ElementType::Mesh)
-                .then_some(e.node.map(|n| (i, n)))
-                .flatten()
-        })
-        .collect();
+    let mut legacy_shapes = allocation.collect(
+        doc.nodes
+            .iter()
+            .enumerate()
+            .take(if doc.version <= 7100 {
+                doc.nodes.len()
+            } else {
+                0
+            })
+            .filter_map(|(i, n)| n.parent.filter(|_| n.name == b"Shape").map(|p| (p, i))),
+    )?;
+    legacy_shapes.sort_unstable();
+    let bases = allocation.collect(
+        elements
+            .iter()
+            .enumerate()
+            .take(if legacy_shapes.is_empty() {
+                0
+            } else {
+                elements.len()
+            })
+            .filter_map(|(i, e)| {
+                (e.ty == ElementType::Mesh)
+                    .then_some(e.node.map(|n| (i, n)))
+                    .flatten()
+            }),
+    )?;
     let mut synthetic_counts = [0usize; 3];
     let mut property_links = Vec::new();
     for (base, node) in bases {
-        let Some(shapes) = legacy_shapes.remove(&node) else {
-            continue;
-        };
+        let start = legacy_shapes.partition_point(|s| s.0 < node);
+        let end = legacy_shapes.partition_point(|s| s.0 <= node);
+        let shapes = &legacy_shapes[start..end];
         let mut deformer = None;
-        for shape in shapes {
-            let name = string_of(props_of(&doc, shape).first()).to_vec();
+        for &(_, shape) in shapes {
+            let name = allocation.bytes(string_of(props_of(&doc, shape).first()))?;
             if deformer.is_none() {
                 let k = elements.len();
                 deformer = Some(k);
-                elements.push(Element {
-                    key: format!("id:0:ordinal:{}", shape + 1),
-                    ordinal: shape + 1,
-                    source_id: Some(0),
-                    ty: ElementType::BlendDeformer,
-                    node: Some(shape),
-                    name: name.clone(),
-                    src_conns: Vec::new(),
-                    dst_conns: Vec::new(),
-                    instances: Vec::new(),
-                    obj: Obj::new(),
-                });
-                connections.push((k, base, Vec::new()));
+                allocation.push(
+                    &mut elements,
+                    Element {
+                        key: allocation.format(format_args!("id:0:ordinal:{}", shape + 1))?,
+                        ordinal: shape + 1,
+                        source_id: Some(0),
+                        ty: ElementType::BlendDeformer,
+                        node: Some(shape),
+                        name: allocation.bytes(&name)?,
+                        src_conns: Vec::new(),
+                        dst_conns: Vec::new(),
+                        instances: Vec::new(),
+                        obj: Obj::new(),
+                    },
+                )?;
+                allocation.push(&mut connections, (k, base, Vec::new()))?;
             }
             let channel = elements.len();
             for (offset, ty) in [ElementType::BlendChannel, ElementType::BlendShape]
@@ -695,42 +722,48 @@ pub(crate) fn project_with<'a>(
             {
                 let shared = deformer.is_some_and(|k| elements[k].node == Some(shape));
                 let key = if offset == 0 && !shared {
-                    format!("id:0:ordinal:{}", shape + 1)
+                    allocation.format(format_args!("id:0:ordinal:{}", shape + 1))?
                 } else {
                     let count = &mut synthetic_counts[offset + 1];
-                    let key = format!(
+                    let key = allocation.format(format_args!(
                         "synthetic:root:role:scene-generated:type:{}:ordinal:{}",
                         ty as i64, *count
-                    );
+                    ))?;
                     *count += 1;
                     key
                 };
-                elements.push(Element {
-                    key,
-                    ordinal: shape + 1,
-                    source_id: Some(0),
-                    ty,
-                    node: Some(shape),
-                    name: name.clone(),
-                    src_conns: Vec::new(),
-                    dst_conns: Vec::new(),
-                    instances: Vec::new(),
-                    obj: Obj::new(),
-                });
+                allocation.push(
+                    &mut elements,
+                    Element {
+                        key,
+                        ordinal: shape + 1,
+                        source_id: Some(0),
+                        ty,
+                        node: Some(shape),
+                        name: allocation.bytes(&name)?,
+                        src_conns: Vec::new(),
+                        dst_conns: Vec::new(),
+                        instances: Vec::new(),
+                        obj: Obj::new(),
+                    },
+                )?;
             }
             let owner_props =
                 scene_property::layers(&doc, node, limits.max_properties, limits.max_allocation)
-                    .map_err(|e| format!("shape owner properties: {e:?}"))?;
+                    .map_err(crate::api::property_error)?;
             if owner_props.find(&name).is_some_and(|p| {
                 matches!(
                     p.kind,
                     scene_property::Type::Number | scene_property::Type::Integer
                 )
             }) {
-                property_links.push((base, channel, name.clone()));
+                allocation.push(
+                    &mut property_links,
+                    (base, channel, allocation.bytes(&name)?),
+                )?;
             }
-            connections.push((channel, deformer.unwrap(), Vec::new()));
-            connections.push((channel + 1, channel, Vec::new()));
+            allocation.push(&mut connections, (channel, deformer.unwrap(), Vec::new()))?;
+            allocation.push(&mut connections, (channel + 1, channel, Vec::new()))?;
         }
     }
     let scale_helpers = crate::scene_animation::scale_helpers(
@@ -763,8 +796,8 @@ pub(crate) fn project_with<'a>(
         warnings: Vec::new(),
     };
     // Canonical element order: signed source ID then DOM ordinal; root first.
-    let mut order: Vec<usize> = (0..scene.elements.len()).collect();
-    order.sort_by(|&a, &b| {
+    let mut order = allocation.collect(0..scene.elements.len())?;
+    order.sort_unstable_by(|&a, &b| {
         let a = &scene.elements[a];
         let b = &scene.elements[b];
         a.source_id
@@ -773,17 +806,18 @@ pub(crate) fn project_with<'a>(
             .then(a.ordinal.cmp(&b.ordinal))
             .then(a.key.cmp(&b.key))
     });
-    let mut remap = vec![0; order.len()];
+    let mut remap = allocation.filled(order.len(), 0usize)?;
     for (new, &old) in order.iter().enumerate() {
         remap[old] = new;
     }
-    let mut taken: Vec<Option<Element>> = scene.elements.drain(..).map(Some).collect();
-    scene.elements = order.iter().filter_map(|&old| taken[old].take()).collect();
-    scene.scale_helpers = scene
-        .scale_helpers
-        .iter()
-        .map(|&(o, h)| (remap[o], remap[h]))
-        .collect();
+    let mut taken = allocation.collect(scene.elements.drain(..).map(Some))?;
+    scene.elements = allocation.collect(order.iter().filter_map(|&old| taken[old].take()))?;
+    scene.scale_helpers = allocation.collect(
+        scene
+            .scale_helpers
+            .iter()
+            .map(|&(o, h)| (remap[o], remap[h])),
+    )?;
     let conn = |src: usize, dst: usize, prop: &[u8]| {
         V::Obj(
             Obj::new()
@@ -793,13 +827,13 @@ pub(crate) fn project_with<'a>(
                 .with("dst_prop", s(prop)),
         )
     };
-    let mut src_lists = vec![Vec::new(); scene.elements.len()];
-    let mut dst_lists = vec![Vec::new(); scene.elements.len()];
+    let mut src_lists = allocation.filled(scene.elements.len(), Vec::new())?;
+    let mut dst_lists = allocation.filled(scene.elements.len(), Vec::new())?;
     let mut oo = Vec::new();
     for (src, dst, prop) in connections {
         let (src, dst) = (remap[src], remap[dst]);
         if prop.is_empty() {
-            oo.push((src, dst));
+            allocation.push(&mut oo, (src, dst))?;
         }
         if !lean {
             let c = conn(src, dst, &prop);
@@ -807,12 +841,15 @@ pub(crate) fn project_with<'a>(
             dst_lists[dst].push(c.clone());
             scene.connections.push(c);
         }
-        scene.elements[src].src_conns.push((dst, prop.clone()));
-        scene.elements[dst].dst_conns.push((src, prop));
+        allocation.push(
+            &mut scene.elements[src].src_conns,
+            (dst, allocation.bytes(&prop)?),
+        )?;
+        allocation.push(&mut scene.elements[dst].dst_conns, (src, prop))?;
     }
     for (src, dst, name) in property_links {
         let (src, dst) = (remap[src], remap[dst]);
-        let prop = b"DeformPercent".to_vec();
+        let prop = allocation.bytes(b"DeformPercent")?;
         if !lean {
             let mut c = conn(src, dst, &prop);
             if let V::Obj(o) = &mut c {
@@ -822,14 +859,20 @@ pub(crate) fn project_with<'a>(
             dst_lists[dst].push(c.clone());
             scene.connections.push(c);
         }
-        scene.elements[src].src_conns.push((dst, prop.clone()));
-        scene.elements[dst].dst_conns.push((src, prop));
+        allocation.push(
+            &mut scene.elements[src].src_conns,
+            (dst, allocation.bytes(&prop)?),
+        )?;
+        allocation.push(&mut scene.elements[dst].dst_conns, (src, prop))?;
     }
     if lean {
         return project_rest(scene, input, limits, &oo);
     }
-    let (helper_for, owner_for) =
-        crate::scene_animation::helper_index(scene.elements.len(), &scene.scale_helpers);
+    let (helper_for, owner_for) = crate::scene_animation::helper_index(
+        scene.elements.len(),
+        &scene.scale_helpers,
+        &allocation,
+    )?;
     for (i, e) in scene.elements.iter_mut().enumerate() {
         let mut header = Obj::new()
             .with("type", V::I(e.ty as i64))
@@ -866,7 +909,7 @@ pub(crate) fn project_with<'a>(
                     limits.max_properties,
                     limits.max_allocation,
                 )
-                .map_err(|e| format!("shape properties: {e:?}"))?;
+                .map_err(crate::api::property_error)?;
                 let source = parent_props.find(&e.name).filter(|p| {
                     matches!(
                         p.kind,
@@ -883,13 +926,15 @@ pub(crate) fn project_with<'a>(
                     .enumerate()
                     .find(|(_, d)| d.parent == Some(n) && d.name == b"DeformPercent");
                 if let Some((d, _)) = direct {
-                    let percent = match crate::canon_dom::node_data(&scene.doc, d, scene.ascii) {
-                        crate::canon_dom::NodeData::Values(v) => match v.first() {
-                            Some(crate::canon_dom::Scalar::Num(_, x)) => *x,
+                    let percent =
+                        match crate::canon_dom::node_data(&scene.doc, d, scene.ascii, &allocation)?
+                        {
+                            crate::canon_dom::NodeData::Values(v) => match v.first() {
+                                Some(crate::canon_dom::Scalar::Num(_, x)) => *x,
+                                _ => 100.0,
+                            },
                             _ => 100.0,
-                        },
-                        _ => 100.0,
-                    };
+                        };
                     header.set("props", percent_props(&layers, percent, false));
                 } else {
                     header.set("props", props_value(&layers));
@@ -909,7 +954,7 @@ fn project_rest<'a>(
     input: &[u8],
     limits: &DumpLimits,
     oo: &[(usize, usize)],
-) -> Result<CanonScene<'a>, String> {
+) -> Result<CanonScene<'a>, crate::Error> {
     let links = project_graph(&mut scene, oo, limits)?;
     project_globals(&mut scene, input, limits)?;
     project_transforms(&mut scene, &links, oo, limits)?;
@@ -918,7 +963,7 @@ fn project_rest<'a>(
         // canonical records.
         project_takes(&mut scene, limits)?;
     }
-    project_meshes(&mut scene);
+    project_meshes(&mut scene, limits)?;
     crate::scene_deform::project(&mut scene, limits)?;
     project_materials(&mut scene, limits)?;
     project_attributes(&mut scene, &links, limits)?;
@@ -933,7 +978,8 @@ fn project_attributes(
     scene: &mut CanonScene<'_>,
     links: &Links,
     limits: &DumpLimits,
-) -> Result<(), String> {
+) -> Result<(), crate::Error> {
+    let a = crate::api_alloc::Budget::new(limits.max_allocation);
     use crate::scene_attribute as sa;
     use crate::scene_node as sn;
     use ElementType::*;
@@ -955,8 +1001,8 @@ fn project_attributes(
     const TARGET: [i64; 3] = [0, 2, 4];
     let light_dir = sa::light_direction(TARGET);
     let camera_axes = sn::axis_matrix(TARGET, [4, 2, 1]).map(|_| TARGET);
-    let mut direction = vec![sa::DEFAULT_LIGHT_DIRECTION; scene.elements.len()];
-    let mut axes = vec![sa::DEFAULT_CAMERA_AXES; scene.elements.len()];
+    let mut direction = a.filled(scene.elements.len(), sa::DEFAULT_LIGHT_DIRECTION)?;
+    let mut axes = a.filled(scene.elements.len(), sa::DEFAULT_CAMERA_AXES)?;
     for attribs in &links.attribs {
         if let [a] = attribs[..] {
             match scene.elements[a].ty {
@@ -978,29 +1024,29 @@ fn project_attributes(
             limits.max_properties,
             limits.max_allocation,
         )
-        .map_err(|err| format!("attribute properties: {err:?}"))?;
+        .map_err(crate::api::property_error)?;
         let record = match ty {
             Light if scene.lean => {
-                scene
-                    .typed
-                    .lights
-                    .push((i, sa::light(&props, direction[i])));
+                a.push(
+                    &mut scene.typed.lights,
+                    (i, sa::light(&props, direction[i])),
+                )?;
                 continue;
             }
             Camera if scene.lean => {
                 let camera = sa::camera(&props, &units, axes[i]);
-                scene.typed.cameras.push((i, camera));
+                a.push(&mut scene.typed.cameras, (i, camera))?;
                 continue;
             }
             Light => sa::light(&props, direction[i]).to_obj(),
             Camera => sa::camera(&props, &units, axes[i]).to_obj(),
             _ => {
                 let sub = string_of(props_of(&scene.doc, node).get(2));
-                sa::bone(&props, &units, sub == b"Root")
+                sa::bone(&props, &units, sub == b"Root", &a)?
             }
         };
         for (name, v) in record.0 {
-            scene.elements[i].obj.set(name, v);
+            scene.elements[i].obj.try_set(name, v, &a)?;
         }
     }
     Ok(())
@@ -1008,26 +1054,31 @@ fn project_attributes(
 
 /// Destination elements of `e`'s object-object source connections, in ufbx
 /// `connections_src` order (`ufbxi_find_src_connections(element, NULL)`).
-fn src_object_connections(e: &Element) -> Vec<usize> {
-    e.src_conns
-        .iter()
-        .filter(|(_, prop)| prop.is_empty())
-        .map(|&(dst, _)| dst)
-        .collect()
+fn src_object_connections(
+    e: &Element,
+    a: &crate::api_alloc::Budget,
+) -> Result<Vec<usize>, crate::Error> {
+    a.collect(
+        e.src_conns
+            .iter()
+            .filter(|(_, prop)| prop.is_empty())
+            .map(|&(dst, _)| dst),
+    )
 }
 
 /// `ufbx_material`, `ufbx_texture`, `ufbx_video` records and
 /// `scene.texture_files` (see `scene_material`).
-fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), String> {
+fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), crate::Error> {
+    let a = crate::api_alloc::Budget::new(limits.max_allocation);
     use crate::scene_material::{self as sm, Env, Item};
     use ElementType::*;
-    let mut children = vec![Vec::new(); scene.doc.nodes.len()];
+    let mut children = a.filled(scene.doc.nodes.len(), Vec::new())?;
     for (i, node) in scene.doc.nodes.iter().enumerate() {
         if let Some(p) = node.parent {
-            children[p].push(i);
+            a.push(&mut children[p], i)?;
         }
     }
-    let types: Vec<ElementType> = scene.elements.iter().map(|e| e.ty).collect();
+    let types: Vec<ElementType> = a.collect(scene.elements.iter().map(|e| e.ty))?;
     let mut items = Vec::new();
     for (i, e) in scene.elements.iter().enumerate() {
         let (Material | Texture | Video, Some(node)) = (e.ty, e.node) else {
@@ -1039,29 +1090,37 @@ fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<
             limits.max_properties,
             limits.max_allocation,
         )
-        .map_err(|err| format!("material properties: {err:?}"))?;
-        items.push(Item {
-            element: i,
-            ty: e.ty,
-            node,
-            props,
-            dst: dst_connections(e),
-            src: src_object_connections(e),
-        });
+        .map_err(crate::api::property_error)?;
+        a.push(
+            &mut items,
+            Item {
+                element: i,
+                ty: e.ty,
+                node,
+                props,
+                dst: dst_connections(e, &a)?,
+                src: src_object_connections(e, &a)?,
+            },
+        )?;
     }
     if items.is_empty() {
         return Ok(());
     }
     let env = Env {
         doc: &scene.doc,
+        allocation: &a,
         children: &children,
         ascii: scene.ascii,
-        original_file_path: scene.original_file_path.clone(),
+        original_file_path: (
+            a.bytes(&scene.original_file_path.0)?,
+            a.bytes(&scene.original_file_path.1)?,
+        ),
         types: &types,
         lean: scene.lean,
     };
-    let out = sm::project(&env, &items);
+    let out = sm::project(&env, &items, limits.max_allocation)?;
     drop(items);
+    a.reserve(&mut scene.warnings, out.warnings.len())?;
     scene.warnings.extend(out.warnings);
     scene.typed.materials = out.materials;
     scene.typed.textures = out.textures;
@@ -1081,8 +1140,9 @@ fn project_graph(
     scene: &mut CanonScene<'_>,
     oo: &[(usize, usize)],
     limits: &DumpLimits,
-) -> Result<Links, String> {
+) -> Result<Links, crate::Error> {
     use ElementType::*;
+    let allocation = crate::api_alloc::Budget::new(limits.max_allocation);
     let n = scene.elements.len();
     let budget = crate::conversion_budget::Budget::new(
         limits.max_allocation,
@@ -1092,36 +1152,39 @@ fn project_graph(
     budget.charge(n, 256)?;
     budget.charge(oo.len(), 64)?;
     budget.work(n + oo.len())?;
-    let mut parent = vec![None; n];
-    let mut children = vec![Vec::new(); n];
-    let mut attribs = vec![Vec::new(); n];
-    let mut instances = vec![Vec::new(); n];
-    let mut materials = vec![Vec::new(); n];
+    let mut parent = allocation.filled(n, None)?;
+    let mut children = allocation.filled(n, Vec::new())?;
+    let mut attribs = allocation.filled(n, Vec::new())?;
+    let mut instances = allocation.filled(n, Vec::new())?;
+    let mut materials = allocation.filled(n, Vec::new())?;
     for &(src, dst) in oo {
         let (st, dt) = (scene.elements[src].ty, scene.elements[dst].ty);
         if dt != Node {
             continue;
         }
         if st == Material {
-            materials[dst].push(src);
+            allocation.push(&mut materials[dst], src)?;
         } else if st == Node {
             if parent[src].is_none() && src != 0 {
                 parent[src] = Some(dst);
-                children[dst].push(src);
+                allocation.push(&mut children[dst], src)?;
             }
         } else if (Mesh..=LodGroup).contains(&st) {
-            attribs[dst].push(src);
-            instances[src].push(dst);
+            allocation.push(&mut attribs[dst], src)?;
+            allocation.push(&mut instances[src], dst)?;
         }
     }
-    let (_, owner_for) = crate::scene_animation::helper_index(n, &scene.scale_helpers);
+    let (_, owner_for) =
+        crate::scene_animation::helper_index(n, &scene.scale_helpers, &allocation)?;
     // ufbxi_cmp_node_less puts scale helpers before ordinary siblings.
     for list in &mut children {
         budget.sort_work(list.len())?;
-        list.sort_by_key(|i| owner_for[*i].is_none());
+        allocation.stable_sort(list, |a, b| {
+            owner_for[*a].is_none().cmp(&owner_for[*b].is_none())
+        })?;
     }
-    let mut depth = vec![0u64; n];
-    let mut done = vec![false; n];
+    let mut depth = allocation.filled(n, 0u64)?;
+    let mut done = allocation.filled(n, false)?;
     let mut path = Vec::new();
     for i in 0..n {
         let mut at = Some(i);
@@ -1131,7 +1194,7 @@ fn project_graph(
                 break;
             }
             done[k] = true;
-            path.push(k);
+            allocation.push(&mut path, k)?;
             at = parent[k];
         }
         let base = at.map_or(0, |k| depth[k] + 1);
@@ -1139,9 +1202,8 @@ fn project_graph(
             depth[k] = d;
         }
     }
-    let effective_parent: Vec<Option<usize>> = (0..n)
-        .map(|i| parent[i].or(if i == 0 { None } else { Some(0) }))
-        .collect();
+    let effective_parent =
+        allocation.collect((0..n).map(|i| parent[i].or(if i == 0 { None } else { Some(0) })))?;
     for (e, inst) in scene.elements.iter_mut().zip(&mut instances) {
         if (Mesh..=LodGroup).contains(&e.ty) {
             e.instances = std::mem::take(inst);
@@ -1149,15 +1211,18 @@ fn project_graph(
     }
     if scene.lean {
         let t = &mut scene.typed;
-        t.parent = effective_parent.clone();
+        t.parent = allocation.collect(effective_parent.iter().copied())?;
         t.children = children;
         t.node_materials = materials;
-        t.attribs = attribs.clone();
+        t.attribs = allocation.try_collect(
+            attribs
+                .iter()
+                .map(|l| allocation.collect(l.iter().copied())),
+        )?;
         return Ok(Links {
             parent: effective_parent,
-            depth: (0..n)
-                .map(|i| depth[i] + u64::from(i != 0 && parent[i].is_none()))
-                .collect(),
+            depth: allocation
+                .collect((0..n).map(|i| depth[i] + u64::from(i != 0 && parent[i].is_none())))?,
             attribs,
         });
     }
@@ -1277,25 +1342,32 @@ fn project_transforms(
     links: &Links,
     oo: &[(usize, usize)],
     limits: &DumpLimits,
-) -> Result<(), String> {
+) -> Result<(), crate::Error> {
+    let a = crate::api_alloc::Budget::new(limits.max_allocation);
     use crate::scene_node::{self as sn, Adjust, NodeProps};
     use ElementType::*;
     let n = scene.elements.len();
-    let is_node: Vec<bool> = scene.elements.iter().map(|e| e.ty == Node).collect();
-    let (helper_for, owner_for) = crate::scene_animation::helper_index(n, &scene.scale_helpers);
+    let is_node: Vec<bool> = a.collect(scene.elements.iter().map(|e| e.ty == Node))?;
+    let (helper_for, owner_for) =
+        crate::scene_animation::helper_index(n, &scene.scale_helpers, &a)?;
     // Properties through the template chain (`ufbxi_find_*`).
-    let mut layers = Vec::with_capacity(n);
+    let mut layers = Vec::new();
+    a.reserve(&mut layers, n)?;
     for e in &scene.elements {
-        layers.push(match (e.ty, e.node) {
-            (Node, Some(d)) => Some(crate::scene_animation::node_layers(
-                &scene.doc,
-                d,
-                owner_for[layers.len()].is_some(),
-                helper_for[layers.len()].is_some(),
-                limits,
-            )?),
-            _ => None,
-        });
+        let slot = layers.len();
+        a.push(
+            &mut layers,
+            match (e.ty, e.node) {
+                (Node, Some(d)) => Some(crate::scene_animation::node_layers(
+                    &scene.doc,
+                    d,
+                    owner_for[slot].is_some(),
+                    helper_for[slot].is_some(),
+                    limits,
+                )?),
+                _ => None,
+            },
+        )?;
     }
     let find = |i: usize, name: &[u8]| layers[i].as_ref().and_then(|l| l.find(name));
     let vec3 = |i: usize, name: &[u8], d: [f64; 3]| {
@@ -1312,7 +1384,7 @@ fn project_transforms(
         .position(|x| x.parent.is_none() && x.name == b"GlobalSettings")
     {
         global = scene_property::authored(doc, g, limits.max_properties, limits.max_allocation)
-            .map_err(|e| format!("global properties: {e:?}"))?;
+            .map_err(crate::api::property_error)?;
     }
     let gfind = |name: &[u8]| global.iter().find(|p| p.name == name);
     let gint = |name: &[u8], d: i64| gfind(name).map_or(d, |p| p.value_int);
@@ -1354,21 +1426,19 @@ fn project_transforms(
     }
 
     // Inherit modes (`ufbxi_read_model`, COMPENSATE leaves `inherit_mode` NORMAL).
-    let original: Vec<i64> = (0..n)
-        .map(|i| match int(i, b"InheritType", -1) {
-            0 if is_node[i] => 2,
-            2 if is_node[i] => 1,
-            _ => 0,
-        })
-        .collect();
+    let original: Vec<i64> = a.collect((0..n).map(|i| match int(i, b"InheritType", -1) {
+        0 if is_node[i] => 2,
+        2 if is_node[i] => 1,
+        _ => 0,
+    }))?;
     // `ufbxi_pre_finalize_scene`: scale compensation for unscaled children.
-    let mut unscaled_children = vec![false; n];
+    let mut unscaled_children = a.filled(n, false)?;
     for &(src, dst) in oo {
         if is_node[src] && is_node[dst] && dst != 0 && original[src] != 0 {
             unscaled_children[dst] = true;
         }
     }
-    let mut compensate_parent = vec![false; n];
+    let mut compensate_parent = a.filled(n, false)?;
     for i in 0..n {
         if !unscaled_children[i] {
             continue;
@@ -1406,12 +1476,14 @@ fn project_transforms(
     let light_post = post_rotation([0, 5, 2]);
     let camera_post = post_rotation([4, 2, 1]);
     let order: Vec<usize> = {
-        let mut v: Vec<usize> = (0..n).filter(|&i| is_node[i]).collect();
-        v.sort_by_key(|&i| (links.depth[i], owner_for[i].is_none()));
+        let mut v: Vec<usize> = a.collect((0..n).filter(|&i| is_node[i]))?;
+        a.stable_sort(&mut v, |&i, &j| {
+            (links.depth[i], owner_for[i].is_none()).cmp(&(links.depth[j], owner_for[j].is_none()))
+        })?;
         v
     };
-    let mut adjust = vec![Adjust::default(); n];
-    let mut inherit_node: Vec<Option<usize>> = vec![None; n];
+    let mut adjust = a.filled(n, Adjust::default())?;
+    let mut inherit_node: Vec<Option<usize>> = a.filled(n, None)?;
     for &i in &order {
         let mut a = Adjust::default();
         if i != 0 {
@@ -1456,27 +1528,30 @@ fn project_transforms(
 
     // `ufbxi_update_node` (geometric properties were reset by
     // `ufbxi_modify_geometry`, so every node uses the identity defaults).
-    let mut states: Vec<Option<sn::NodeState>> = vec![None; n];
+    let mut states: Vec<Option<sn::NodeState>> = a.filled(n, None)?;
     let mut eval_nodes = Vec::new();
-    let mut eval_slot = vec![None; n];
+    let mut eval_slot = a.filled(n, None)?;
     for i in 0..n {
         if is_node[i] {
             eval_slot[i] = Some(eval_nodes.len());
-            eval_nodes.push(crate::animation::NodeEval {
-                element: i,
-                parent: None,
-                props: NodeProps::default(),
-                adjust: adjust[i],
-                rotation_order: 0,
-                use_rotation_space: false,
-                translation_scale: None,
-                inherited_scale: None,
-            });
+            a.push(
+                &mut eval_nodes,
+                crate::animation::NodeEval {
+                    element: i,
+                    parent: None,
+                    props: NodeProps::default(),
+                    adjust: adjust[i],
+                    rotation_order: 0,
+                    use_rotation_space: false,
+                    translation_scale: None,
+                    inherited_scale: None,
+                },
+            )?;
         }
     }
-    scene.animation.node_order = order.iter().filter_map(|&i| eval_slot[i]).collect();
+    scene.animation.node_order = a.collect(order.iter().filter_map(|&i| eval_slot[i]))?;
     if scene.lean {
-        scene.typed.visible = vec![true; n];
+        scene.typed.visible = a.filled(n, true)?;
     }
     for &i in &order {
         let rotation_order = {
@@ -1602,10 +1677,14 @@ fn project_transforms(
     }
     scene
         .metadata
-        .set("root_rotation", V::Vec(root.rotation.to_vec()));
-    scene.metadata.set("root_scale", V::F(1.0));
-    scene.metadata.set("geometry_scale", V::F(root_scale));
-    scene.metadata.set("mirror_axis", V::I(mirror_axis));
+        .try_set("root_rotation", V::Vec(a.collect(root.rotation)?), &a)?;
+    scene.metadata.try_set("root_scale", V::F(1.0), &a)?;
+    scene
+        .metadata
+        .try_set("geometry_scale", V::F(root_scale), &a)?;
+    scene
+        .metadata
+        .try_set("mirror_axis", V::I(mirror_axis), &a)?;
     // End of `ufbxi_modify_geometry`: the Blender binary exporter's
     // orthographic size follows the geometry scale.
     let ortho_size_unit = if scene.exporter == EXPORTER_BLENDER_BINARY {
@@ -1613,11 +1692,13 @@ fn project_transforms(
     } else {
         30.0
     };
-    scene.metadata.set("ortho_size_unit", V::F(ortho_size_unit));
+    scene
+        .metadata
+        .try_set("ortho_size_unit", V::F(ortho_size_unit), &a)?;
     scene.node_states = states;
     scene.animation.nodes = eval_nodes;
     // `ufbxi_modify_geometry` prefetch: geometric transforms of every node.
-    let mut geometry_modify = vec![None; n];
+    let mut geometry_modify = a.filled(n, None)?;
     for &i in &order {
         if i == 0 {
             continue;
@@ -1638,21 +1719,25 @@ fn project_transforms(
 }
 
 /// `connections_dst` of an element in ufbx order (stable by `dst_prop`).
-fn dst_connections(e: &Element) -> Vec<(usize, Vec<u8>)> {
-    let mut out = e.dst_conns.clone();
-    out.sort_by(|a, b| a.1.cmp(&b.1));
-    out
+fn dst_connections(
+    e: &Element,
+    a: &crate::api_alloc::Budget,
+) -> Result<Vec<(usize, Vec<u8>)>, crate::Error> {
+    let mut out = a.try_collect(e.dst_conns.iter().map(|(i, p)| Ok((*i, a.bytes(p)?))))?;
+    a.stable_sort(&mut out, |a, b| a.1.cmp(&b.1))?;
+    Ok(out)
 }
 
 /// `ufbx_mesh` records (see `scene_geometry`) and the scene's
 /// `metadata.max_face_triangles`.
-fn project_meshes(scene: &mut CanonScene<'_>) {
+fn project_meshes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), crate::Error> {
+    let a = crate::api_alloc::Budget::new(limits.max_allocation);
     use crate::scene_geometry::{convert_mesh, project_mesh, MeshEnv, MeshLinks};
     use ElementType::*;
-    let mut children = vec![Vec::new(); scene.doc.nodes.len()];
+    let mut children = a.filled(scene.doc.nodes.len(), Vec::new())?;
     for (i, node) in scene.doc.nodes.iter().enumerate() {
         if let Some(p) = node.parent {
-            children[p].push(i);
+            a.push(&mut children[p], i)?;
         }
     }
     let geometry_scale = match scene.metadata.get("geometry_scale") {
@@ -1670,49 +1755,52 @@ fn project_meshes(scene: &mut CanonScene<'_>) {
         };
         let instances = &e.instances;
         let ty = |k: usize| scene.elements[k].ty;
-        let mut searched = vec![dst_connections(e)];
+        let mut searched = a.collect([dst_connections(e, &a)?])?;
         if let Some(&f) = instances.first() {
-            searched.push(dst_connections(&scene.elements[f]));
+            a.push(&mut searched, dst_connections(&scene.elements[f], &a)?)?;
         }
         let mut links = MeshLinks::default();
         for conns in &searched {
-            links.materials = conns
-                .iter()
-                .filter(|(s, p)| p.is_empty() && ty(*s) == Material)
-                .map(|(s, _)| *s)
-                .collect();
+            links.materials = a.collect(
+                conns
+                    .iter()
+                    .filter(|(s, p)| p.is_empty() && ty(*s) == Material)
+                    .map(|(s, _)| *s),
+            )?;
             if !links.materials.is_empty() {
                 break;
             }
         }
-        let fetch = |want: ElementType| {
+        let fetch = |want: ElementType| -> Result<Vec<usize>, crate::Error> {
             let mut out: Vec<usize> = Vec::new();
+            let mut seen = crate::fallible_map::Set::new();
             for conns in &searched {
                 for (s, p) in conns {
-                    if p.is_empty() && ty(*s) == want && !out.contains(s) {
-                        out.push(*s);
+                    if p.is_empty() && ty(*s) == want && seen.try_insert(*s, &a)? {
+                        a.push(&mut out, *s)?;
                     }
                 }
             }
-            out
+            Ok(out)
         };
-        links.skin_deformers = fetch(SkinDeformer);
-        links.blend_deformers = fetch(BlendDeformer);
-        links.cache_deformers = fetch(CacheDeformer);
+        links.skin_deformers = fetch(SkinDeformer)?;
+        links.blend_deformers = fetch(BlendDeformer)?;
+        links.cache_deformers = fetch(CacheDeformer)?;
         for conns in &searched {
             for (s, _) in conns {
                 if matches!(ty(*s), SkinDeformer | BlendDeformer | CacheDeformer) {
-                    links.all_deformers.push(*s);
+                    a.push(&mut links.all_deformers, *s)?;
                 }
             }
         }
         if instances.len() == 1 {
             links.geometry_to_node = scene.geometry_modify.get(instances[0]).copied().flatten();
         }
-        jobs.push((i, node, links));
+        a.push(&mut jobs, (i, node, links))?;
     }
     let env = MeshEnv {
         doc: &scene.doc,
+        allocation: &a,
         children: &children,
         ascii: scene.ascii,
         geometry_scale,
@@ -1722,10 +1810,14 @@ fn project_meshes(scene: &mut CanonScene<'_>) {
     for (i, node, links) in jobs {
         if scene.lean {
             match convert_mesh(&env, node, &links) {
-                Ok(m) => scene.typed.meshes.push((i, m, links.materials)),
-                Err(e) => scene
-                    .warnings
-                    .push(format!("{}: {e}", scene.elements[i].key)),
+                Ok(m) => a.push(&mut scene.typed.meshes, (i, m, links.materials))?,
+                Err(e @ (crate::Error::Allocation | crate::Error::ResourceLimit(_))) => {
+                    return Err(e)
+                }
+                Err(e) => a.push(
+                    &mut scene.warnings,
+                    a.format(format_args!("{}: {e}", scene.elements[i].key))?,
+                )?,
             }
             continue;
         }
@@ -1738,11 +1830,12 @@ fn project_meshes(scene: &mut CanonScene<'_>) {
         }
     }
     if scene.lean {
-        return;
+        return Ok(());
     }
     scene
         .metadata
         .set("max_face_triangles", V::U(max_face_triangles));
+    Ok(())
 }
 
 /// `ufbx_exporter` values (ufbx.h 0.23.1).
@@ -1895,7 +1988,8 @@ fn project_globals(
     scene: &mut CanonScene<'_>,
     input: &[u8],
     limits: &DumpLimits,
-) -> Result<(), String> {
+) -> Result<(), crate::Error> {
+    let a = crate::api_alloc::Budget::new(limits.max_allocation);
     let doc = &scene.doc;
     let find_top = |name: &[u8]| {
         doc.nodes
@@ -1906,16 +2000,22 @@ fn project_globals(
     if let Some(g) = find_top(b"GlobalSettings") {
         global_props =
             scene_property::authored(doc, g, limits.max_properties, limits.max_allocation)
-                .map_err(|e| format!("global properties: {e:?}"))?;
-        scene.settings.set(
-            "props",
-            V::Obj(Obj::new().with(
+                .map_err(crate::api::property_error)?;
+        if !scene.lean {
+            scene.settings.try_set(
                 "props",
-                V::Obj(
-                    Obj::new().with("data", V::List(global_props.iter().map(prop_obj).collect())),
-                ),
-            )),
-        );
+                V::Obj(Obj::new().try_with(
+                    "props",
+                    V::Obj(Obj::new().try_with(
+                        "data",
+                        V::List(global_props.iter().map(prop_obj).collect()),
+                        &a,
+                    )?),
+                    &a,
+                )?),
+                &a,
+            )?;
+        }
     }
     // ufbxi_update_scene_settings (ufbx.c 0.23.1).
     let find = |name: &[u8]| global_props.iter().find(|p| p.name == name);
@@ -1963,30 +2063,36 @@ fn project_globals(
     } else {
         find_real(b"CustomFrameRate", 24.0)
     };
-    scene.settings.set("frames_per_second", V::F(fps));
-    scene.settings.set("time_mode", V::I(time_mode));
+    scene.settings.try_set("frames_per_second", V::F(fps), &a)?;
+    scene.settings.try_set("time_mode", V::I(time_mode), &a)?;
     scene
         .settings
-        .set("time_protocol", V::I(find_enum(b"TimeProtocol", 2, 2)));
+        .try_set("time_protocol", V::I(find_enum(b"TimeProtocol", 2, 2)), &a)?;
     scene
         .settings
-        .set("snap_mode", V::I(find_enum(b"SnapOnFrameMode", 0, 3)));
-    scene.settings.set(
+        .try_set("snap_mode", V::I(find_enum(b"SnapOnFrameMode", 0, 3)), &a)?;
+    scene.settings.try_set(
         "ambient_color",
-        V::Vec(find(b"AmbientColor").map_or(vec![0.0; 3], |p| p.value_real[..3].to_vec())),
-    );
-    scene.settings.set(
+        V::Vec(a.collect(
+            find(b"AmbientColor").map_or([0.0; 3], |p| p.value_real[..3].try_into().unwrap()),
+        )?),
+        &a,
+    )?;
+    scene.settings.try_set(
         "default_camera",
-        s(find(b"DefaultCamera").map_or(&b""[..], |p| p.value_str)),
-    );
-    scene.settings.set(
+        V::Bytes(a.bytes(find(b"DefaultCamera").map_or(&b""[..], |p| p.value_str))?),
+        &a,
+    )?;
+    scene.settings.try_set(
         "original_axis_up",
         V::I(find_axis(b"OriginalUpAxis", b"OriginalUpAxisSign")),
-    );
-    scene.settings.set(
+        &a,
+    )?;
+    scene.settings.try_set(
         "original_unit_meters",
         V::F(round_if_near(original_unit * 0.01)),
-    );
+        &a,
+    )?;
     // ufbxi_transform_to_axes leaves unknown source axes unchanged.
     let source_axes = [
         find_axis(b"CoordAxis", b"CoordAxisSign"),
@@ -2000,20 +2106,21 @@ fn project_globals(
     };
     // Target axes/units after import profile conversion (right-handed Y-up,
     // metres) when the source coordinate system is known.
-    scene.settings.set(
+    scene.settings.try_set(
         "axes",
         V::Obj(
             Obj::new()
-                .with("right", V::I(axes[0]))
-                .with("up", V::I(axes[1]))
-                .with("front", V::I(axes[2])),
+                .try_with("right", V::I(axes[0]), &a)?
+                .try_with("up", V::I(axes[1]), &a)?
+                .try_with("front", V::I(axes[2]), &a)?,
         ),
-    );
+        &a,
+    )?;
     // ufbx keeps the source unit in `settings.unit_meters`; the profile's target
     // unit is applied to the geometry (`ufbxi_scale_units`), not recorded here.
     scene
         .settings
-        .set("unit_meters", V::F(round_if_near(unit * 0.01)));
+        .try_set("unit_meters", V::F(round_if_near(unit * 0.01)), &a)?;
     let mut creator: &[u8] = b"";
     if let Some(h) = find_top(b"FBXHeaderExtension") {
         if let Some(c) = (h + 1..doc.nodes.len())
@@ -2066,66 +2173,80 @@ fn project_globals(
         {
             scene_props =
                 scene_property::authored(doc, si, limits.max_properties, limits.max_allocation)
-                    .map_err(|e| format!("scene info properties: {e:?}"))?;
+                    .map_err(crate::api::property_error)?;
         }
     }
     // `ufbxi_finalize_scene`: `ufbx_find_string`/`ufbx_find_blob` on
     // `DocumentUrl` (used to derive relative texture and video paths).
     if let Some(p) = scene_props.iter().find(|p| p.name == b"DocumentUrl") {
-        scene.original_file_path = (p.value_str.to_vec(), p.value_blob.to_vec());
+        scene.original_file_path = (a.bytes(p.value_str)?, a.bytes(p.value_blob)?);
     }
     // `ufbxi_update_scene_metadata`.
-    let app = |prefix: &str| {
-        let get = |field: &str| {
-            let name = format!("{prefix}|Application{field}");
+    let app = |prefix: &str| -> Result<V, crate::Error> {
+        let get = |field: &str| -> Result<V, crate::Error> {
+            let name = a.format(format_args!("{prefix}|Application{field}"))?;
             let p = scene_props.iter().find(|p| p.name == name.as_bytes());
-            s(p.map_or(&b""[..], |p| p.value_str))
+            Ok(V::Bytes(a.bytes(p.map_or(&b""[..], |p| p.value_str))?))
         };
-        V::Obj(
+        Ok(V::Obj(
             Obj::new()
-                .with("vendor", get("Vendor"))
-                .with("name", get("Name"))
-                .with("version", get("Version")),
-        )
+                .try_with("vendor", get("Vendor")?, &a)?
+                .try_with("name", get("Name")?, &a)?
+                .try_with("version", get("Version")?, &a)?,
+        ))
     };
     scene.metadata = Obj::new()
-        .with(
+        .try_with(
             "scene_props",
-            V::Obj(Obj::new().with(
-                "props",
-                V::Obj(
-                    Obj::new().with("data", V::List(scene_props.iter().map(prop_obj).collect())),
-                ),
-            )),
-        )
-        .with("ascii", V::Bool(scene.ascii))
-        .with("version", V::U(u64::from(doc.version)))
-        .with("file_format", V::I(1))
-        .with("creator", s(creator))
-        .with(
+            if scene.lean {
+                V::Null
+            } else {
+                V::Obj(Obj::new().try_with(
+                    "props",
+                    V::Obj(Obj::new().try_with(
+                        "data",
+                        V::List(scene_props.iter().map(prop_obj).collect()),
+                        &a,
+                    )?),
+                    &a,
+                )?)
+            },
+            &a,
+        )?
+        .try_with("ascii", V::Bool(scene.ascii), &a)?
+        .try_with("version", V::U(u64::from(doc.version)), &a)?
+        .try_with("file_format", V::I(1), &a)?
+        .try_with("creator", V::Bytes(a.bytes(creator)?), &a)?
+        .try_with(
             "big_endian",
             V::Bool(!scene.ascii && input.get(22) == Some(&1)),
-        )
-        .with("exporter", V::I(exporter))
-        .with("exporter_version", V::U(u64::from(exporter_version)))
-        .with("original_application", app("Original"))
-        .with("latest_application", app("LastSaved"))
-        .with("ktime_second", V::I(46_186_158_000))
-        .with("space_conversion", V::I(2))
-        .with("geometry_transform_handling", V::I(2))
-        .with("inherit_mode_handling", V::I(2))
-        .with("handedness_conversion_axis", V::I(3))
-        .with("has_warning", V::Bools(vec![false; 15]))
-        .with("bone_prop_size_unit", V::F(bone_prop_size_unit))
-        .with(
+            &a,
+        )?
+        .try_with("exporter", V::I(exporter), &a)?
+        .try_with("exporter_version", V::U(u64::from(exporter_version)), &a)?
+        .try_with("original_application", app("Original")?, &a)?
+        .try_with("latest_application", app("LastSaved")?, &a)?
+        .try_with("ktime_second", V::I(46_186_158_000), &a)?
+        .try_with("space_conversion", V::I(2), &a)?
+        .try_with("geometry_transform_handling", V::I(2), &a)?
+        .try_with("inherit_mode_handling", V::I(2), &a)?
+        .try_with("handedness_conversion_axis", V::I(3), &a)?
+        .try_with("has_warning", V::Bools(a.filled(15, false)?), &a)?
+        .try_with("bone_prop_size_unit", V::F(bone_prop_size_unit), &a)?
+        .try_with(
             "bone_prop_limb_length_relative",
             V::Bool(scene.exporter != EXPORTER_BLENDER_ASCII),
-        )
+            &a,
+        )?
         // Set from the geometry scale in `project_transforms`.
-        .with("ortho_size_unit", V::F(30.0))
-        .with("root_rotation", V::Vec(vec![0.0, 0.0, 0.0, 1.0]))
-        .with("root_scale", V::F(1.0))
-        .with("geometry_scale", V::F(1.0));
+        .try_with("ortho_size_unit", V::F(30.0), &a)?
+        .try_with(
+            "root_rotation",
+            V::Vec(a.collect([0.0, 0.0, 0.0, 1.0])?),
+            &a,
+        )?
+        .try_with("root_scale", V::F(1.0), &a)?
+        .try_with("geometry_scale", V::F(1.0), &a)?;
     Ok(())
 }
 
@@ -2340,10 +2461,10 @@ pub fn evaluate_binding(
     binding: &crate::AnimationBinding,
     time: f64,
 ) -> Result<crate::EvaluatedProperty, crate::Error> {
-    Ok(scene.animation.property(
+    scene.animation.property(
         scene.animation.stack_layers(stack)?,
         binding.element,
         &binding.property,
         time,
-    ))
+    )
 }
