@@ -403,3 +403,80 @@ Connections: { }
         );
     }
 }
+
+#[test]
+fn borrowed_numeric_words_preserve_endianness_sign_and_float_bits() {
+    use fbx_rs::scene_mesh::NumericArray;
+    use fbx_rs::syntax::Property;
+    use std::borrow::Cow;
+    for be in [false, true] {
+        for (kind, bytes, integer, real) in [
+            (
+                b'i',
+                if be {
+                    i32::MIN.to_be_bytes()
+                } else {
+                    i32::MIN.to_le_bytes()
+                }
+                .to_vec(),
+                Some(i64::from(i32::MIN)),
+                f64::from(i32::MIN),
+            ),
+            (
+                b'l',
+                if be {
+                    i64::MIN.to_be_bytes()
+                } else {
+                    i64::MIN.to_le_bytes()
+                }
+                .to_vec(),
+                Some(i64::MIN),
+                i64::MIN as f64,
+            ),
+            (
+                b'f',
+                if be {
+                    (-0.0f32).to_be_bytes()
+                } else {
+                    (-0.0f32).to_le_bytes()
+                }
+                .to_vec(),
+                None,
+                -0.0,
+            ),
+            (
+                b'd',
+                if be {
+                    0x7ff8_0000_0000_1234u64.to_be_bytes()
+                } else {
+                    0x7ff8_0000_0000_1234u64.to_le_bytes()
+                }
+                .to_vec(),
+                None,
+                f64::from_bits(0x7ff8_0000_0000_1234),
+            ),
+            (b'b', vec![255], Some(255), 255.0),
+            (b'c', vec![128], Some(128), 128.0),
+        ] {
+            let p = Property::Array {
+                kind,
+                count: 1,
+                big_endian: be,
+                bytes: Cow::Borrowed(&bytes),
+            };
+            let a = NumericArray(&p);
+            assert_eq!(a.i64(0), integer);
+            assert_eq!(a.f64(0).unwrap().to_bits(), real.to_bits());
+            assert_eq!(a.i64(1), None);
+            assert_eq!(a.f64(1), None);
+            let truncated = Property::Array {
+                kind,
+                count: 1,
+                big_endian: be,
+                bytes: Cow::Borrowed(&bytes[..bytes.len() - 1]),
+            };
+            assert_eq!(NumericArray(&truncated).f64(0), None);
+            assert_eq!(NumericArray(&truncated).i64(0), None);
+        }
+    }
+}
