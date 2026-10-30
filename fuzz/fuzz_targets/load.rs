@@ -131,6 +131,57 @@ fn walk(scene: &Scene) {
     }
     for curve in scene.animation_curves() {
         assert!(curve.keys.windows(2).all(|w| w[0].time <= w[1].time));
+        // Key times, neighbours and far outside the keys, so interpolation and
+        // every extrapolation mode run; only nonfinite times are errors.
+        let mut times = vec![0.0, -1.0e9, 1.0e9, f64::MAX, f64::MIN];
+        if let (Some(first), Some(last)) = (curve.keys.first(), curve.keys.last()) {
+            times.extend([first.time - 1.0, last.time + 1.0, last.time * 3.0]);
+            times.extend(curve.keys.iter().take(8).flat_map(|k| [k.time, k.time + 1e-4]));
+        }
+        for t in times.into_iter().filter(|t| t.is_finite()) {
+            assert!(curve.evaluate(t, 0.0).is_ok());
+        }
+        assert!(curve.evaluate(f64::NAN, 0.0).is_err());
+        assert!(curve.evaluate(f64::INFINITY, 0.0).is_err());
+    }
+    if let Some(i) = scene.default_animation_stack() {
+        assert!(i < scene.animation_stacks().len());
+    }
+    // Every stack, through its own time range, including the stored bounds.
+    let stacks = scene.animation_stacks().len();
+    for (index, stack) in scene.animation_stacks().iter().enumerate().take(8) {
+        for t in [stack.time_begin, stack.time_end, 0.0, 1.0e6] {
+            if t.is_finite() {
+                let pose = scene.evaluate(Some(index), t).unwrap();
+                assert_eq!(pose.nodes.len(), scene.nodes().len());
+                assert_eq!(pose.blend_weights.len(), scene.blend_channels().len());
+                assert_eq!(pose.skin_matrices.len(), scene.skin_clusters().len());
+            }
+        }
+    }
+    assert!(scene.evaluate(Some(stacks), 0.0).is_err());
+    assert!(scene.evaluate(None, f64::NAN).is_err());
+    let nodes_len = scene.nodes().len();
+    if nodes_len > 0 {
+        assert!(scene.evaluate_transform(None, nodes_len - 1, 0.25).is_ok());
+    }
+    assert!(scene.evaluate_transform(None, nodes_len, 0.25).is_err());
+    // Bindings and source-id property lookups, including generated helpers.
+    for (index, layer) in scene.animation_layers().iter().enumerate().take(4) {
+        let stack = scene
+            .animation_stacks()
+            .iter()
+            .position(|s| s.layers.contains(&index));
+        for binding in layer.bindings.iter().take(16) {
+            assert!(scene.evaluate_binding(stack, binding, 0.5).is_ok());
+            assert!(scene
+                .evaluate_binding(stack, binding, f64::INFINITY)
+                .is_err());
+            if let Ok(p) = scene.evaluate_property(stack, binding.source_id, &binding.property, 0.5)
+            {
+                std::hint::black_box(p);
+            }
+        }
     }
     let pose = scene.evaluate(None, 0.5).unwrap();
     assert_eq!(pose.nodes.len(), scene.nodes().len());
@@ -140,18 +191,20 @@ fn walk(scene: &Scene) {
 }
 
 fuzz_target!(|data: &[u8]| {
+    // Small limits, just large enough for every supported corpus file (skins,
+    // blend shapes and animation included) to load, so the seeds reach those paths.
     let limits = Limits {
         max_input_bytes: 1 << 20,
         max_depth: 16,
-        max_nodes: 256,
-        max_properties: 1024,
-        max_array_elements: 4096,
-        max_decompressed_bytes: 32768,
+        max_nodes: 2048,
+        max_properties: 8192,
+        max_array_elements: 65536,
+        max_decompressed_bytes: 262144,
         max_string_length: 8192,
-        max_objects: 256,
+        max_objects: 1024,
         max_animation_keys: 4096,
-        max_connections: 256,
-        max_allocation: 131072,
+        max_connections: 2048,
+        max_allocation: 1 << 20,
         max_deformer_work: 1 << 20,
         max_animation_work: 1 << 20,
     };

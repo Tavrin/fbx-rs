@@ -96,25 +96,45 @@ On ufbx 0.23.1 with the options above:
 Four libFuzzer targets run on malformed input with small limits:
 `binary` and `ascii` (the parser), `scene_dom` (parse and full canonical
 conversion) and `load` (the public API, then a range check of every index
-the returned `Scene` exposes). The targets are built with debug assertions
-and overflow checks. The release rule: each target starts from the corpus
-files as seeds and runs until its edge coverage has not grown for 10
-CPU-minutes, with at least 10 and at most 120 CPU-minutes per target; any
-crash, timeout (5 s) or memory limit (512 MiB) fails the run.
+the returned `Scene` exposes, and evaluation of every animation stack,
+binding and curve). The targets are built with debug assertions and overflow
+checks. The release rule: each target starts from the corpus files as seeds
+and runs in 600-second chunks over one persistent corpus, until a whole
+chunk adds no edge coverage, with at least 600 and at most 7,200 CPU-seconds
+per target; any crash, timeout (5 s) or memory limit (512 MiB) fails the run.
 
-Last release run (340 corpus seeds, one libFuzzer process per target, no
-crash, timeout or memory-limit failure in any target):
+The `load` and `scene_dom` limits are sized so that all 316 supported corpus
+files load and convert: `max_nodes` 2,048, `max_properties` 8,192,
+`max_array_elements` 65,536, `max_decompressed_bytes` 262,144,
+`max_objects` 1,024, `max_connections` 2,048, `max_allocation` 1 MiB. With the
+earlier, smaller limits only 11 of the 340 seeds got past the parser, none of
+them with a skin, blend shape or curve, and the deformer and animation
+converters stayed almost unreached by seeds. Line coverage of the 340 seeds
+alone, measured with `cargo fuzz coverage`: `scene_deform.rs` 0.97 to 73.2 %,
+`scene_animation.rs` 22.6 to 75.9 %, `animation.rs` 19.2 to 48.6 %. After the
+fuzz run, the final `load` corpus reaches `scene_deform.rs` 78.2 %,
+`scene_animation.rs` 84.3 % and `animation.rs` 52.0 % of lines.
 
-| Target | CPU-minutes | Executions | Edge coverage | Stop | Peak RSS |
-| --- | ---: | ---: | ---: | --- | ---: |
-| `binary` | 25.3 | 39.6 M | 863 | coverage flat for 10 minutes | 53 MiB |
-| `ascii` | 25.1 | 39.4 M | 870 | coverage flat for 10 minutes | 54 MiB |
-| `scene_dom` | 120.0 | 10.7 M | 8588 | 120-minute cap, coverage still growing | 109 MiB |
-| `load` | 120.0 | 122.4 M | 6342 | 120-minute cap, coverage still growing | 109 MiB |
+Pre-release run on the animation branch (340 corpus seeds plus the corpus of
+the earlier run, one libFuzzer process per target; initial coverage is the
+seeds alone):
 
-The fuzz runs above preceded the deformer and animation additions. The `load`
-target now checks deformer and animation references, key ordering and evaluated
-pose sizes too, but it was not run for this change. Malformed-curve regressions
+| Target | CPU-minutes | Executions | Edge coverage, initial to final | Crashes | Stop | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `binary` | 99.3 | 228.8 M | 417 to 881 | 0 | chunk 10 added no coverage | 52 MiB |
+| `ascii` | 49.4 | 102.9 M | 417 to 863 | 0 | chunk 5 added no coverage | 49 MiB |
+| `scene_dom` | 122.1 | 3.2 M | 7,348 to 12,097 | 0 | chunk 14 added no coverage, at the cap | 136 MiB |
+| `load` | 120.2 | 48.6 M | 5,729 to 10,421 | 0 | chunk 14 added no coverage, at the cap | 146 MiB |
+
+CPU-seconds include corpus loading, so the last chunk of `scene_dom` and
+`load` ends slightly past 7,200. `scene_dom` had one libFuzzer timeout: a
+7.6 KB mutated Maya file that costs 0.42 to 0.50 s alone (it spends the
+`max_animation_work` budget in the canonical sampling), reported while the
+process ran at a tenth of its usual speed on a loaded machine. It is not a
+defect and the run was resumed. No crash, out-of-memory or memory-limit
+failure occurred in any target.
+
+Malformed-curve regressions
 require errors for unsorted and nonfinite times, invalid attribute counts and
 excessive key counts; duplicate times and finite repeat limits are also tested.
 
@@ -175,8 +195,9 @@ connections as well as deformer payloads. Its only exclusions inside element
 metadata are the animation-property count and the ANIMATED flag bit on
 animated inputs. Other flag bits and static metadata remain compared.
 
-`scene_dom` and `load` reached the cap before their coverage went flat, so
-longer runs can still find new paths in the converter.
+`scene_dom` and `load` went flat only at the 7,200 CPU-second cap, after
+coverage grew in every earlier chunk, so longer runs can still find new paths
+in the converter.
 
 ## Not covered
 
