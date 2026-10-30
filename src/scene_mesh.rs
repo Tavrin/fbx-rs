@@ -76,16 +76,28 @@ impl NumericArray<'_> {
         };
         let offset = index.checked_mul(width)?;
         let part = bytes.get(offset..offset.checked_add(width)?)?;
-        let mut value = 0u64;
-        if *big_endian {
-            for &b in part {
-                value = (value << 8) | u64::from(b);
+        // Dispatch once per word and let the byte conversion compile to a
+        // native load/byte-swap, rather than accumulating one byte at a time.
+        let value = match width {
+            8 => {
+                let part = part.try_into().ok()?;
+                if *big_endian {
+                    u64::from_be_bytes(part)
+                } else {
+                    u64::from_le_bytes(part)
+                }
             }
-        } else {
-            for (i, &b) in part.iter().enumerate() {
-                value |= u64::from(b) << (8 * i);
+            4 => {
+                let part = part.try_into().ok()?;
+                u64::from(if *big_endian {
+                    u32::from_be_bytes(part)
+                } else {
+                    u32::from_le_bytes(part)
+                })
             }
-        }
+            1 => u64::from(part[0]),
+            _ => return None,
+        };
         Some((*kind, value))
     }
     pub fn f64(&self, index: usize) -> Option<f64> {

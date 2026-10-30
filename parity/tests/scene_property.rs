@@ -77,3 +77,57 @@ Objects: { Model: 1, "Model::A", "Null" { Properties70: { P: "Y", "Number", "", 
     assert_eq!(layers.find(b"Y").unwrap().value_real[0], 3.0);
     assert!(layers.find(b"Z").is_none());
 }
+
+#[test]
+fn blob_lookup_preserves_property_validation_order_and_parent_scope() {
+    let input = br#"; FBX 7.4.0
+Objects: {
+ Model: 1, "Model::A", "Null" {
+  BinaryData: 1
+  Properties70: {
+   P: "First", "Number", "", "", 1 { Other: { BinaryData: 1 } }
+   P: "Second", "Number", "", "", 2
+  }
+ }
+ Model: 2, "Model::B", "Null" {
+  Properties70: {
+   P: "Before", "Number", "", "", 1
+   P: "Blob", "Blob", "", "", "bytes" { BinaryData: 1 }
+  }
+ }
+}
+"#;
+    let mut doc = syntax::parse(input, &syntax::Limits::default()).unwrap();
+    let owners: Vec<_> = doc
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| (n.name == b"Model").then_some(i))
+        .collect();
+    assert_eq!(
+        scene_property::authored(&doc, owners[0], 10, 4096)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        scene_property::authored(&doc, owners[1], 10, 4096),
+        Err(scene_property::Error::UnsupportedBlob)
+    );
+    let before = doc
+        .nodes
+        .iter()
+        .find(|n| {
+            doc.properties.get(n.properties.start).is_some_and(
+                |p| matches!(p, syntax::Property::String(s) if s.as_ref() == b"Before"),
+            )
+        })
+        .unwrap()
+        .properties
+        .start;
+    doc.properties[before] = syntax::Property::I32(0);
+    assert_eq!(
+        scene_property::authored(&doc, owners[1], 10, 4096),
+        Err(scene_property::Error::InvalidDom)
+    );
+}

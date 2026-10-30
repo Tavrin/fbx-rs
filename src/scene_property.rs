@@ -296,8 +296,8 @@ pub fn authored<'a>(
         .iter()
         .filter(|n| n.parent == Some(container))
         .count();
-    // Nested BinaryData detection below scans the document for each property.
-    // Bound that work even for an adversarial caller-constructed DOM.
+    // Retain the conservative admission bound for caller-constructed DOMs,
+    // even though nested BinaryData lookup below is now a single pass.
     if count
         .checked_mul(doc.nodes.len())
         .is_none_or(|work| work > (1 << 26))
@@ -311,6 +311,21 @@ pub fn authored<'a>(
     {
         return Err(Error::LimitExceeded);
     }
+    // Locate the earliest property with a direct BinaryData child once. Using
+    // its index preserves validation order (and errors before it), without a
+    // document scan per property or any additional allocation. This also works
+    // for caller-constructed DOMs whose sibling subtrees are interleaved.
+    let blob_property = doc
+        .nodes
+        .iter()
+        .filter(|n| n.name == b"BinaryData")
+        .filter_map(|n| n.parent)
+        .filter(|&p| {
+            doc.nodes
+                .get(p)
+                .is_some_and(|n| n.parent == Some(container))
+        })
+        .min();
     let mut out = Vec::new();
     out.try_reserve_exact(count)
         .map_err(|_| Error::AllocationFailed)?;
@@ -387,11 +402,7 @@ pub fn authored<'a>(
             value_blob = s;
             flags |= 0x2000000;
         }
-        if doc
-            .nodes
-            .iter()
-            .any(|n| n.parent == Some(i) && n.name == b"BinaryData")
-        {
+        if blob_property == Some(i) {
             return Err(Error::UnsupportedBlob);
         }
         out.push(AuthoredProperty {
