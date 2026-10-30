@@ -173,22 +173,28 @@ impl<'a> Reader<'a> {
         usize::try_from(self.num(n)?).map_err(|_| Error::LimitExceeded { what: "length" })
     }
 }
-fn charge(total: &mut usize, amount: usize, limit: usize) -> Result<(), Error> {
-    *total = total
-        .checked_add(amount)
-        .ok_or(Error::LimitExceeded { what: "allocation" })?;
-    if *total > limit {
-        return Err(Error::LimitExceeded { what: "allocation" });
+// Bare words retain integer zero for special numbers (unlike signed numeric
+// tokens, whose NaN integer conversion is i64::MIN), as in ufbx's token reader.
+pub(crate) fn bare_number(word: &[u8]) -> (i64, f64) {
+    if word.len() > 1 && word.len() < 64 {
+        if let Some(n) = ascii::special_number(word) {
+            return (0, n);
+        }
     }
-    Ok(())
+    let n = word
+        .first()
+        .map_or(0, |&b| i64::from(i8::from_ne_bytes([b])));
+    (n, n as f64)
+}
+fn allocation_error(e: crate::allocation::Error) -> Error {
+    match e {
+        crate::allocation::Error::Limit => Error::LimitExceeded { what: "allocation" },
+        crate::allocation::Error::Failed => Error::AllocationFailed,
+    }
 }
 fn push<T>(vec: &mut Vec<T>, value: T, total: &mut usize, limit: usize) -> Result<(), Error> {
     if vec.len() == vec.capacity() {
         // A growth may temporarily keep both old and new allocations live.
-        let old = vec
-            .capacity()
-            .checked_mul(size_of::<T>())
-            .ok_or(Error::LimitExceeded { what: "allocation" })?;
         let minimum = vec
             .len()
             .checked_add(1)
@@ -204,20 +210,8 @@ fn push<T>(vec: &mut Vec<T>, value: T, total: &mut usize, limit: usize) -> Resul
             .and_then(|n| total.checked_add(n))
             .is_some_and(|n| n <= limit);
         let target = if fits { preferred } else { minimum };
-        let requested = target
-            .checked_mul(size_of::<T>())
-            .ok_or(Error::LimitExceeded { what: "allocation" })?;
-        charge(total, requested, limit)?;
-        vec.try_reserve_exact(target - vec.len())
-            .map_err(|_| Error::AllocationFailed)?;
-        let actual = vec
-            .capacity()
-            .checked_mul(size_of::<T>())
-            .ok_or(Error::LimitExceeded { what: "allocation" })?;
-        if actual > requested {
-            charge(total, actual - requested, limit)?;
-        }
-        *total -= old;
+        crate::allocation::reserve(vec, target - vec.len(), total, limit)
+            .map_err(allocation_error)?;
     }
     vec.push(value);
     Ok(())
@@ -390,10 +384,14 @@ fn parse_binary<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>, Er
                                     what: "decompressed bytes",
                                 });
                             }
-                            charge(&mut total, len, limits.max_allocation)?;
                             let mut out = Vec::new();
-                            out.try_reserve_exact(len)
-                                .map_err(|_| Error::AllocationFailed)?;
+                            crate::allocation::reserve(
+                                &mut out,
+                                len,
+                                &mut total,
+                                limits.max_allocation,
+                            )
+                            .map_err(allocation_error)?;
                             out.resize(len, 0);
                             let mut state = miniz_oxide::inflate::core::DecompressorOxide::new();
                             let (status, consumed, written) = miniz_oxide::inflate::core::decompress(&mut state, source, &mut out, 0,

@@ -2,7 +2,6 @@
 //!
 //! The static scene conversion itself lives in `canon_scene` and `api`.
 use crate::syntax::{Document, Property};
-use std::mem::size_of;
 
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -139,29 +138,16 @@ fn props<'a>(doc: &'a Document<'_>, index: usize) -> Result<&'a [Property<'a>], 
         .get(node.properties.clone())
         .ok_or(Error::InvalidDom)
 }
-fn reserve<T>(v: &mut Vec<T>, n: usize, used: &mut usize, limit: usize) -> Result<(), Error> {
-    let size = n
-        .checked_mul(size_of::<T>())
-        .ok_or(Error::LimitExceeded("allocation"))?;
-    *used = used
-        .checked_add(size)
-        .ok_or(Error::LimitExceeded("allocation"))?;
-    if *used > limit {
-        return Err(Error::LimitExceeded("allocation"));
-    }
-    v.try_reserve_exact(n)
-        .map_err(|_| Error::AllocationFailed)?;
-    let actual = v
-        .capacity()
-        .checked_mul(size_of::<T>())
-        .ok_or(Error::LimitExceeded("allocation"))?;
-    *used = used
-        .checked_add(actual.saturating_sub(size))
-        .ok_or(Error::LimitExceeded("allocation"))?;
-    if *used > limit {
-        return Err(Error::LimitExceeded("allocation"));
-    }
-    Ok(())
+pub(crate) fn reserve<T>(
+    v: &mut Vec<T>,
+    n: usize,
+    used: &mut usize,
+    limit: usize,
+) -> Result<(), Error> {
+    crate::allocation::reserve(v, n, used, limit).map_err(|e| match e {
+        crate::allocation::Error::Limit => Error::LimitExceeded("allocation"),
+        crate::allocation::Error::Failed => Error::AllocationFailed,
+    })
 }
 /// Index direct children of Objects and Connections; references borrow the input DOM.
 /// Validates Model hierarchy cycles, not arbitrary non-hierarchy connection cycles.

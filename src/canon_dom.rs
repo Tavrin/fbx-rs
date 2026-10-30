@@ -296,10 +296,11 @@ enum Tok {
     Int(i64),
     Float(f64),
     NegZero,
-    Word(i64),
+    Word(i64, f64),
 }
 fn word(w: &[u8]) -> Tok {
-    Tok::Word(w.first().map_or(0, |&b| i64::from(i8::from_ne_bytes([b]))))
+    let (i, f) = crate::syntax::bare_number(w);
+    Tok::Word(i, f)
 }
 fn ascii_tokens(p: &Property<'_>, out: &mut Vec<Tok>) {
     match p {
@@ -322,7 +323,8 @@ fn ascii_tokens(p: &Property<'_>, out: &mut Vec<Tok>) {
 }
 fn scalar_from_token(t: Tok) -> DomValue {
     match t {
-        Tok::Int(v) | Tok::Word(v) => DomValue::Number(v, v as f64),
+        Tok::Int(v) => DomValue::Number(v, v as f64),
+        Tok::Word(i, f) => DomValue::Number(i, f),
         Tok::NegZero => DomValue::Number(0, -0.0),
         Tok::Float(x) => DomValue::Number(f64_to_i64(x), x),
     }
@@ -551,7 +553,14 @@ fn project(doc: &Document<'_>, i: usize, _state: St, parent: St, ascii: bool) ->
                         b'f' | b'd' => Num::F(-0.0),
                         _ => Num::I(0),
                     },
-                    Tok::Int(v) | Tok::Word(v) => Num::I(v),
+                    Tok::Int(v) => Num::I(v),
+                    Tok::Word(i, f) => {
+                        if matches!(target, b'f' | b'd') {
+                            Num::F(f)
+                        } else {
+                            Num::I(i)
+                        }
+                    }
                     Tok::Float(x) if accurate && target == b'i' => {
                         Num::F(f64::from(crate::numeric::round_f32(x)))
                     }
@@ -667,7 +676,12 @@ pub(crate) fn node_data(doc: &Document<'_>, i: usize, ascii: bool) -> NodeData {
                     AsciiValue::F64(bits) => Num::F(f64::from_bits(*bits)),
                     AsciiValue::NegativeZero => Num::F(-0.0),
                     AsciiValue::Bare(w) => {
-                        Num::I(w.first().map_or(0, |&b| i64::from(i8::from_ne_bytes([b]))))
+                        let (i, f) = crate::syntax::bare_number(w);
+                        if target == Some(b'd') {
+                            Num::F(f)
+                        } else {
+                            Num::I(i)
+                        }
                     }
                 })
             };

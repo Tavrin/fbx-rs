@@ -250,7 +250,7 @@ impl Reader<'_, '_> {
             return Err("animation: attribute count mismatch".into());
         }
         let mut keys = Vec::new();
-        keys.try_reserve_exact(count)
+        crate::allocation::reserve(&mut keys, count, &mut 0, limit)
             .map_err(|_| "animation: allocation")?;
         let (mut sl, mut wl) = (0.0f32, 0.333333f32);
         let mut prev = 0.0;

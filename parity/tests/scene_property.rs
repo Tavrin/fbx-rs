@@ -131,3 +131,20 @@ Objects: {
         Err(scene_property::Error::InvalidDom)
     );
 }
+
+#[test]
+fn bare_and_signed_special_property_integer_views_match_ufbx() {
+    for (token, integer, bits) in [
+        ("inf", 0, 0x7ff0000000000000),
+        ("NaN", 0, 0x7ff8000000000000),
+        ("+inf", i64::MAX, 0x7ff0000000000000),
+        ("-inf", i64::MIN, 0xfff0000000000000),
+        ("-1.#IND", i64::MIN, 0xfff8000000000000),
+    ] {
+        let input = format!("; FBX 7.4.0\nModel: 1, \"Model::A\", \"Null\" {{ Properties70: {{ P: \"Value\", \"Number\", \"\", \"\", {token} }} }}\n");
+        let doc = syntax::parse(input.as_bytes(), &syntax::Limits::default()).unwrap();
+        let props = scene_property::authored(&doc, 0, 1, 4096).unwrap();
+        assert_eq!(props[0].value_int, integer, "{token}");
+        assert_eq!(props[0].value_real[0].to_bits(), bits, "{token}");
+    }
+}

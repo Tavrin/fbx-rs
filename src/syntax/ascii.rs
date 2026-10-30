@@ -1,5 +1,5 @@
 //! Experimental ASCII parser; array values retain source numeric classes.
-use super::{charge, push, AsciiValue, Document, Error, Limits, Node, Property};
+use super::{allocation_error, push, AsciiValue, Document, Error, Limits, Node, Property};
 use std::borrow::Cow;
 
 struct Cursor<'a> {
@@ -47,10 +47,9 @@ impl<'a> Cursor<'a> {
         if !raw.contains(&b'&') {
             return Ok(Cow::Borrowed(raw));
         }
-        charge(total, raw.len(), limits.max_allocation)?;
         let mut out = Vec::new();
-        out.try_reserve_exact(raw.len())
-            .map_err(|_| Error::AllocationFailed)?;
+        crate::allocation::reserve(&mut out, raw.len(), total, limits.max_allocation)
+            .map_err(allocation_error)?;
         let mut i = 0;
         while i < raw.len() {
             let rest = &raw[i..];
@@ -74,27 +73,12 @@ impl<'a> Cursor<'a> {
 }
 fn number(token: &[u8]) -> Result<AsciiValue<'_>, Error> {
     let text = std::str::from_utf8(token).map_err(|_| Error::InvalidFormat)?;
-    // MSVC-style special values such as `1.#INF`, `-1.#INF`, `1.#IND`, `1.#QNAN`.
-    if let Some(hash) = token.iter().position(|&b| b == b'#') {
-        let (mantissa, special) = token.split_at(hash);
-        let special = &special[1..];
-        if !mantissa.contains(&b'.')
-            || special.is_empty()
-            || !special.iter().all(u8::is_ascii_alphabetic)
-        {
-            return Err(Error::UnsupportedSyntax);
-        }
-        // `#INF` is infinity; `#IND`, `#QNAN` and `#SNAN` are NaN.
-        let value = if special.eq_ignore_ascii_case(b"INF") {
-            if mantissa.first() == Some(&b'-') {
-                f64::NEG_INFINITY
-            } else {
-                f64::INFINITY
-            }
-        } else {
-            f64::NAN
-        };
+    if let Some(value) = special_number(token) {
         return Ok(AsciiValue::F64(value.to_bits()));
+    }
+    // Never accept a partial special spelling or an arbitrary MSVC suffix.
+    if token.contains(&b'#') {
+        return Err(Error::UnsupportedSyntax);
     }
     if token.iter().any(|b| matches!(b, b'.' | b'e' | b'E')) {
         text.parse::<f64>()
@@ -109,6 +93,47 @@ fn number(token: &[u8]) -> Result<AsciiValue<'_>, Error> {
         }
     }
 }
+// ufbx 0.23.1 ufbxi_parse_inf_nan: one legacy mantissa digit, INF/NAN/IND,
+// optional legacy trailing digits; signed quiet NaN, optional alphanumeric
+// standard NaN payload. Require consumption of the complete token.
+pub(super) fn special_number(token: &[u8]) -> Option<f64> {
+    let (negative, s) = match token.first()? {
+        b'-' => (true, &token[1..]),
+        b'+' => (false, &token[1..]),
+        _ => (false, token),
+    };
+    let bits = if s.len() >= 3 && s[0].is_ascii_digit() && &s[1..3] == b".#" {
+        let kind = s.get(3..6)?;
+        if !s[6..].iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        if kind.eq_ignore_ascii_case(b"inf") {
+            0x7ff0_0000_0000_0000
+        } else if kind.eq_ignore_ascii_case(b"nan") || kind.eq_ignore_ascii_case(b"ind") {
+            0x7ff8_0000_0000_0000
+        } else {
+            return None;
+        }
+    } else if s.eq_ignore_ascii_case(b"inf") || s.eq_ignore_ascii_case(b"infinity") {
+        0x7ff0_0000_0000_0000
+    } else if s.get(..3).is_some_and(|n| n.eq_ignore_ascii_case(b"nan")) {
+        let tail = &s[3..];
+        if !tail.is_empty()
+            && !(tail.starts_with(b"(")
+                && tail.ends_with(b")")
+                && tail[1..tail.len() - 1]
+                    .iter()
+                    .all(u8::is_ascii_alphanumeric))
+        {
+            return None;
+        }
+        0x7ff8_0000_0000_0000
+    } else {
+        return None;
+    };
+    Some(f64::from_bits(bits | if negative { 1 << 63 } else { 0 }))
+}
+
 /// Version from a leading magic comment such as `; FBX 7.3.0 project file`.
 /// Mirrors the accepted shape: `;`, optional blanks, `FBX`, blanks, `d.d.d`.
 fn magic_version(input: &[u8], mut pos: usize) -> Option<u32> {
@@ -251,14 +276,14 @@ pub(super) fn parse<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>
                         return Err(Error::InvalidFormat);
                     }
                     c.pos += 2;
-                    let bytes = count
-                        .checked_mul(std::mem::size_of::<AsciiValue<'_>>())
-                        .ok_or(Error::LimitExceeded { what: "allocation" })?;
-                    charge(&mut total, bytes, limits.max_allocation)?;
                     let mut values = Vec::new();
-                    values
-                        .try_reserve_exact(count)
-                        .map_err(|_| Error::AllocationFailed)?;
+                    crate::allocation::reserve(
+                        &mut values,
+                        count,
+                        &mut total,
+                        limits.max_allocation,
+                    )
+                    .map_err(allocation_error)?;
                     loop {
                         c.whitespace();
                         if c.peek() == Some(b'}') {
@@ -287,10 +312,9 @@ pub(super) fn parse<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>
                         let value = if token
                             .first()
                             .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
-                            && token
-                                .iter()
-                                .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
-                        {
+                            && token.iter().all(|b| {
+                                b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-' | b'(' | b')')
+                            }) {
                             AsciiValue::Bare(token)
                         } else {
                             number(token)?
@@ -343,9 +367,9 @@ pub(super) fn parse<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>
                 if token
                     .first()
                     .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
-                    && token
-                        .iter()
-                        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                    && token.iter().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-' | b'(' | b')')
+                    })
                 {
                     Property::AsciiBare(token)
                 } else {

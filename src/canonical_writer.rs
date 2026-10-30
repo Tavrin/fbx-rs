@@ -467,12 +467,10 @@ pub fn write_source_global_properties<W: Write>(
         if max_path_allocation < 256 {
             return Err(io::Error::other("canonical path allocation limit"));
         }
-        let mut path = String::new();
-        path.try_reserve_exact(256)
-            .map_err(|_| io::Error::other("canonical path allocation failed"))?;
-        if path.capacity() > max_path_allocation {
-            return Err(io::Error::other("canonical path allocation limit"));
-        }
+        let mut bytes = Vec::new();
+        crate::allocation::reserve(&mut bytes, 256, &mut 0, max_path_allocation)
+            .map_err(|_| io::Error::other("canonical path allocation limit or failure"))?;
+        let mut path = String::from_utf8(bytes).unwrap();
         let base = "/globals/settings/props";
         writer.field(
             "/globals/settings/props/props/length",
@@ -538,25 +536,24 @@ pub fn write_source_triangles<W: Write>(
         if base > limits.max_allocation {
             return Err(fail());
         }
+        let mut retained = 0;
         let mut order = Vec::new();
-        order
-            .try_reserve_exact(meshes.meshes.len())
-            .map_err(|_| fail())?;
+        crate::allocation::reserve(
+            &mut order,
+            meshes.meshes.len(),
+            &mut retained,
+            limits.max_allocation,
+        )
+        .map_err(|_| fail())?;
         for (i, m) in meshes.meshes.iter().enumerate() {
             let obj = index.objects.get(m.object).ok_or_else(fail)?;
             order.push((obj.id, m.node, i));
         }
         order.sort_unstable();
-        let order_bytes = order
-            .capacity()
-            .checked_mul(std::mem::size_of::<(i64, usize, usize)>())
-            .ok_or_else(fail)?;
-        let mut path = String::new();
-        path.try_reserve_exact(160).map_err(|_| fail())?;
-        let retained = order_bytes.checked_add(path.capacity()).ok_or_else(fail)?;
-        if retained > limits.max_allocation {
-            return Err(fail());
-        }
+        let mut bytes = Vec::new();
+        crate::allocation::reserve(&mut bytes, 160, &mut retained, limits.max_allocation)
+            .map_err(|_| fail())?;
+        let mut path = String::from_utf8(bytes).unwrap();
         writer.begin("triangles")?;
         writer.field("/triangles/length", &Count(order.len()))?;
         let mut work_left = limits.max_work;
@@ -599,16 +596,16 @@ pub fn write_source_triangles<W: Write>(
                     return Err(fail());
                 }
                 let mut triangles = Vec::new();
-                triangles.try_reserve_exact(needed).map_err(|_| fail())?;
+                let mut used = retained;
+                crate::allocation::reserve(
+                    &mut triangles,
+                    needed,
+                    &mut used,
+                    limits.max_allocation,
+                )
+                .map_err(|_| fail())?;
                 triangles.resize(needed, 0);
-                let output_bytes = triangles
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<usize>())
-                    .ok_or_else(fail)?;
-                let available = limits
-                    .max_allocation
-                    .checked_sub(retained.checked_add(output_bytes).ok_or_else(fail)?)
-                    .ok_or_else(fail)?;
+                let available = limits.max_allocation.checked_sub(used).ok_or_else(fail)?;
                 let tri_limits = crate::scene_mesh::TriangulationLimits {
                     max_face_vertices: limits.max_face_vertices,
                     max_allocation: available,

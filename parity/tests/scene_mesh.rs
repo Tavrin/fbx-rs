@@ -480,3 +480,28 @@ fn borrowed_numeric_words_preserve_endianness_sign_and_float_bits() {
         }
     }
 }
+
+#[test]
+fn ascii_special_numbers_reach_numeric_arrays() {
+    let input = b"; FBX 7.4.0\nValues: *8 { a: inf,nan,-inf,+inf,1.#INF,-1.#IND,NaN(payload),T }\n";
+    let doc = syntax::parse(input, &syntax::Limits::default()).unwrap();
+    let array = scene_mesh::NumericArray(&doc.properties[0]);
+    for (i, bits) in [
+        0x7ff0000000000000,
+        0x7ff8000000000000,
+        0xfff0000000000000,
+        0x7ff0000000000000,
+        0x7ff0000000000000,
+        0xfff8000000000000,
+        0x7ff8000000000000,
+        84f64.to_bits(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(array.f64(i).unwrap().to_bits(), bits, "index {i}");
+    }
+    assert_eq!(array.i64(0), Some(0));
+    assert_eq!(array.i64(1), Some(0));
+    assert_eq!(array.i64(7), Some(84));
+}

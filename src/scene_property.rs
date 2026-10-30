@@ -239,10 +239,7 @@ fn number(p: &Property<'_>) -> Option<(i64, f64)> {
             i64::from(i8::from_ne_bytes([*v])),
             f64::from(i8::from_ne_bytes([*v])),
         ),
-        Property::AsciiBare(v) => {
-            let n = i8::from_ne_bytes([v.first().copied().unwrap_or(0)]);
-            (i64::from(n), f64::from(n))
-        }
+        Property::AsciiBare(v) => crate::syntax::bare_number(v),
         Property::AsciiNegativeZero => (0, -0.0),
         Property::F32(bits) => {
             let v = f64::from(f32::from_bits(*bits));
@@ -264,6 +261,37 @@ fn float_int(v: f64) -> i64 {
         crate::numeric::saturating_i64(v)
     }
 }
+
+const MAX_WORK: usize = 1 << 26;
+#[derive(Default)]
+struct Work {
+    actual: usize,
+    ranges: usize,
+}
+impl Work {
+    fn add(&mut self, n: usize) -> Result<(), Error> {
+        self.actual = self.actual.checked_add(n).ok_or(Error::LimitExceeded)?;
+        if self.actual > MAX_WORK {
+            return Err(Error::LimitExceeded);
+        }
+        #[cfg(test)]
+        PROPERTY_WORK.with(|v| v.set(v.get() + n));
+        Ok(())
+    }
+    fn range(&mut self, n: usize) -> Result<(), Error> {
+        self.ranges = self.ranges.checked_add(n).ok_or(Error::LimitExceeded)?;
+        if self.ranges > MAX_WORK {
+            return Err(Error::LimitExceeded);
+        }
+        self.add(1)
+    }
+    fn string<'a>(&mut self, s: &'a [u8]) -> Result<&'a [u8], Error> {
+        self.add(s.len())?;
+        simple_string(s)
+    }
+}
+#[cfg(test)]
+thread_local! { static PROPERTY_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 /// Read the first Properties70 (or Properties60) child of `owner`. The list
 /// sorts by name and retains the last occurrence of each duplicate. This
@@ -296,14 +324,11 @@ pub fn authored<'a>(
         .iter()
         .filter(|n| n.parent == Some(container))
         .count();
-    // Retain the conservative admission bound for caller-constructed DOMs,
-    // even though nested BinaryData lookup below is now a single pass.
-    if count
-        .checked_mul(doc.nodes.len())
-        .is_none_or(|work| work > (1 << 26))
-    {
-        return Err(Error::LimitExceeded);
+    if count == 0 {
+        return Ok(Vec::new());
     }
+    let mut work = Work::default();
+    work.add(doc.nodes.len().checked_mul(5).ok_or(Error::LimitExceeded)?)?;
     if count > max_properties
         || count
             .checked_mul(size_of::<AuthoredProperty<'_>>())
@@ -326,15 +351,32 @@ pub fn authored<'a>(
                 .is_some_and(|n| n.parent == Some(container))
         })
         .min();
+    let mut used = 0;
+    let allocation_error = |e| match e {
+        crate::allocation::Error::Limit => Error::LimitExceeded,
+        crate::allocation::Error::Failed => Error::AllocationFailed,
+    };
     let mut out = Vec::new();
-    out.try_reserve_exact(count)
-        .map_err(|_| Error::AllocationFailed)?;
-    if out
-        .capacity()
-        .checked_mul(size_of::<AuthoredProperty<'_>>())
-        .is_none_or(|v| v > max_allocation)
-    {
-        return Err(Error::LimitExceeded);
+    crate::allocation::reserve(&mut out, count, &mut used, max_allocation)
+        .map_err(allocation_error)?;
+    // Prefix counts index every stored value once, including overlapping and
+    // shared caller-constructed ranges. Queries retain per-node error order.
+    work.add(doc.properties.len())?;
+    let mut unsupported = Vec::<usize>::new();
+    let prefix_len = doc
+        .properties
+        .len()
+        .checked_add(1)
+        .ok_or(Error::LimitExceeded)?;
+    crate::allocation::reserve(&mut unsupported, prefix_len, &mut used, max_allocation)
+        .map_err(allocation_error)?;
+    unsupported.push(0);
+    for p in &doc.properties {
+        let bad = matches!(
+            p,
+            Property::AsciiArray(_) | Property::Array { .. } | Property::Raw(_)
+        );
+        unsupported.push(unsupported.last().unwrap() + usize::from(bad));
     }
     for (i, node) in doc
         .nodes
@@ -346,24 +388,21 @@ pub fn authored<'a>(
             .properties
             .get(node.properties.clone())
             .ok_or(Error::InvalidDom)?;
-        if p.iter().any(|v| {
-            matches!(
-                v,
-                Property::AsciiArray(_) | Property::Array { .. } | Property::Raw(_)
-            )
-        }) {
+        work.range(p.len())?;
+        if unsupported[node.properties.end] != unsupported[node.properties.start] {
             return Err(Error::UnsupportedValue);
         }
-        let name = simple_string(p.first().and_then(string).ok_or(Error::InvalidDom)?)?;
-        let type_name = simple_string(p.get(1).and_then(string).ok_or(Error::InvalidDom)?)?;
+        let name = work.string(p.first().and_then(string).ok_or(Error::InvalidDom)?)?;
+        let type_name = work.string(p.get(1).and_then(string).ok_or(Error::InvalidDom)?)?;
         let mut kind = property_type(type_name);
         if kind == Type::Unknown && value_offset == 4 {
             if let Some(subtype) = p.get(2).and_then(string) {
-                kind = property_type(simple_string(subtype)?);
+                kind = property_type(work.string(subtype)?);
             }
         }
         let mut flags = 0u32;
         if let Some(s) = p.get(value_offset - 1).and_then(string) {
+            work.add(s.len())?;
             for (pos, c) in s.iter().copied().enumerate() {
                 let next = s.get(pos + 1).copied().unwrap_or(b'0');
                 match c {
@@ -398,7 +437,7 @@ pub fn authored<'a>(
         let mut value_str = &b""[..];
         let mut value_blob = &b""[..];
         if let Some(s) = p.get(str_offset).and_then(string) {
-            value_str = simple_string(s)?;
+            value_str = work.string(s)?;
             value_blob = s;
             flags |= 0x2000000;
         }
@@ -416,14 +455,155 @@ pub fn authored<'a>(
             value_blob,
         });
     }
-    out.sort_unstable_by(|a, b| a.name.cmp(b.name).then(a.source_node.cmp(&b.source_node)));
-    out.dedup_by(|later, earlier| {
-        if later.name == earlier.name {
-            *earlier = later.clone();
-            true
-        } else {
+    sort_properties(&mut out, &mut work)?;
+    let mut retained = 0;
+    for read in 0..out.len() {
+        let duplicate = if retained == 0 {
             false
+        } else {
+            work.add(
+                out[read]
+                    .name
+                    .len()
+                    .min(out[retained - 1].name.len())
+                    .saturating_add(1),
+            )?;
+            out[read].name == out[retained - 1].name
+        };
+        if duplicate {
+            out[retained - 1] = out[read].clone();
+        } else {
+            out.swap(retained, read);
+            retained += 1;
         }
-    });
+    }
+    out.truncate(retained);
     Ok(out)
+}
+
+fn sort_properties(out: &mut [AuthoredProperty<'_>], work: &mut Work) -> Result<(), Error> {
+    fn less(
+        a: &AuthoredProperty<'_>,
+        b: &AuthoredProperty<'_>,
+        work: &mut Work,
+    ) -> Result<bool, Error> {
+        work.add(a.name.len().min(b.name.len()).saturating_add(1))?;
+        Ok(a.name
+            .cmp(b.name)
+            .then(a.source_node.cmp(&b.source_node))
+            .is_lt())
+    }
+    fn sift(
+        out: &mut [AuthoredProperty<'_>],
+        mut root: usize,
+        end: usize,
+        work: &mut Work,
+    ) -> Result<(), Error> {
+        while root < end / 2 {
+            let mut child = root * 2 + 1;
+            if child + 1 < end && less(&out[child], &out[child + 1], work)? {
+                child += 1;
+            }
+            if !less(&out[root], &out[child], work)? {
+                break;
+            }
+            out.swap(root, child);
+            root = child;
+        }
+        Ok(())
+    }
+    for root in (0..out.len() / 2).rev() {
+        sift(out, root, out.len(), work)?;
+    }
+    for end in (1..out.len()).rev() {
+        out.swap(0, end);
+        sift(out, 0, end, work)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use crate::syntax::Node;
+    use std::borrow::Cow;
+    fn shared(n: usize, name: &[u8]) -> Document<'_> {
+        let mut properties = vec![Property::I64(7); n.max(5)];
+        properties[0] = Property::String(Cow::Borrowed(name));
+        properties[1] = Property::String(Cow::Borrowed(b"Number"));
+        properties[2] = Property::String(Cow::Borrowed(b""));
+        properties[3] = Property::String(Cow::Borrowed(b"A"));
+        let mut nodes = vec![
+            Node {
+                name: b"Model",
+                parent: None,
+                properties: 0..0,
+            },
+            Node {
+                name: b"Properties70",
+                parent: Some(0),
+                properties: 0..0,
+            },
+        ];
+        for _ in 0..n {
+            nodes.push(Node {
+                name: b"P",
+                parent: Some(1),
+                properties: 0..properties.len(),
+            });
+        }
+        Document {
+            version: 7400,
+            nodes,
+            properties,
+        }
+    }
+    #[test]
+    fn shared_property_scaling() {
+        let measure = |n| {
+            let doc = shared(n, b"shared");
+            PROPERTY_WORK.with(|c| c.set(0));
+            let p = authored(&doc, 0, n, 16 << 20).unwrap();
+            assert_eq!(p.len(), 1);
+            assert_eq!(p[0].source_node, n + 1);
+            assert_eq!(p[0].value_real, [7.0; 4]);
+            PROPERTY_WORK.with(|c| c.get())
+        };
+        let small = measure(1000);
+        let large = measure(8000);
+        eprintln!(
+            "properties: N=1000 {small}, 8N=8000 {large}, ratio={:.4}",
+            large as f64 / small as f64
+        );
+        assert!(small > 0 && large > small && large < small * 14);
+    }
+    #[test]
+    fn aggregate_ranges_and_shared_strings_are_bounded() {
+        assert_eq!(
+            authored(&shared(8193, b"shared"), 0, 8193, 16 << 20),
+            Err(Error::LimitExceeded)
+        );
+        let name = vec![b'a'; 1 << 20];
+        assert_eq!(
+            authored(&shared(100, &name), 0, 100, 16 << 20),
+            Err(Error::LimitExceeded)
+        );
+    }
+    #[test]
+    fn overlapping_ranges_retain_errors_and_last_duplicate() {
+        let mut doc = shared(10, b"shared");
+        // The bad value is outside the first range, inside all later ones.
+        doc.properties[9] = Property::Raw(b"bad");
+        doc.nodes[2].properties.end = 9;
+        assert_eq!(authored(&doc, 0, 10, 4096), Err(Error::UnsupportedValue));
+        doc.nodes[2].properties = 20..21;
+        assert_eq!(authored(&doc, 0, 10, 4096), Err(Error::InvalidDom));
+    }
+    #[test]
+    fn index_and_output_share_the_allocation_budget() {
+        let doc = shared(5, b"shared");
+        let output = 5 * size_of::<AuthoredProperty<'_>>();
+        assert_eq!(authored(&doc, 0, 5, output), Err(Error::LimitExceeded));
+        assert!(authored(&doc, 0, 5, output + 6 * size_of::<usize>()).is_ok());
+    }
 }
