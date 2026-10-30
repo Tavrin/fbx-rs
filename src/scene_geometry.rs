@@ -14,6 +14,7 @@ use crate::canon::{s, Obj, V};
 use crate::canon_dom::{node_bools, node_data, NodeData, Scalar};
 use crate::scene_node::{self as sn, Mat};
 use crate::syntax::Document;
+use crate::{api_alloc::Budget, Error};
 
 const NO_INDEX: u32 = u32::MAX;
 /// `UFBX_EPSILON` for double `ufbx_real`.
@@ -22,6 +23,7 @@ const EPSILON: f64 = 1.491_668_146_240_041_3e-154;
 /// Scene facts one mesh record depends on.
 pub struct MeshEnv<'a, 'd> {
     pub doc: &'a Document<'d>,
+    pub(crate) allocation: &'a Budget,
     /// DOM children per DOM node index.
     pub children: &'a [Vec<usize>],
     pub ascii: bool,
@@ -126,8 +128,10 @@ pub(crate) struct Mesh {
     generated_normals: bool,
 }
 
-fn err(what: &str) -> String {
-    format!("mesh: {what}")
+macro_rules! err {
+    ($what:literal) => {
+        Error::InvalidData(concat!("mesh: ", $what))
+    };
 }
 
 impl MeshEnv<'_, '_> {
@@ -137,62 +141,82 @@ impl MeshEnv<'_, '_> {
             .copied()
             .find(|&c| self.doc.nodes[c].name == name)
     }
-    fn reals(&self, node: usize) -> Option<Vec<f64>> {
-        match node_data(self.doc, node, self.ascii) {
-            NodeData::Reals(v) => Some(v),
-            _ => None,
-        }
+    fn reals(&self, node: usize) -> Result<Option<Vec<f64>>, Error> {
+        Ok(
+            match node_data(self.doc, node, self.ascii, self.allocation)? {
+                NodeData::Reals(v) => Some(v),
+                _ => None,
+            },
+        )
     }
-    fn ints(&self, node: usize) -> Option<Vec<i32>> {
-        match node_data(self.doc, node, self.ascii) {
-            NodeData::Ints(v) => Some(v),
-            _ => None,
-        }
+    fn ints(&self, node: usize) -> Result<Option<Vec<i32>>, Error> {
+        Ok(
+            match node_data(self.doc, node, self.ascii, self.allocation)? {
+                NodeData::Ints(v) => Some(v),
+                _ => None,
+            },
+        )
     }
-    fn find_reals(&self, node: usize, name: &[u8]) -> Option<Vec<f64>> {
-        self.child(node, name).and_then(|c| self.reals(c))
-    }
-    fn find_ints(&self, node: usize, name: &[u8]) -> Option<Vec<i32>> {
-        self.child(node, name).and_then(|c| self.ints(c))
-    }
-    fn find_bools(&self, node: usize, name: &[u8]) -> Option<Vec<bool>> {
+    fn find_reals(&self, node: usize, name: &[u8]) -> Result<Option<Vec<f64>>, Error> {
         self.child(node, name)
-            .and_then(|c| node_bools(self.doc, c, self.ascii))
+            .map(|c| self.reals(c))
+            .transpose()
+            .map(Option::flatten)
     }
-    /// `ufbxi_get_val1(node, "I")`.
-    fn val_i32(&self, node: usize) -> Option<i32> {
-        match node_data(self.doc, node, self.ascii) {
-            NodeData::Values(v) => match v.first() {
-                Some(Scalar::Num(i, _)) => i32::try_from(*i).ok(),
+    fn find_ints(&self, node: usize, name: &[u8]) -> Result<Option<Vec<i32>>, Error> {
+        self.child(node, name)
+            .map(|c| self.ints(c))
+            .transpose()
+            .map(Option::flatten)
+    }
+    fn find_bools(&self, node: usize, name: &[u8]) -> Result<Option<Vec<bool>>, Error> {
+        self.child(node, name)
+            .map(|c| node_bools(self.doc, c, self.ascii, self.allocation))
+            .transpose()
+            .map(Option::flatten)
+    }
+    fn val_i32(&self, node: usize) -> Result<Option<i32>, Error> {
+        Ok(
+            match node_data(self.doc, node, self.ascii, self.allocation)? {
+                NodeData::Values(v) => match v.first() {
+                    Some(Scalar::Num(i, _)) => i32::try_from(*i).ok(),
+                    _ => None,
+                },
                 _ => None,
             },
-            _ => None,
-        }
+        )
     }
-    /// `ufbxi_get_val1(node, "S"/"C")`.
-    fn val_str(&self, node: usize) -> Option<Vec<u8>> {
-        match node_data(self.doc, node, self.ascii) {
-            NodeData::Values(v) => match v.into_iter().next() {
-                Some(Scalar::Str(s)) => Some(s),
+    fn val_str(&self, node: usize) -> Result<Option<Vec<u8>>, Error> {
+        Ok(
+            match node_data(self.doc, node, self.ascii, self.allocation)? {
+                NodeData::Values(v) => match v.into_iter().next() {
+                    Some(Scalar::Str(s)) => Some(s),
+                    _ => None,
+                },
                 _ => None,
             },
-            _ => None,
-        }
+        )
     }
-    fn find_i32(&self, node: usize, name: &[u8]) -> Option<i32> {
-        self.child(node, name).and_then(|c| self.val_i32(c))
+    fn find_i32(&self, node: usize, name: &[u8]) -> Result<Option<i32>, Error> {
+        self.child(node, name)
+            .map(|c| self.val_i32(c))
+            .transpose()
+            .map(Option::flatten)
     }
-    fn find_str(&self, node: usize, name: &[u8]) -> Option<Vec<u8>> {
-        self.child(node, name).and_then(|c| self.val_str(c))
+    fn find_str(&self, node: usize, name: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        self.child(node, name)
+            .map(|c| self.val_str(c))
+            .transpose()
+            .map(Option::flatten)
     }
 }
 
 /// `ufbxi_fix_index` under CLAMP.
-fn fix_index(one_past_max: usize) -> Result<u32, String> {
+fn fix_index(one_past_max: usize) -> Result<u32, Error> {
     if one_past_max == 0 || one_past_max > u32::MAX as usize {
-        return Err(err("clamped index without elements"));
+        return Err(err!("clamped index without elements"));
     }
-    u32::try_from(one_past_max - 1).map_err(|_| err("index count overflow"))
+    u32::try_from(one_past_max - 1).map_err(|_| err!("index count overflow"))
 }
 
 /// `ufbxi_check_indices`: pad with NO_INDEX, clamp out-of-range values.
@@ -200,8 +224,11 @@ fn check_indices(
     mut indices: Vec<u32>,
     num_indexers: usize,
     num_elems: usize,
-) -> Result<Vec<u32>, String> {
+    a: &Budget,
+) -> Result<Vec<u32>, Error> {
     if indices.len() < num_indexers {
+        let extra = num_indexers - indices.len();
+        a.reserve(&mut indices, extra)?;
         indices.resize(num_indexers, NO_INDEX);
     }
     for ix in indices.iter_mut() {
@@ -214,14 +241,22 @@ fn check_indices(
 }
 
 /// `ufbxi_read_truncated_array`: exactly `size` elements, padded with the last.
-fn truncated<T: Copy + Default>(arr: Option<Vec<T>>, size: usize) -> Option<Vec<T>> {
-    let mut v = arr?;
+fn truncated<T: Copy + Default>(
+    arr: Option<Vec<T>>,
+    size: usize,
+    a: &Budget,
+) -> Result<Option<Vec<T>>, Error> {
+    let Some(mut v) = arr else {
+        return Ok(None);
+    };
     if v.len() < size {
         let fill = v.last().copied().unwrap_or_default();
+        let extra = size - v.len();
+        a.reserve(&mut v, extra)?;
         v.resize(size, fill);
     }
     v.truncate(size);
-    Some(v)
+    Ok(Some(v))
 }
 
 fn mapping_is(m: &[u8], name: &str) -> bool {
@@ -239,54 +274,60 @@ impl Mesh {
         data_name: &[u8],
         index_name: &[u8],
         comps: usize,
-    ) -> Result<(), String> {
-        let Some(data) = env.find_reals(node, data_name) else {
+    ) -> Result<(), Error> {
+        let a = env.allocation;
+        let Some(data) = env.find_reals(node, data_name)? else {
             return Ok(());
         };
         if data.len() % comps != 0 {
-            return Err(err("vertex element size"));
+            return Err(err!("vertex element size"));
         }
         let num_elems = data.len() / comps;
         if num_elems == 0 {
             return Ok(());
         }
         if num_elems >= i32::MAX as usize {
-            return Err(err("vertex element count"));
+            return Err(err!("vertex element count"));
         }
-        let indices = env.find_ints(node, index_name);
+        let indices = env.find_ints(node, index_name)?;
         attrib.exists = true;
         let mut mapping = env
-            .find_str(node, b"MappingInformationType")
+            .find_str(node, b"MappingInformationType")?
             .unwrap_or_default();
         attrib.values = data;
         let n = self.num_indices;
         if mapping_is(&mapping, "ByPolygon") {
             let num = indices.as_ref().map_or(num_elems, Vec::len);
             if num == n {
-                mapping = b"ByPolygonVertex".to_vec();
+                mapping = a.bytes(b"ByPolygonVertex")?;
             }
         }
         let by_vertex = mapping_is(&mapping, "ByVertex") || mapping_is(&mapping, "ByVertice");
         if let Some(index_data) = indices {
-            let index_data: Vec<u32> = index_data
-                .into_iter()
-                .map(crate::numeric::index_word)
-                .collect();
+            let index_data: Vec<u32> =
+                a.collect(index_data.into_iter().map(crate::numeric::index_word))?;
             if mapping_is(&mapping, "ByPolygonVertex") {
-                attrib.indices = check_indices(index_data, n, num_elems)?;
+                attrib.indices = check_indices(index_data, n, num_elems, a)?;
             } else if by_vertex {
-                let mut new = Vec::with_capacity(n);
+                let mut new = {
+                    let mut v = Vec::new();
+                    a.reserve(&mut v, n)?;
+                    v
+                };
                 for &ix in &self.position.indices {
-                    new.push(if (ix as usize) < index_data.len() {
-                        index_data[ix as usize]
-                    } else {
-                        fix_index(num_elems)?
-                    });
+                    a.push(
+                        &mut new,
+                        if (ix as usize) < index_data.len() {
+                            index_data[ix as usize]
+                        } else {
+                            fix_index(num_elems)?
+                        },
+                    )?;
                 }
-                attrib.indices = check_indices(new, n, num_elems)?;
+                attrib.indices = check_indices(new, n, num_elems, a)?;
                 attrib.unique_per_vertex = true;
             } else if mapping_is(&mapping, "ByPolygon") {
-                let mut new = vec![0u32; n];
+                let mut new = a.filled(n, 0u32)?;
                 for (face_ix, &(begin, count)) in self.faces.iter().enumerate() {
                     let mut index = index_data.get(face_ix).copied().unwrap_or(NO_INDEX);
                     if index as usize >= num_elems {
@@ -298,33 +339,38 @@ impl Mesh {
                 }
                 attrib.indices = new;
             } else if mapping_is(&mapping, "AllSame") {
-                attrib.indices = vec![0; n];
+                attrib.indices = a.filled(n, 0)?;
                 attrib.unique_per_vertex = true;
             } else {
                 *attrib = Attrib::default();
             }
         } else if mapping_is(&mapping, "ByPolygonVertex") {
             let consecutive: Vec<u32> =
-                (0..u32::try_from(n).map_err(|_| err("index count overflow"))?).collect();
+                a.collect(0..u32::try_from(n).map_err(|_| err!("index count overflow"))?)?;
             attrib.indices = if num_elems >= n {
                 consecutive
             } else {
-                check_indices(consecutive, n, num_elems)?
+                check_indices(consecutive, n, num_elems, a)?
             };
         } else if by_vertex {
-            attrib.indices = check_indices(self.position.indices.clone(), n, num_elems)?;
+            attrib.indices = check_indices(
+                a.collect(self.position.indices.iter().copied())?,
+                n,
+                num_elems,
+                a,
+            )?;
             attrib.unique_per_vertex = true;
         } else if mapping_is(&mapping, "ByPolygon") {
-            let mut new = vec![0u32; n];
+            let mut new = a.filled(n, 0u32)?;
             for (face_ix, &(begin, count)) in self.faces.iter().enumerate() {
                 for i in 0..count {
                     new[(begin + i) as usize] =
-                        u32::try_from(face_ix).map_err(|_| err("index count overflow"))?;
+                        u32::try_from(face_ix).map_err(|_| err!("index count overflow"))?;
                 }
             }
-            attrib.indices = check_indices(new, n, num_elems)?;
+            attrib.indices = check_indices(new, n, num_elems, a)?;
         } else if mapping_is(&mapping, "AllSame") {
-            attrib.indices = vec![0; n];
+            attrib.indices = a.filled(n, 0)?;
             attrib.unique_per_vertex = true;
         } else {
             *attrib = Attrib::default();
@@ -333,18 +379,21 @@ impl Mesh {
     }
 
     /// `ufbxi_process_indices`.
-    fn process_indices(&mut self, index_data: &mut [u32]) -> Result<(), String> {
+    fn process_indices(&mut self, index_data: &mut [u32], a: &Budget) -> Result<(), Error> {
         let mut begin = 0usize;
         for (i, slot) in index_data.iter_mut().enumerate() {
             let mut ix = *slot;
             if (crate::numeric::signed_word(ix)) < 0 {
                 ix = !ix;
                 *slot = ix;
-                let num = u32::try_from(i - begin + 1).map_err(|_| err("index count overflow"))?;
-                self.faces.push((
-                    u32::try_from(begin).map_err(|_| err("index count overflow"))?,
-                    num,
-                ));
+                let num = u32::try_from(i - begin + 1).map_err(|_| err!("index count overflow"))?;
+                a.push(
+                    &mut self.faces,
+                    (
+                        u32::try_from(begin).map_err(|_| err!("index count overflow"))?,
+                        num,
+                    ),
+                )?;
                 if num >= 3 {
                     self.num_triangles += u64::from(num - 2);
                     self.max_face_triangles = self.max_face_triangles.max(u64::from(num - 2));
@@ -354,41 +403,39 @@ impl Mesh {
                 begin = i + 1;
             }
             if ix as usize >= self.num_vertices {
-                return Err(err("vertex index out of range"));
+                return Err(err!("vertex index out of range"));
             }
         }
-        self.vertex_first_index = vec![NO_INDEX; self.num_vertices];
+        self.vertex_first_index = a.filled(self.num_vertices, NO_INDEX)?;
         for (ix, &vx) in index_data.iter().enumerate() {
             if (vx as usize) < self.num_vertices && self.vertex_first_index[vx as usize] == NO_INDEX
             {
                 self.vertex_first_index[vx as usize] =
-                    u32::try_from(ix).map_err(|_| err("index count overflow"))?;
+                    u32::try_from(ix).map_err(|_| err!("index count overflow"))?;
             }
         }
         Ok(())
     }
 
     /// `ufbxi_assign_face_groups` with retained parts.
-    fn assign_face_groups(&mut self) -> Result<(), String> {
+    fn assign_face_groups(&mut self, a: &Budget) -> Result<(), Error> {
         let num_faces = self.faces.len();
         let Some(face_group) = self.face_group.as_mut() else {
             return Ok(());
         };
         if num_faces == 0 || face_group.len() != num_faces {
-            return Err(err("face groups"));
+            return Err(err!("face groups"));
         }
-        let mut ids: Vec<i32> = face_group
-            .iter()
-            .map(|&x| crate::numeric::signed_word(x))
-            .collect();
+        let mut ids: Vec<i32> =
+            a.collect(face_group.iter().map(|&x| crate::numeric::signed_word(x)))?;
         ids.sort_unstable();
         ids.dedup();
-        self.face_groups = ids.clone();
-        let mut parts: Vec<Part> = vec![Part::default(); ids.len()];
+        self.face_groups = a.collect(ids.iter().copied())?;
+        let mut parts: Vec<Part> = a.filled(ids.len(), Part::default())?;
         if ids.len() == 1 {
             face_group.iter_mut().for_each(|x| *x = 0);
             parts[0].face_indices =
-                (0..u32::try_from(num_faces).map_err(|_| err("index count overflow"))?).collect();
+                a.collect(0..u32::try_from(num_faces).map_err(|_| err!("index count overflow"))?)?;
             parts[0].num_bad = self.num_bad;
             parts[0].num_faces = num_faces as u64;
             parts[0].num_triangles = self.num_triangles;
@@ -398,17 +445,18 @@ impl Mesh {
         for (f, g) in face_group.iter_mut().enumerate() {
             let index = ids
                 .binary_search(&(crate::numeric::signed_word(*g)))
-                .map_err(|_| err("face group lookup"))?;
+                .map_err(|_| err!("face group lookup"))?;
             parts[index].add_face(self.faces[f].1);
-            *g = u32::try_from(index).map_err(|_| err("index count overflow"))?;
+            *g = u32::try_from(index).map_err(|_| err!("index count overflow"))?;
         }
         for (i, p) in parts.iter_mut().enumerate() {
-            p.index = u32::try_from(i).map_err(|_| err("index count overflow"))?;
+            p.index = u32::try_from(i).map_err(|_| err!("index count overflow"))?;
         }
         for (f, &g) in face_group.iter().enumerate() {
-            parts[g as usize]
-                .face_indices
-                .push(u32::try_from(f).map_err(|_| err("index count overflow"))?);
+            a.push(
+                &mut parts[g as usize].face_indices,
+                u32::try_from(f).map_err(|_| err!("index count overflow"))?,
+            )?;
         }
         self.face_group_parts = parts;
         Ok(())
@@ -464,7 +512,7 @@ impl Mesh {
 
     /// `ufbxi_generate_normals` (topology, smoothing-aware normal mapping and
     /// area-weighted face normals; `assume_smooth = false`).
-    fn generate_normals(&mut self, vertex_indices: &[u32]) {
+    fn generate_normals(&mut self, vertex_indices: &[u32], a: &Budget) -> Result<(), Error> {
         self.generated_normals = true;
         let n = self.num_indices;
         // ufbx_topo_edge: index, next, prev, twin, face, edge, flags(non-manifold)
@@ -477,7 +525,11 @@ impl Mesh {
             face: u32,
             edge: u32,
         }
-        let mut topo = Vec::with_capacity(n);
+        let mut topo = {
+            let mut v = Vec::new();
+            a.reserve(&mut v, n)?;
+            v
+        };
         for (fi, &(begin, count)) in self.faces.iter().enumerate() {
             for pi in 0..count {
                 let ni = (pi + 1) % count;
@@ -486,22 +538,28 @@ impl Mesh {
                 if vb < va {
                     std::mem::swap(&mut va, &mut vb);
                 }
-                topo.push(Topo {
-                    index: begin + pi,
-                    twin: NO_INDEX,
-                    edge: NO_INDEX,
-                    prev: va,
-                    next: vb,
-                    face: u32::try_from(fi).expect("face count bounded by index count"),
-                });
+                a.push(
+                    &mut topo,
+                    Topo {
+                        index: begin + pi,
+                        twin: NO_INDEX,
+                        edge: NO_INDEX,
+                        prev: va,
+                        next: vb,
+                        face: u32::try_from(fi).expect("face count bounded by index count"),
+                    },
+                )?;
             }
         }
-        topo.sort_by_key(|t| {
-            (
-                crate::numeric::signed_word(t.prev),
-                crate::numeric::signed_word(t.next),
-            )
-        });
+        a.stable_sort(&mut topo, |left, right| {
+            let key = |t: &Topo| {
+                (
+                    crate::numeric::signed_word(t.prev),
+                    crate::numeric::signed_word(t.next),
+                )
+            };
+            key(left).cmp(&key(right))
+        })?;
         if let Some(edges) = &self.edges {
             for (ei, e) in edges.iter().enumerate() {
                 let mut va = vertex_indices[e[0] as usize];
@@ -535,7 +593,10 @@ impl Mesh {
             }
             i0 = i1 + 1;
         }
-        topo.sort_by_key(|t| crate::numeric::signed_word(t.index));
+        a.stable_sort(&mut topo, |left, right| {
+            let key = |t: &Topo| crate::numeric::signed_word(t.index);
+            key(left).cmp(&key(right))
+        })?;
         for &(begin, count) in &self.faces {
             for i in 0..count {
                 let t = &mut topo[(begin + i) as usize];
@@ -570,7 +631,7 @@ impl Mesh {
         };
         let prev_vertex_edge =
             |index: u32| -> u32 { topo[topo[index as usize].prev as usize].twin };
-        let mut normal_indices = vec![NO_INDEX; n];
+        let mut normal_indices = a.filled(n, NO_INDEX)?;
         let mut next_index = 0u32;
         for vi in 0..self.num_vertices {
             let original_start = self.vertex_first_index[vi];
@@ -614,7 +675,7 @@ impl Mesh {
             }
         }
         let num_normals = next_index as usize;
-        let mut normals = vec![0.0f64; num_normals * 3];
+        let mut normals = a.filled(num_normals * 3, 0.0f64)?;
         for &face in &self.faces {
             let fnormal = self.weighted_face_normal(face);
             for ix in 0..face.1 {
@@ -639,6 +700,7 @@ impl Mesh {
             indices: normal_indices,
             unique_per_vertex: num_normals == self.num_vertices,
         };
+        Ok(())
     }
 }
 
@@ -710,29 +772,28 @@ fn flip(indices: &mut [u32], faces: &[(u32, u32)]) {
     }
 }
 
-fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
+fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, Error> {
     let mut m = Mesh::default();
     let Some(node_vertices) = env.child(node, b"Vertices") else {
         return Ok(m);
     };
     let node_indices = env.child(node, b"PolygonVertexIndex");
-    let vertices = env
-        .reals(node_vertices)
-        .ok_or_else(|| err("Vertices array"))?;
+    let vertices = env.reals(node_vertices)?.ok_or(err!("Vertices array"))?;
     let indices = match node_indices {
-        Some(n) => Some(env.ints(n).ok_or_else(|| err("PolygonVertexIndex array"))?),
+        Some(n) => Some(env.ints(n)?.ok_or(err!("PolygonVertexIndex array"))?),
         None => None,
     };
-    let edge_indices = env.find_ints(node, b"Edges");
+    let edge_indices = env.find_ints(node, b"Edges")?;
     if vertices.len() % 3 != 0 {
-        return Err(err("vertex count"));
+        return Err(err!("vertex count"));
     }
     m.num_vertices = vertices.len() / 3;
-    let mut index_data: Vec<u32> = indices
-        .unwrap_or_default()
-        .into_iter()
-        .map(crate::numeric::index_word)
-        .collect();
+    let mut index_data: Vec<u32> = env.allocation.collect(
+        indices
+            .unwrap_or_default()
+            .into_iter()
+            .map(crate::numeric::index_word),
+    )?;
     m.num_indices = index_data.len();
     if let Some(last) = index_data.last_mut() {
         if (crate::numeric::signed_word(*last)) >= 0 {
@@ -741,7 +802,11 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
     }
     if let Some(edge_data) = edge_indices {
         let n = m.num_indices;
-        let mut edges = Vec::with_capacity(edge_data.len());
+        let mut edges = {
+            let mut v = Vec::new();
+            env.allocation.reserve(&mut v, edge_data.len())?;
+            v
+        };
         for e in edge_data {
             let a = crate::numeric::index_word(e);
             if a as usize >= n {
@@ -756,16 +821,19 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                 ix += 1;
             }
             if ix >= n {
-                return Err(err("edge index"));
+                return Err(err!("edge index"));
             }
-            edges.push([
-                a,
-                u32::try_from(ix).map_err(|_| err("index count overflow"))?,
-            ]);
+            env.allocation.push(
+                &mut edges,
+                [
+                    a,
+                    u32::try_from(ix).map_err(|_| err!("index count overflow"))?,
+                ],
+            )?;
         }
         m.edges = Some(edges);
     }
-    m.process_indices(&mut index_data)?;
+    m.process_indices(&mut index_data, env.allocation)?;
     m.position = Attrib {
         exists: true,
         values: vertices,
@@ -778,8 +846,8 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
     let mut bitangents: Vec<(u32, usize)> = Vec::new();
     let mut tangents: Vec<(u32, usize)> = Vec::new();
     let (mut stale_bi, mut stale_tan, mut stale_uv, mut stale_color) = (0u32, 0u32, 0u32, 0u32);
-    let children = env.children[node].clone();
-    for &n in &children {
+    let children = &env.children[node];
+    for &n in children {
         let name = env.doc.nodes[n].name;
         if name.first() != Some(&b'L') {
             continue;
@@ -796,7 +864,7 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
             b"LayerElementBinormal" | b"LayerElementTangent" => {
                 let bi = name == b"LayerElementBinormal";
                 let stale = if bi { &mut stale_bi } else { &mut stale_tan };
-                let index = env.val_i32(n).map_or(*stale, crate::numeric::index_word);
+                let index = env.val_i32(n)?.map_or(*stale, crate::numeric::index_word);
                 let mut a = Attrib::default();
                 if bi {
                     m.read_vertex_element(env, n, &mut a, b"Binormals", b"BinormalsIndex", 3)?;
@@ -805,45 +873,45 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                 }
                 if a.exists {
                     *stale = 0;
-                    m.tangent_layers.push(a);
+                    env.allocation.push(&mut m.tangent_layers, a)?;
                     let slot = (index, m.tangent_layers.len() - 1);
                     if bi {
-                        bitangents.push(slot);
+                        env.allocation.push(&mut bitangents, slot)?;
                     } else {
-                        tangents.push(slot);
+                        env.allocation.push(&mut tangents, slot)?;
                     }
                 } else {
                     *stale = index;
                 }
             }
             b"LayerElementUV" => {
-                let index = env.val_i32(n).map_or(stale_uv, crate::numeric::index_word);
+                let index = env.val_i32(n)?.map_or(stale_uv, crate::numeric::index_word);
                 let mut set = UvSet {
                     index,
-                    name: env.find_str(n, b"Name").unwrap_or_default(),
+                    name: env.find_str(n, b"Name")?.unwrap_or_default(),
                     ..UvSet::default()
                 };
                 m.read_vertex_element(env, n, &mut set.uv, b"UV", b"UVIndex", 2)?;
                 if set.uv.exists {
                     stale_uv = 0;
-                    m.uv_sets.push(set);
+                    env.allocation.push(&mut m.uv_sets, set)?;
                 } else {
                     stale_uv = index;
                 }
             }
             b"LayerElementColor" => {
                 let index = env
-                    .val_i32(n)
+                    .val_i32(n)?
                     .map_or(stale_color, crate::numeric::index_word);
                 let mut set = ColorSet {
                     index,
-                    name: env.find_str(n, b"Name").unwrap_or_default(),
+                    name: env.find_str(n, b"Name")?.unwrap_or_default(),
                     ..ColorSet::default()
                 };
                 m.read_vertex_element(env, n, &mut set.color, b"Colors", b"ColorIndex", 4)?;
                 if set.color.exists {
                     stale_color = 0;
-                    m.color_sets.push(set);
+                    env.allocation.push(&mut m.color_sets, set)?;
                 } else {
                     stale_color = index;
                 }
@@ -855,7 +923,7 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
             }
             b"LayerElementEdgeCrease" | b"LayerElementSmoothing" | b"LayerElementVisibility" => {
                 let mapping = env
-                    .find_str(n, b"MappingInformationType")
+                    .find_str(n, b"MappingInformationType")?
                     .unwrap_or_default();
                 let by_edge = mapping_is(&mapping, "ByEdge");
                 let by_polygon = mapping_is(&mapping, "ByPolygon");
@@ -864,7 +932,9 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                         if m.edge_crease.as_ref().is_some_and(|v| !v.is_empty()) {
                             continue;
                         }
-                        if let Some(v) = truncated(env.find_reals(n, b"EdgeCrease"), num_edges) {
+                        if let Some(v) =
+                            truncated(env.find_reals(n, b"EdgeCrease")?, num_edges, env.allocation)?
+                        {
                             m.edge_crease = Some(v);
                         }
                     }
@@ -872,7 +942,9 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                         if m.edge_smoothing.as_ref().is_some_and(|v| !v.is_empty()) {
                             continue;
                         }
-                        if let Some(v) = truncated(env.find_bools(n, b"Smoothing"), num_edges) {
+                        if let Some(v) =
+                            truncated(env.find_bools(n, b"Smoothing")?, num_edges, env.allocation)?
+                        {
                             m.edge_smoothing = Some(v);
                         }
                     }
@@ -880,7 +952,9 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                         if m.face_smoothing.as_ref().is_some_and(|v| !v.is_empty()) {
                             continue;
                         }
-                        if let Some(v) = truncated(env.find_bools(n, b"Smoothing"), num_faces) {
+                        if let Some(v) =
+                            truncated(env.find_bools(n, b"Smoothing")?, num_faces, env.allocation)?
+                        {
                             m.face_smoothing = Some(v);
                         }
                     }
@@ -888,7 +962,9 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                         if m.edge_visibility.as_ref().is_some_and(|v| !v.is_empty()) {
                             continue;
                         }
-                        if let Some(v) = truncated(env.find_bools(n, b"Visibility"), num_edges) {
+                        if let Some(v) =
+                            truncated(env.find_bools(n, b"Visibility")?, num_edges, env.allocation)?
+                        {
                             m.edge_visibility = Some(v);
                         }
                     }
@@ -900,22 +976,26 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                     continue;
                 }
                 let mapping = env
-                    .find_str(n, b"MappingInformationType")
+                    .find_str(n, b"MappingInformationType")?
                     .unwrap_or_default();
                 if mapping_is(&mapping, "ByPolygon") {
                     let arr = env
-                        .find_ints(n, b"Materials")
-                        .map(|v| v.into_iter().map(crate::numeric::index_word).collect());
-                    if let Some(v) = truncated(arr, num_faces) {
+                        .find_ints(n, b"Materials")?
+                        .map(|v| {
+                            env.allocation
+                                .collect(v.into_iter().map(crate::numeric::index_word))
+                        })
+                        .transpose()?;
+                    if let Some(v) = truncated(arr, num_faces, env.allocation)? {
                         m.face_material = Some(v);
                     }
                 } else if mapping_is(&mapping, "AllSame") {
-                    let arr = env.find_ints(n, b"Materials");
+                    let arr = env.find_ints(n, b"Materials")?;
                     let material = match arr.as_deref() {
                         Some([first, ..]) => crate::numeric::index_word(*first),
-                        _ => return Err(err("AllSame materials")),
+                        _ => return Err(err!("AllSame materials")),
                     };
-                    m.face_material = Some(vec![material; num_faces]);
+                    m.face_material = Some(env.allocation.filled(num_faces, material)?);
                 }
             }
             b"LayerElementPolygonGroup" | b"LayerElementHole" => {
@@ -923,17 +1003,23 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                     continue;
                 }
                 let mapping = env
-                    .find_str(n, b"MappingInformationType")
-                    .ok_or_else(|| err("polygon group mapping"))?;
+                    .find_str(n, b"MappingInformationType")?
+                    .ok_or(err!("polygon group mapping"))?;
                 if mapping_is(&mapping, "ByPolygon") {
                     if name == b"LayerElementPolygonGroup" {
                         let arr = env
-                            .find_ints(n, b"PolygonGroup")
-                            .map(|v| v.into_iter().map(crate::numeric::index_word).collect());
-                        if let Some(v) = truncated(arr, num_faces) {
+                            .find_ints(n, b"PolygonGroup")?
+                            .map(|v| {
+                                env.allocation
+                                    .collect(v.into_iter().map(crate::numeric::index_word))
+                            })
+                            .transpose()?;
+                        if let Some(v) = truncated(arr, num_faces, env.allocation)? {
                             m.face_group = Some(v);
                         }
-                    } else if let Some(v) = truncated(env.find_bools(n, b"Hole"), num_faces) {
+                    } else if let Some(v) =
+                        truncated(env.find_bools(n, b"Hole")?, num_faces, env.allocation)?
+                    {
                         m.face_hole = Some(v);
                     }
                 }
@@ -942,11 +1028,11 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
         }
     }
     if !m.face_material.as_ref().is_some_and(|v| !v.is_empty()) {
-        m.face_material = Some(vec![0; num_faces]);
+        m.face_material = Some(env.allocation.filled(num_faces, 0)?);
     }
 
     // Connect bitangents/tangents to UV sets through `Layer` declarations.
-    for &l in &children {
+    for &l in children {
         if env.doc.nodes[l].name != b"Layer" {
             continue;
         }
@@ -956,12 +1042,12 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
                 continue;
             }
             let Some(index) = env
-                .find_i32(c, b"TypedIndex")
+                .find_i32(c, b"TypedIndex")?
                 .map(crate::numeric::index_word)
             else {
                 continue;
             };
-            let Some(ty) = env.find_str(c, b"Type") else {
+            let Some(ty) = env.find_str(c, b"Type")? else {
                 continue;
             };
             match ty.as_slice() {
@@ -989,23 +1075,30 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, String> {
 
     m.skinned_is_local = true;
     if m.face_group.as_ref().is_some_and(|v| !v.is_empty()) && m.face_groups.is_empty() {
-        m.assign_face_groups()?;
+        m.assign_face_groups(env.allocation)?;
     }
-    m.uv_sets.sort_by_key(|s| s.index);
-    m.color_sets.sort_by_key(|s| s.index);
+    env.allocation.stable_sort(&mut m.uv_sets, |left, right| {
+        let key = |s: &UvSet| s.index;
+        key(left).cmp(&key(right))
+    })?;
+    env.allocation
+        .stable_sort(&mut m.color_sets, |left, right| {
+            let key = |s: &ColorSet| s.index;
+            key(left).cmp(&key(right))
+        })?;
 
-    if let Some(v) = env.find_i32(node, b"PreviewDivisionLevels") {
+    if let Some(v) = env.find_i32(node, b"PreviewDivisionLevels")? {
         m.subdivision_preview_levels = u64::from(crate::numeric::index_word(v));
     }
-    if let Some(v) = env.find_i32(node, b"RenderDivisionLevels") {
+    if let Some(v) = env.find_i32(node, b"RenderDivisionLevels")? {
         m.subdivision_render_levels = u64::from(crate::numeric::index_word(v));
     }
-    if let Some(v) = env.find_i32(node, b"Smoothness") {
+    if let Some(v) = env.find_i32(node, b"Smoothness")? {
         if (0..=3).contains(&v) {
             m.subdivision_display_mode = i64::from(v);
         }
     }
-    if let Some(v) = env.find_i32(node, b"BoundaryRule") {
+    if let Some(v) = env.find_i32(node, b"BoundaryRule")? {
         if (0..=1).contains(&v) {
             m.subdivision_boundary = i64::from(v) + 1;
         }
@@ -1054,7 +1147,7 @@ pub fn project_mesh(
     node: usize,
     links: &MeshLinks,
     obj: &mut Obj,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let m = convert_mesh(env, node, links)?;
     emit_mesh(&m, links, obj);
     Ok(m.max_face_triangles)
@@ -1066,38 +1159,43 @@ pub(crate) fn convert_mesh(
     env: &MeshEnv<'_, '_>,
     node: usize,
     links: &MeshLinks,
-) -> Result<Mesh, String> {
+) -> Result<Mesh, Error> {
     // Source counts bound every derived corner/face/edge index, including
     // the normal generator's infallible conversions. Check before decoding.
     for &child in &env.children[node] {
         if crate::canon_dom::data_len(env.doc, child)? > usize::try_from(i32::MAX).unwrap() {
-            return Err(err("source array count overflow"));
+            return Err(err!("source array count overflow"));
         }
     }
     if links.materials.len() > usize::try_from(i32::MAX).unwrap() {
-        return Err(err("material count overflow"));
+        return Err(err!("material count overflow"));
     }
 
+    let a = env.allocation;
     let mut m = read_mesh(env, node)?;
 
     // `ufbxi_finalize_scene`.
     if !m.normal.exists {
-        let vertex_indices = m.position.indices.clone();
-        m.generate_normals(&vertex_indices);
+        let vertex_indices = a.collect(m.position.indices.iter().copied())?;
+        m.generate_normals(&vertex_indices, a)?;
     }
     let num_faces = m.faces.len();
     let num_materials = links.materials.len();
     let num_parts = num_materials.max(1);
-    m.material_parts = vec![Part::default(); num_parts];
+    m.material_parts = a.filled(num_parts, Part::default())?;
     if num_materials <= 1 {
         let p = &mut m.material_parts[0];
         p.num_faces = num_faces as u64;
         p.num_triangles = m.num_triangles;
         p.num_bad = m.num_bad;
         p.face_indices =
-            (0..u32::try_from(num_faces).map_err(|_| err("index count overflow"))?).collect();
-        m.material_part_usage_order = vec![0];
-        m.face_material = (num_materials == 1).then(|| vec![0; num_faces]);
+            a.collect(0..u32::try_from(num_faces).map_err(|_| err!("index count overflow"))?)?;
+        m.material_part_usage_order = a.collect([0])?;
+        m.face_material = if num_materials == 1 {
+            Some(a.filled(num_faces, 0)?)
+        } else {
+            None
+        };
     } else {
         let mut fm = m.face_material.take().unwrap_or_default();
         for (i, face) in m.faces.iter().enumerate() {
@@ -1111,21 +1209,24 @@ pub(crate) fn convert_mesh(
             m.material_parts[mat].add_face(face.1);
         }
         for (i, p) in m.material_parts.iter_mut().enumerate() {
-            p.index = u32::try_from(i).map_err(|_| err("index count overflow"))?;
-            p.face_indices
-                .reserve(usize::try_from(p.num_faces).map_err(|_| err("face count overflow"))?);
+            p.index = u32::try_from(i).map_err(|_| err!("index count overflow"))?;
+            a.reserve(
+                &mut p.face_indices,
+                usize::try_from(p.num_faces).map_err(|_| err!("face count overflow"))?,
+            )?;
         }
         for (i, &mat) in fm.iter().enumerate().take(num_faces) {
             if (mat as usize) < num_parts {
-                m.material_parts[mat as usize]
-                    .face_indices
-                    .push(u32::try_from(i).map_err(|_| err("index count overflow"))?);
+                a.push(
+                    &mut m.material_parts[mat as usize].face_indices,
+                    u32::try_from(i).map_err(|_| err!("index count overflow"))?,
+                )?;
             }
         }
         let parts = &m.material_parts;
         let mut order: Vec<u32> =
-            (0..u32::try_from(num_parts).map_err(|_| err("index count overflow"))?).collect();
-        order.sort_by(|&a, &b| {
+            a.collect(0..u32::try_from(num_parts).map_err(|_| err!("index count overflow"))?)?;
+        a.stable_sort(&mut order, |&a, &b| {
             let (pa, pb) = (&parts[a as usize], &parts[b as usize]);
             let (ca, cb) = (pa.face_indices.len(), pb.face_indices.len());
             if ca == 0 || cb == 0 {
@@ -1137,13 +1238,13 @@ pub(crate) fn convert_mesh(
             } else {
                 pa.face_indices[0].cmp(&pb.face_indices[0])
             }
-        });
+        })?;
         m.material_part_usage_order = order;
         m.face_material = Some(fm);
     }
     if !m.position.exists {
         if m.num_indices != 0 {
-            return Err(err("missing vertex positions"));
+            return Err(err!("missing vertex positions"));
         }
         m.position.exists = true;
         m.position.unique_per_vertex = true;
@@ -1172,7 +1273,7 @@ pub(crate) fn convert_mesh(
         flip(&mut m.position.indices, &faces);
         flip(&mut m.normal.indices, &faces);
         flip(&mut m.crease.indices, &faces);
-        let mut flipped = vec![false; m.tangent_layers.len()];
+        let mut flipped = a.filled(m.tangent_layers.len(), false)?;
         for set in m.uv_sets.iter_mut() {
             flip(&mut set.uv.indices, &faces);
             for layer in [set.tangent, set.bitangent].into_iter().flatten() {
@@ -1189,12 +1290,12 @@ pub(crate) fn convert_mesh(
         for (ix, &vx) in m.position.indices.iter().enumerate() {
             if (vx as usize) < m.num_vertices && m.vertex_first_index[vx as usize] == NO_INDEX {
                 m.vertex_first_index[vx as usize] =
-                    u32::try_from(ix).map_err(|_| err("index count overflow"))?;
+                    u32::try_from(ix).map_err(|_| err!("index count overflow"))?;
             }
         }
         if let Some(edges) = m.edges.as_mut() {
             if !edges.is_empty() {
-                let mut map = vec![NO_INDEX; m.num_indices];
+                let mut map = a.filled(m.num_indices, NO_INDEX)?;
                 for &(begin, count) in &faces {
                     if count == 0 {
                         continue;
@@ -1429,48 +1530,41 @@ pub(crate) fn public_mesh(
     materials: Vec<usize>,
     instances: Vec<usize>,
     triangles: Vec<u32>,
-) -> crate::api::Mesh {
+    budget: &crate::api_alloc::Budget,
+) -> Result<crate::api::Mesh, crate::Error> {
     use crate::api;
-    let mut tangents = m.tangent_layers.into_iter().map(Some).collect::<Vec<_>>();
+    let mut tangents = budget.collect(m.tangent_layers.into_iter().map(Some))?;
     let mut take = |k: Option<usize>| {
         k.and_then(|k| tangents.get_mut(k).and_then(Option::take))
             .and_then(public_attrib::<3>)
     };
-    let uv_sets = m
-        .uv_sets
-        .into_iter()
-        .map(|u| api::UvSet {
-            name: String::from_utf8_lossy(&u.name).into_owned(),
+    let uv_sets = budget.try_collect(m.uv_sets.into_iter().map(|u| {
+        Ok(api::UvSet {
+            name: budget.text(&u.name)?,
             uv: public_attrib::<2>(u.uv).unwrap_or_default(),
             tangent: take(u.tangent),
             bitangent: take(u.bitangent),
         })
-        .collect();
-    let color_sets = m
-        .color_sets
-        .into_iter()
-        .map(|c| api::ColorSet {
-            name: String::from_utf8_lossy(&c.name).into_owned(),
+    }))?;
+    let color_sets = budget.try_collect(m.color_sets.into_iter().map(|c| {
+        Ok(api::ColorSet {
+            name: budget.text(&c.name)?,
             color: public_attrib::<4>(c.color).unwrap_or_default(),
         })
-        .collect();
-    let parts = m
-        .material_parts
-        .into_iter()
-        .map(|p| api::MeshPart {
-            index: p.index,
-            num_triangles: p.num_triangles,
-            face_indices: p.face_indices,
-        })
-        .collect();
-    api::Mesh {
+    }))?;
+    let parts = budget.collect(m.material_parts.into_iter().map(|p| api::MeshPart {
+        index: p.index,
+        num_triangles: p.num_triangles,
+        face_indices: p.face_indices,
+    }))?;
+    Ok(api::Mesh {
         base,
         num_vertices: m.num_vertices,
-        faces: m
-            .faces
-            .into_iter()
-            .map(|(begin, count)| api::Face { begin, count })
-            .collect(),
+        faces: budget.collect(
+            m.faces
+                .into_iter()
+                .map(|(begin, count)| api::Face { begin, count }),
+        )?,
         positions: public_attrib::<3>(m.position).unwrap_or_default(),
         normals: public_attrib::<3>(m.normal),
         uv_sets,
@@ -1484,7 +1578,7 @@ pub(crate) fn public_mesh(
         generated_normals: m.generated_normals,
         skin_deformers: Vec::new(),
         blend_deformers: Vec::new(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1509,13 +1603,13 @@ mod tests {
             ..Mesh::default()
         };
         let vi = m.position.indices.clone();
-        m.generate_normals(&vi);
+        m.generate_normals(&vi, &Budget::new(usize::MAX)).unwrap();
         assert_eq!(m.normal.values.len(), 18);
         assert!(m.normal.values.chunks(3).all(|n| n == [0.0, 0.0, 1.0]));
         assert!(!m.normal.unique_per_vertex);
         // Face smoothing merges the shared corners: 4 normals for 4 vertices.
         m.face_smoothing = Some(vec![true, true]);
-        m.generate_normals(&vi);
+        m.generate_normals(&vi, &Budget::new(usize::MAX)).unwrap();
         assert_eq!(m.normal.values.len(), 12);
         assert!(m.normal.unique_per_vertex);
         let mut ix = m.position.indices.clone();

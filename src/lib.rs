@@ -69,6 +69,10 @@
 #![warn(missing_docs)]
 
 mod allocation;
+mod api_alloc;
+mod bake;
+mod fallible_map;
+pub use bake::{BakeOptions, BakedAnimation, BakedKey, BakedNode, BakedProperty};
 mod animation;
 #[cfg(feature = "parity")]
 mod animation_canon;
@@ -170,8 +174,9 @@ pub mod scene_transform;
 pub use api::{
     load, load_with_limits, Axis, Camera, ColorSet, CoordinateAxes, Error, Face,
     GeometryTransformHandling, InheritModeHandling, Light, LightKind, Limits, LoadOptions,
-    Material, MaterialMap, Matrix, Mesh, MeshPart, Node, Scene, SceneSettings, SpaceConversion,
-    Texture, Transform, Unsupported, UnsupportedKind, UvSet, VertexAttribute,
+    Material, MaterialFeature, MaterialMap, MaterialTexture, Matrix, Mesh, MeshPart, Node, Scene,
+    SceneSettings, SourceProperty, SpaceConversion, Texture, TextureLayer, Transform, Unsupported,
+    UnsupportedKind, UvSet, VertexAttribute,
 };
 
 // Compile the public usage examples as part of the crate doctests.

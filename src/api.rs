@@ -15,6 +15,12 @@ pub use crate::scene::UnsupportedKind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
+    /// A structural or evaluation error with a static diagnostic.
+    InvalidData(&'static str),
+    /// An allocator refused a fallible reservation.
+    Allocation,
+    /// A checked aggregate resource budget was exhausted.
+    ResourceLimit(&'static str),
     /// The input is larger than [`Limits::max_input_bytes`].
     InputTooLarge {
         /// Input size in bytes.
@@ -36,6 +42,9 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Error::InvalidData(message) => f.write_str(message),
+            Error::Allocation => f.write_str("allocation refused"),
+            Error::ResourceLimit(stage) => write!(f, "resource limit: {stage}"),
             Error::InputTooLarge { size, limit } => {
                 write!(
                     f,
@@ -50,6 +59,16 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+impl From<String> for Error {
+    fn from(message: String) -> Self {
+        Self::Convert(message)
+    }
+}
+impl From<&'static str> for Error {
+    fn from(message: &'static str) -> Self {
+        Self::InvalidData(message)
+    }
+}
 
 /// Resource limits for one [`load_with_limits`] call. Every count is checked
 /// before the corresponding allocation; the defaults suit files up to a few
@@ -289,13 +308,7 @@ pub fn load_with_limits(
         });
     }
     let dump = limits.dump_limits();
-    let canon = canon_scene::project_with(bytes, &dump, true).map_err(|e| {
-        if e.starts_with("syntax:") {
-            Error::Parse(e)
-        } else {
-            Error::Convert(e)
-        }
-    })?;
+    let canon = canon_scene::project_with(bytes, &dump, true)?;
     Scene::from_projection(canon, &dump)
 }
 
@@ -662,17 +675,101 @@ pub struct MaterialMap {
     pub feature_disabled: bool,
 }
 
-/// A material: the FBX (Lambert/Phong) maps and the PBR maps derived from
-/// them or from a known shader (3ds Max Physical, Arnold, Stingray, ...).
+/// A material with FBX maps and derived PBR maps.
+///
+/// PBR mappings cover FBX Lambert/Phong (also the unknown-shader fallback),
+/// 3ds Max Physical Material, 3ds Max PBR Metal/Rough and Spec/Gloss, glTF
+/// Material, and OpenPBR Material identified by their 3ds Max class IDs.
+/// Shader-element bindings (including Arnold, OSL and ShaderFX/Stingray)
+/// and Blender-specific Phong mapping are not implemented.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Material {
     pub(crate) base: ElementInfo,
     pub(crate) shading_model: String,
     pub(crate) fbx: Vec<(&'static str, MaterialMap)>,
     pub(crate) pbr: Vec<(&'static str, MaterialMap)>,
+    pub(crate) features: Vec<(&'static str, MaterialFeature)>,
+    pub(crate) properties: Vec<SourceProperty>,
+    pub(crate) textures: Vec<MaterialTexture>,
 }
 
+/// A computed material feature and whether it was explicitly authored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MaterialFeature {
+    /// Computed enabled state.
+    pub enabled: bool,
+    /// True when explicitly set by the source shader.
+    pub is_explicit: bool,
+}
+/// A retained source property, including the selected source template defaults.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct SourceProperty {
+    /// Byte-exact property name.
+    pub name: Vec<u8>,
+    /// ufbx property type discriminant.
+    pub property_type: u8,
+    /// ufbx property flags.
+    pub flags: u32,
+    /// Integer view.
+    pub value_int: i64,
+    /// Numeric components.
+    pub value_real: [f64; 4],
+    /// Byte-exact string view.
+    pub value_str: Vec<u8>,
+    /// Blob view.
+    pub value_blob: Vec<u8>,
+}
+/// One material texture attachment, including unmapped source properties.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct MaterialTexture {
+    /// Byte-exact material property name.
+    pub material_prop: Vec<u8>,
+    /// Byte-exact shader property name.
+    pub shader_prop: Vec<u8>,
+    /// Index into [`Scene::textures`].
+    pub texture: usize,
+}
+/// One ordered child of a layered texture.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct TextureLayer {
+    /// Index into [`Scene::textures`].
+    pub texture: usize,
+    /// ufbx blend mode discriminant.
+    pub blend_mode: i64,
+    /// Layer alpha.
+    pub alpha: f64,
+}
 impl Material {
+    /// All computed feature flags, in ufbx field order.
+    pub fn features(&self) -> impl Iterator<Item = (&'static str, &MaterialFeature)> {
+        self.features.iter().map(|(n, f)| (*n, f))
+    }
+    /// A feature by ufbx name, such as `double_sided` or `unlit`.
+    pub fn feature(&self, name: &str) -> Option<&MaterialFeature> {
+        self.features
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, f)| f)
+    }
+    /// Source properties in byte-name order; authored values override templates.
+    pub fn source_properties(&self) -> &[SourceProperty] {
+        &self.properties
+    }
+    /// Look up an authored property, falling back to the source template.
+    pub fn source_property(&self, name: &[u8]) -> Option<&SourceProperty> {
+        self.properties
+            .binary_search_by(|p| p.name.as_slice().cmp(name))
+            .ok()
+            .map(|i| &self.properties[i])
+    }
+    /// Every attachment, including properties without a mapped FBX/PBR slot.
+    pub fn textures(&self) -> &[MaterialTexture] {
+        &self.textures
+    }
     /// Object name.
     pub fn name(&self) -> &str {
         &self.base.name
@@ -709,6 +806,8 @@ impl Material {
 pub struct Texture {
     pub(crate) base: ElementInfo,
     pub(crate) layered: bool,
+    pub(crate) layers: Vec<TextureLayer>,
+    pub(crate) file_textures: Vec<usize>,
     pub(crate) filename: String,
     pub(crate) relative_filename: String,
     pub(crate) absolute_filename: String,
@@ -718,6 +817,15 @@ pub struct Texture {
 }
 
 impl Texture {
+    /// Ordered child layers with blend modes and alpha.
+    pub fn layers(&self) -> &[TextureLayer] {
+        &self.layers
+    }
+    /// Flattened unique file texture indices, in ufbx traversal order.
+    pub fn file_textures(&self) -> &[usize] {
+        &self.file_textures
+    }
+
     /// Object name.
     pub fn name(&self) -> &str {
         &self.base.name
@@ -983,6 +1091,17 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// Bake a stack into independently reduced linear transform/property channels.
+    /// `None` selects the default stack. Candidate keys and allocation/work
+    /// are bounded by `options`; see `docs/VERIFICATION.md` for compatibility.
+    pub fn bake_animation(
+        &self,
+        stack: Option<usize>,
+        options: &crate::BakeOptions,
+    ) -> Result<crate::BakedAnimation, Error> {
+        crate::bake::bake(&self.animation, stack, options)
+    }
+
     /// Animation stacks in source identity order.
     pub fn animation_stacks(&self) -> &[crate::AnimationStack] {
         &self.animation.stacks
@@ -1022,7 +1141,7 @@ impl Scene {
             .nodes
             .get(node)
             .map(|n| n.local_transform)
-            .ok_or_else(|| Error::Convert("animation: node index out of range".into()))
+            .ok_or(Error::InvalidData("animation: node index out of range"))
     }
     /// Evaluate a binding from this scene, including properties on generated helpers.
     pub fn evaluate_binding(
@@ -1032,9 +1151,7 @@ impl Scene {
         time: f64,
     ) -> Result<crate::EvaluatedProperty, Error> {
         if !time.is_finite() {
-            return Err(Error::Convert(
-                "animation: nonfinite evaluation time".into(),
-            ));
+            return Err(Error::InvalidData("animation: nonfinite evaluation time"));
         }
         if !self
             .animation
@@ -1042,16 +1159,16 @@ impl Scene {
             .iter()
             .any(|l| l.bindings.contains(binding))
         {
-            return Err(Error::Convert(
-                "animation: binding does not belong to scene".into(),
+            return Err(Error::InvalidData(
+                "animation: binding does not belong to scene",
             ));
         }
-        Ok(self.animation.property(
+        self.animation.property(
             self.animation.stack_layers(stack)?,
             binding.element,
             &binding.property,
             time,
-        ))
+        )
     }
     /// Evaluate any object's property by its source ID and byte-exact property name.
     pub fn evaluate_property(
@@ -1062,9 +1179,7 @@ impl Scene {
         time: f64,
     ) -> Result<crate::EvaluatedProperty, Error> {
         if !time.is_finite() {
-            return Err(Error::Convert(
-                "animation: nonfinite evaluation time".into(),
-            ));
+            return Err(Error::InvalidData("animation: nonfinite evaluation time"));
         }
         let layers = self.animation.stack_layers(stack)?;
         let i = self
@@ -1072,8 +1187,8 @@ impl Scene {
             .ids
             .iter()
             .position(|id| *id == Some(source_id))
-            .ok_or_else(|| Error::Convert("animation: source ID not found".into()))?;
-        Ok(self.animation.property(layers, i, name, time))
+            .ok_or(Error::InvalidData("animation: source ID not found"))?;
+        self.animation.property(layers, i, name, time)
     }
     /// Stored bones; references use indices into the corresponding scene slice.
     pub fn bones(&self) -> &[crate::Bone] {
@@ -1151,9 +1266,10 @@ impl Scene {
 
     fn from_projection(mut c: CanonScene<'_>, limits: &DumpLimits) -> Result<Self, Error> {
         use ElementType as T;
+        let budget = crate::api_alloc::Budget::new(limits.max_allocation);
         let n = c.elements.len();
         // Element index -> index within its kind.
-        let mut slot = vec![usize::MAX; n];
+        let mut slot = budget.filled(n, usize::MAX)?;
         let mut counts = [0usize; 13];
         for (i, e) in c.elements.iter().enumerate() {
             let k = match e.ty {
@@ -1176,31 +1292,34 @@ impl Scene {
             counts[k] += 1;
         }
         let r = |k: usize| slot.get(k).copied().filter(|&s| s != usize::MAX);
-        let refs = |l: &[usize]| -> Vec<usize> { l.iter().filter_map(|&k| r(k)).collect() };
-        let info = |e: &canon_scene::Element| ElementInfo {
-            name: String::from_utf8_lossy(&e.name).into_owned(),
-            source_id: e.source_id,
+        let refs = |l: &[usize]| budget.collect(l.iter().filter_map(|&k| r(k)));
+        let info = |e: &canon_scene::Element| -> Result<ElementInfo, Error> {
+            Ok(ElementInfo {
+                name: budget.text(&e.name)?,
+                source_id: e.source_id,
+            })
         };
         let mut t = std::mem::take(&mut c.typed);
         // Typed results follow ufbx's typed order; slices follow element order.
-        t.materials.sort_by_key(|(i, _)| *i);
-        t.textures.sort_by_key(|(i, _)| *i);
+        t.materials.sort_unstable_by_key(|(i, _)| *i);
+        t.textures.sort_unstable_by_key(|(i, _)| *i);
         let ty_of = |k: usize| c.elements[k].ty;
 
-        let mut nodes = Vec::with_capacity(counts[0]);
+        let mut nodes = Vec::new();
+        budget.reserve(&mut nodes, counts[0])?;
         for (i, e) in c.elements.iter().enumerate() {
             if e.ty != T::Node {
                 continue;
             }
             let Some(Some(state)) = c.node_states.get(i) else {
-                return Err(Error::Convert("node without transform".into()));
+                return Err(Error::InvalidData("node without transform"));
             };
             let first = t.attribs.get(i).and_then(|a| a.first().copied());
             let attrib = |want: ElementType| first.filter(|&a| ty_of(a) == want).and_then(r);
             nodes.push(Node {
-                base: info(e),
+                base: info(e)?,
                 parent: t.parent.get(i).copied().flatten().and_then(r),
-                children: t.children.get(i).map_or(Vec::new(), |l| refs(l)),
+                children: refs(t.children.get(i).map_or(&[], Vec::as_slice))?,
                 local: Transform {
                     translation: state.local.translation,
                     rotation: state.local.rotation,
@@ -1219,63 +1338,82 @@ impl Scene {
                     Some(V::Ref(Some(k))) => r(*k),
                     _ => None,
                 },
-                materials: t.node_materials.get(i).map_or(Vec::new(), |l| refs(l)),
+                materials: refs(t.node_materials.get(i).map_or(&[], Vec::as_slice))?,
             });
         }
         let maps = |names: &[&'static str], maps: Vec<crate::scene_material::Map>| {
-            names
-                .iter()
-                .zip(maps)
-                .map(|(&name, m)| {
-                    (
-                        name,
-                        MaterialMap {
-                            value: m.value,
-                            value_int: m.int,
-                            value_components: m.components,
-                            texture: m.texture.and_then(r),
-                            has_value: m.has_value,
-                            texture_enabled: m.texture_enabled,
-                            feature_disabled: m.feature_disabled,
-                        },
-                    )
-                })
-                .collect()
+            budget.collect(names.iter().zip(maps).map(|(&name, m)| {
+                (
+                    name,
+                    MaterialMap {
+                        value: m.value,
+                        value_int: m.int,
+                        value_components: m.components,
+                        texture: m.texture.and_then(r),
+                        has_value: m.has_value,
+                        texture_enabled: m.texture_enabled,
+                        feature_disabled: m.feature_disabled,
+                    },
+                )
+            }))
         };
-        let text = |b: Vec<u8>| match String::from_utf8(b) {
-            Ok(s) => s,
-            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-        };
+        let text = |b| budget.owned_text(b);
         use crate::scene_material::{FBX_MAPS, PBR_MAPS};
-        let materials = t
-            .materials
-            .into_iter()
-            .map(|(i, m)| Material {
-                base: info(&c.elements[i]),
-                shading_model: text(m.shading_model),
-                fbx: maps(&FBX_MAPS, m.fbx),
-                pbr: maps(&PBR_MAPS, m.pbr),
+        let materials = budget.try_collect(t.materials.into_iter().map(|(i, m)| {
+            Ok(Material {
+                base: info(&c.elements[i])?,
+                features: budget.collect(
+                    crate::scene_material::FEATURES.iter().zip(m.features).map(
+                        |(&n, (enabled, is_explicit))| {
+                            (
+                                n,
+                                MaterialFeature {
+                                    enabled,
+                                    is_explicit,
+                                },
+                            )
+                        },
+                    ),
+                )?,
+                properties: m.properties,
+                textures: budget.try_collect(m.attachments.into_iter().map(|a| {
+                    Ok(MaterialTexture {
+                        material_prop: a.material_prop,
+                        shader_prop: a.shader_prop,
+                        texture: r(a.texture)
+                            .ok_or(Error::ResourceLimit("material texture index"))?,
+                    })
+                }))?,
+                shading_model: text(m.shading_model)?,
+                fbx: maps(&FBX_MAPS, m.fbx)?,
+                pbr: maps(&PBR_MAPS, m.pbr)?,
             })
-            .collect();
-        let textures = t
-            .textures
-            .into_iter()
-            .map(|(i, x)| Texture {
-                base: info(&c.elements[i]),
+        }))?;
+        let textures = budget.try_collect(t.textures.into_iter().map(|(i, x)| {
+            Ok(Texture {
+                base: info(&c.elements[i])?,
                 layered: x.layered,
-                filename: text(x.filename),
-                relative_filename: text(x.relative_filename),
-                absolute_filename: text(x.absolute_filename),
+                layers: budget.try_collect(x.layers.into_iter().map(
+                    |(t, blend_mode, alpha)| {
+                        Ok(TextureLayer {
+                            texture: r(t).ok_or(Error::ResourceLimit("texture layer index"))?,
+                            blend_mode,
+                            alpha,
+                        })
+                    },
+                ))?,
+                file_textures: refs(&x.file_textures)?,
+                filename: text(x.filename)?,
+                relative_filename: text(x.relative_filename)?,
+                absolute_filename: text(x.absolute_filename)?,
                 content: x.content,
-                uv_set: text(x.uv_set),
+                uv_set: text(x.uv_set)?,
                 wrap: x.wrap,
             })
-            .collect();
-        let cameras = t
-            .cameras
-            .iter()
-            .map(|(i, x)| Camera {
-                base: info(&c.elements[*i]),
+        }))?;
+        let cameras = budget.try_collect(t.cameras.iter().map(|(i, x)| {
+            Ok(Camera {
+                base: info(&c.elements[*i])?,
                 projection_mode: x.projection_mode,
                 field_of_view_deg: x.field_of_view_deg,
                 near_plane: x.near_plane,
@@ -1284,12 +1422,10 @@ impl Scene {
                 orthographic_size: x.orthographic_size,
                 focal_length_mm: x.focal_length_mm,
             })
-            .collect();
-        let lights = t
-            .lights
-            .iter()
-            .map(|(i, x)| Light {
-                base: info(&c.elements[*i]),
+        }))?;
+        let lights = budget.try_collect(t.lights.iter().map(|(i, x)| {
+            Ok(Light {
+                base: info(&c.elements[*i])?,
                 kind: match x.ty {
                     1 => LightKind::Directional,
                     2 => LightKind::Spot,
@@ -1306,123 +1442,133 @@ impl Scene {
                 cast_light: x.cast_light,
                 cast_shadows: x.cast_shadows,
             })
-            .collect();
-        let mut mesh_instances: Vec<Vec<usize>> =
-            c.elements.iter().map(|e| refs(&e.instances)).collect();
+        }))?;
+        let mut mesh_instances =
+            budget.try_collect(c.elements.iter().map(|e| refs(&e.instances)))?;
 
         // Meshes: typed conversion results plus ufbx triangulation of the
         // source faces (corner order is shared; reversed winding mirrors it).
-        let index =
-            scene::index(&c.doc, &limits.index).map_err(|e| Error::Convert(format!("{e:?}")))?;
+        let index = scene::index(&c.doc, &limits.index).map_err(scene_error)?;
         let sources = scene_mesh::extract(&c.doc, &index, &scene_mesh::Limits::default())
-            .map_err(|e| Error::Convert(format!("{e:?}")))?;
-        let sources_by_node: std::collections::HashMap<_, _> =
-            sources.meshes.iter().map(|s| (s.node, s)).collect();
+            .map_err(scene_error)?;
+        let mut sources_by_node = budget.collect(sources.meshes.iter().map(|s| (s.node, s)))?;
+        sources_by_node.sort_unstable_by_key(|s| s.0);
         let tl = TriangulationLimits::default();
         let mut converted = t.meshes;
-        converted.sort_by_key(|(i, _, _)| *i);
-        let mut meshes = Vec::with_capacity(converted.len());
-        let mut done = vec![false; n];
+        converted.sort_unstable_by_key(|(i, _, _)| *i);
+        let mut meshes = Vec::new();
+        budget.reserve(&mut meshes, counts[1])?;
+        let mut done = budget.filled(n, false)?;
         for (i, m, mesh_materials) in converted {
             let e = &c.elements[i];
-            let source = e.node.and_then(|node| sources_by_node.get(&node).copied());
+            let source = e.node.and_then(|node| {
+                sources_by_node
+                    .binary_search_by_key(&node, |s| s.0)
+                    .ok()
+                    .map(|k| sources_by_node[k].1)
+            });
             let triangles = match source {
-                Some(s) => triangulate(s, &m, &tl)?,
+                Some(s) => triangulate(s, &m, &tl, &budget)?,
                 None => Vec::new(),
             };
-            let materials = mesh_materials.iter().filter_map(|&k| r(k)).collect();
+            let materials = refs(&mesh_materials)?;
             let instances = std::mem::take(&mut mesh_instances[i]);
-            let base = info(e);
+            let base = info(e)?;
             done[i] = true;
             meshes.push((
                 i,
-                crate::scene_geometry::public_mesh(m, base, materials, instances, triangles),
+                crate::scene_geometry::public_mesh(
+                    m, base, materials, instances, triangles, &budget,
+                )?,
             ));
         }
         // Meshes that failed conversion stay as empty meshes so indices hold.
         for (i, e) in c.elements.iter().enumerate() {
             if e.ty == T::Mesh && !done[i] {
                 let mut m = Mesh {
-                    base: info(e),
+                    base: info(e)?,
                     ..Mesh::default()
                 };
                 m.instances = std::mem::take(&mut mesh_instances[i]);
                 meshes.push((i, m));
             }
         }
-        meshes.sort_by_key(|(i, _)| *i);
-        let mut meshes: Vec<Mesh> = meshes.into_iter().map(|(_, m)| m).collect();
+        meshes.sort_unstable_by_key(|(i, _)| *i);
+        let mut meshes = budget.collect(meshes.into_iter().map(|(_, m)| m))?;
 
         let st = &c.settings;
-        let bone_refs = |e: &canon_scene::Element, want: T| -> Vec<usize> {
-            e.dst_conns
-                .iter()
-                .filter(|(k, p)| p.is_empty() && c.elements[*k].ty == want)
-                .filter_map(|(k, _)| r(*k))
-                .collect()
+        let bone_refs = |e: &canon_scene::Element, want: T| {
+            budget.collect(
+                e.dst_conns
+                    .iter()
+                    .filter(|(k, p)| p.is_empty() && c.elements[*k].ty == want)
+                    .filter_map(|(k, _)| r(*k)),
+            )
         };
         if !c.deformers.skins.is_empty() || !c.deformers.blends.is_empty() {
+            let mut seen = budget.filled(n, 0usize)?;
+            let mut stamp = 0usize;
             for (mesh, e) in meshes
                 .iter_mut()
                 .zip(c.elements.iter().filter(|e| e.ty == T::Mesh))
             {
-                let fetch = |ty| {
-                    let mut out = bone_refs(e, ty);
+                let mut fetch = |ty| -> Result<Vec<usize>, Error> {
+                    stamp += 1;
+                    let mut out = bone_refs(e, ty)?;
+                    for &k in &out {
+                        seen[k] = stamp;
+                    }
                     if let Some(&node) = e.instances.first() {
-                        for k in bone_refs(&c.elements[node], ty) {
-                            if !out.contains(&k) {
-                                out.push(k);
+                        for k in bone_refs(&c.elements[node], ty)? {
+                            if seen[k] != stamp {
+                                seen[k] = stamp;
+                                budget.push(&mut out, k)?;
                             }
                         }
                     }
-                    out
+                    Ok(out)
                 };
-                mesh.skin_deformers = fetch(T::SkinDeformer);
-                mesh.blend_deformers = fetch(T::BlendDeformer);
+                mesh.skin_deformers = fetch(T::SkinDeformer)?;
+                mesh.blend_deformers = fetch(T::BlendDeformer)?;
             }
         }
-        let bones = c
-            .elements
-            .iter()
-            .filter(|e| e.ty == T::Bone)
-            .map(|e| crate::Bone {
-                name: String::from_utf8_lossy(&e.name).into_owned(),
+        let bones = budget.try_collect(c.elements.iter().filter(|e| e.ty == T::Bone).map(|e| {
+            Ok(crate::Bone {
+                name: budget.text(&e.name)?,
                 source_id: e.source_id,
-                instances: refs(&e.instances),
+                instances: refs(&e.instances)?,
                 radius: real(e.obj.get("radius")),
                 relative_length: real(e.obj.get("relative_length")),
                 is_root: matches!(e.obj.get("is_root"), Some(V::Bool(true))),
             })
-            .collect();
+        }))?;
         let mut d = std::mem::take(&mut c.deformers);
         for (_, skin) in &mut d.skins {
-            skin.clusters = refs(&skin.clusters);
+            skin.clusters = refs(&skin.clusters)?;
         }
         for (_, cluster) in &mut d.clusters {
             cluster.bone_node = cluster.bone_node.and_then(r);
         }
         for (_, blend) in &mut d.blends {
-            blend.channels = refs(&blend.channels);
+            blend.channels = refs(&blend.channels)?;
         }
         for (_, channel) in &mut d.channels {
             channel.target_shape = channel.target_shape.and_then(r);
             for key in &mut channel.keyframes {
-                key.shape =
-                    r(key.shape).ok_or_else(|| Error::Convert("blend target index".into()))?;
+                key.shape = r(key.shape).ok_or(Error::InvalidData("blend target index"))?;
             }
         }
         for (_, pose) in &mut d.poses {
             for b in &mut pose.bone_poses {
-                b.bone_node =
-                    r(b.bone_node).ok_or_else(|| Error::Convert("pose node index".into()))?;
+                b.bone_node = r(b.bone_node).ok_or(Error::InvalidData("pose node index"))?;
             }
         }
-        let skin_deformers = d.skins.into_iter().map(|(_, v)| v).collect();
-        let skin_clusters = d.clusters.into_iter().map(|(_, v)| v).collect();
-        let blend_deformers = d.blends.into_iter().map(|(_, v)| v).collect();
-        let blend_channels = d.channels.into_iter().map(|(_, v)| v).collect();
-        let blend_shapes = d.shapes.into_iter().map(|(_, v)| v).collect();
-        let poses = d.poses.into_iter().map(|(_, v)| v).collect();
+        let skin_deformers = budget.collect(d.skins.into_iter().map(|(_, v)| v))?;
+        let skin_clusters = budget.collect(d.clusters.into_iter().map(|(_, v)| v))?;
+        let blend_deformers = budget.collect(d.blends.into_iter().map(|(_, v)| v))?;
+        let blend_channels = budget.collect(d.channels.into_iter().map(|(_, v)| v))?;
+        let blend_shapes = budget.collect(d.shapes.into_iter().map(|(_, v)| v))?;
+        let poses = budget.collect(d.poses.into_iter().map(|(_, v)| v))?;
         let md = &c.metadata;
         let axes = match st.get("axes") {
             Some(V::Obj(a)) => CoordinateAxes {
@@ -1433,8 +1579,8 @@ impl Scene {
             _ => CoordinateAxes::RIGHT_HANDED_Y_UP,
         };
         let app = |k: &str| match md.get("original_application") {
-            Some(V::Obj(a)) => string(a.get(k)),
-            _ => String::new(),
+            Some(V::Obj(a)) => projection_string(&budget, a.get(k)),
+            _ => Ok(String::new()),
         };
         let settings = SceneSettings {
             axes,
@@ -1445,15 +1591,15 @@ impl Scene {
             ambient_color: arr(st.get("ambient_color"), [0.0; 3]),
             version: c.doc.version,
             ascii: c.ascii,
-            creator: string(md.get("creator")),
-            original_application: [app("vendor"), app("name"), app("version")],
-            original_file_path: String::from_utf8_lossy(&c.original_file_path.0).into_owned(),
+            creator: projection_string(&budget, md.get("creator"))?,
+            original_application: [app("vendor")?, app("name")?, app("version")?],
+            original_file_path: budget.text(&c.original_file_path.0)?,
         };
-        let unsupported = c
-            .unsupported
-            .iter()
-            .map(|&(kind, source_id)| Unsupported { kind, source_id })
-            .collect();
+        let unsupported = budget.collect(
+            c.unsupported
+                .iter()
+                .map(|&(kind, source_id)| Unsupported { kind, source_id }),
+        )?;
         Ok(Scene {
             animation: std::mem::take(&mut c.animation),
             nodes,
@@ -1480,8 +1626,9 @@ fn triangulate(
     source: &scene_mesh::Mesh<'_>,
     m: &crate::scene_geometry::Mesh,
     limits: &TriangulationLimits,
+    budget: &crate::api_alloc::Budget,
 ) -> Result<Vec<u32>, Error> {
-    let bad = |e: crate::scene::Error| Error::Convert(format!("triangulation: {e:?}"));
+    let bad = scene_error;
     let faces = source.faces().map_err(bad)?;
     let mut out = Vec::new();
     let mut buf = Vec::new();
@@ -1491,15 +1638,21 @@ fn triangulate(
         if m.face(face)
             != Some((
                 u32::try_from(begin)
-                    .map_err(|_| Error::Convert("triangulation: index overflow".into()))?,
+                    .map_err(|_| Error::InvalidData("triangulation: index overflow"))?,
                 u32::try_from(count)
-                    .map_err(|_| Error::Convert("triangulation: count overflow".into()))?,
+                    .map_err(|_| Error::InvalidData("triangulation: count overflow"))?,
             ))
         {
-            return Err(Error::Convert("triangulation: face layout mismatch".into()));
+            return Err(Error::InvalidData("triangulation: face layout mismatch"));
         }
         buf.clear();
-        buf.resize(count.saturating_sub(2) * 3, 0usize);
+        let corners = count
+            .saturating_sub(2)
+            .checked_mul(3)
+            .ok_or(Error::ResourceLimit("triangulation corners"))?;
+        budget.reserve(&mut buf, corners)?;
+        buf.resize(corners, 0usize);
+        budget.reserve(&mut out, corners)?;
         let written = source
             .triangulate_with_limits(begin, count, &mut buf, limits)
             .map_err(bad)?;
@@ -1512,17 +1665,42 @@ fn triangulate(
             };
             out.push(
                 u32::try_from(c)
-                    .map_err(|_| Error::Convert("triangulation: corner overflow".into()))?,
+                    .map_err(|_| Error::InvalidData("triangulation: corner overflow"))?,
             );
         }
     }
     Ok(out)
 }
 
-fn string(v: Option<&V>) -> String {
+fn projection_string(b: &crate::api_alloc::Budget, v: Option<&V>) -> Result<String, Error> {
     match v {
-        Some(V::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
-        _ => String::new(),
+        Some(V::Bytes(bytes)) => b.text(bytes),
+        _ => Ok(String::new()),
+    }
+}
+
+pub(crate) fn property_error(e: crate::scene_property::Error) -> Error {
+    match e {
+        crate::scene_property::Error::AllocationFailed => Error::Allocation,
+        crate::scene_property::Error::LimitExceeded => {
+            Error::ResourceLimit("property allocation limit")
+        }
+        _ => match crate::api_alloc::Budget::new(usize::MAX)
+            .format(format_args!("properties: {e:?}"))
+        {
+            Ok(s) => Error::Convert(s),
+            Err(e) => e,
+        },
+    }
+}
+pub(crate) fn scene_error(e: crate::scene::Error) -> Error {
+    match e {
+        crate::scene::Error::AllocationFailed => Error::Allocation,
+        crate::scene::Error::LimitExceeded(s) => Error::ResourceLimit(s),
+        _ => match crate::api_alloc::Budget::new(usize::MAX).format(format_args!("{e:?}")) {
+            Ok(message) => Error::Convert(message),
+            Err(error) => error,
+        },
     }
 }
 
@@ -1552,6 +1730,172 @@ fn arr<const N: usize>(v: Option<&V>, default: [f64; N]) -> [f64; N] {
             out
         }
         _ => default,
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+    const FIXTURE: &[u8] = br#"; FBX 7.4.0 project file
+FBXHeaderExtension: { FBXVersion: 7400 }
+Objects: {
+ Geometry: 1, "Geometry::Tri", "Mesh" {
+  Vertices: *9 { a: 0,0,0,1,0,0,0,1,0 }
+  PolygonVertexIndex: *3 { a: 0,1,-3 }
+  LayerElementUV: 0 {
+   Name: "UV0"
+   MappingInformationType: "ByPolygonVertex"
+   ReferenceInformationType: "Direct"
+   UV: *6 { a: 0,0,1,0,0,1 }
+  }
+  LayerElementColor: 0 {
+   Name: "Color0"
+   MappingInformationType: "ByPolygonVertex"
+   ReferenceInformationType: "Direct"
+   Colors: *12 { a: 1,0,0,1,0,1,0,1,0,0,1,1 }
+  }
+  Layer: 0 {
+   LayerElement: { Type: "LayerElementUV"
+    TypedIndex: 0 }
+   LayerElement: { Type: "LayerElementColor"
+    TypedIndex: 0 }
+  }
+ }
+ Model: 2, "Model::Tri", "Mesh" { }
+ Material: 3, "Material::Mat", "" {
+  ShadingModel: "Phong"
+  Properties70: { P: "Opacity", "Number", "", "", 0.25 }
+ }
+ Texture: 4, "Texture::File", "" { FileName: "image.png" }
+ LayeredTexture: 5, "LayeredTexture::Layer", "" { BlendModes: *1 { a: 30 }
+  Alphas: *1 { a: 0.5 } }
+ NodeAttribute: 6, "NodeAttribute::Camera", "Camera" { }
+ Model: 7, "Model::Camera", "Camera" { }
+ NodeAttribute: 8, "NodeAttribute::Light", "Light" { }
+ Model: 9, "Model::Light", "Light" { }
+ Model: 10, "Model::Bone", "LimbNode" { }
+ NodeAttribute: 11, "NodeAttribute::Bone", "LimbNode" { }
+ Deformer: 12, "Deformer::Skin", "Skin" { SkinningType: "Linear" }
+ Deformer: 13, "SubDeformer::Cluster", "Cluster" {
+  Indexes: *1 { a: 0 }
+  Weights: *1 { a: 1 }
+  Transform: *16 { a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1 }
+  TransformLink: *16 { a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1 }
+ }
+ Deformer: 14, "Deformer::Blend", "BlendShape" { }
+ Deformer: 15, "SubDeformer::Channel", "BlendShapeChannel" {
+  DeformPercent: 50
+  FullWeights: *1 { a: 100 }
+ }
+ Geometry: 16, "Geometry::Shape", "Shape" {
+  Indexes: *1 { a: 0 }
+  Vertices: *3 { a: 1,0,0 }
+ }
+ Pose: 17, "Pose::Bind", "BindPose" {
+  Type: "BindPose"
+  NbPoseNodes: 1
+  PoseNode: { Node: 10
+   Matrix: *16 { a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1 } }
+ }
+}
+Connections: {
+ C: "OO",1,2
+ C: "OO",2,0
+ C: "OO",3,2
+ C: "OP",5,3,"UnmappedAttachment"
+ C: "OO",4,5
+ C: "OO",6,7
+ C: "OO",7,0
+ C: "OO",8,9
+ C: "OO",9,0
+ C: "OO",10,0
+ C: "OO",11,10
+ C: "OO",12,1
+ C: "OO",13,12
+ C: "OO",10,13
+ C: "OO",14,1
+ C: "OO",15,14
+ C: "OO",16,15
+}
+"#;
+    #[test]
+    fn each_projection_reservation_refusal_is_typed() {
+        let limits = Limits::default().dump_limits();
+        let mut success = None;
+        for n in 0..1000 {
+            let c = canon_scene::project_with(FIXTURE, &limits, true).unwrap();
+            crate::api_alloc::FAIL_AFTER.with(|f| f.set(Some(n)));
+            let result = Scene::from_projection(c, &limits);
+            crate::api_alloc::FAIL_AFTER.with(|f| f.set(None));
+            match result {
+                Ok(_) => {
+                    success = Some(n);
+                    break;
+                }
+                Err(e) => assert_eq!(e, Error::Allocation, "reservation {n}"),
+            }
+        }
+        assert!(success.is_some_and(|n| n >= 30), "{success:?}");
+        eprintln!(
+            "projection reservation sweep: {} refused stages then success",
+            success.unwrap()
+        );
+    }
+    #[test]
+    fn material_source_fallback_and_texture_links() {
+        let scene = load(FIXTURE, &LoadOptions::default()).unwrap();
+        assert_eq!(scene.bones().len(), 1);
+        assert_eq!(scene.skin_deformers().len(), 1);
+        assert_eq!(scene.blend_shapes().len(), 1);
+        assert_eq!(scene.poses().len(), 1);
+        assert_eq!(scene.meshes()[0].uv_sets().len(), 1);
+        assert_eq!(scene.meshes()[0].color_sets().len(), 1);
+        let m = &scene.materials()[0];
+        assert_eq!(m.features().count(), 23);
+        assert_eq!(m.source_property(b"Opacity").unwrap().value_real[0], 0.25);
+        assert!(!m.feature("double_sided").unwrap().enabled);
+        assert!(m.feature("diffuse").unwrap().enabled);
+        assert!(m.feature("specular").unwrap().enabled);
+        assert!(!m.feature("specular").unwrap().is_explicit);
+        assert_eq!(m.textures().len(), 1);
+        assert_eq!(m.textures()[0].material_prop, b"UnmappedAttachment");
+        let layered = &scene.textures()[m.textures()[0].texture];
+        assert!(layered.is_layered());
+        assert_eq!(layered.layers().len(), 1);
+        assert_eq!(layered.layers()[0].alpha, 0.5);
+        // The pinned loader ignores array blend mode 30 (strictly < Overlay).
+        assert_eq!(layered.layers()[0].blend_mode, 0);
+        assert_eq!(layered.file_textures(), &[layered.layers()[0].texture]);
+    }
+    #[test]
+    fn source_template_fallback_preserves_authored_priority() {
+        let input = std::str::from_utf8(FIXTURE).unwrap().replace(
+            "Objects: {",
+            r#"Definitions: {
+ ObjectType: "Material" {
+  PropertyTemplate: "FbxSurfacePhong" {
+   Properties70: {
+    P: "Opacity", "Number", "", "", 0.75
+    P: "TemplateOnly", "Number", "", "", 42
+    P: "Label", "KString", "", "", "from template"
+   }
+  }
+ }
+}
+Objects: {"#,
+        );
+        let s = load(input.as_bytes(), &LoadOptions::default()).unwrap();
+        let m = &s.materials()[0];
+        assert_eq!(m.source_property(b"Opacity").unwrap().value_real[0], 0.25);
+        assert_eq!(
+            m.source_property(b"TemplateOnly").unwrap().value_real[0],
+            42.0
+        );
+        assert_eq!(
+            m.source_property(b"Label").unwrap().value_str,
+            b"from template"
+        );
+        assert!(m.source_property(b"missing").is_none());
     }
 }
 

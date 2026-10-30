@@ -3,8 +3,9 @@ use crate::animation::*;
 use crate::canon::{s, Obj, V};
 use crate::canon_scene::{CanonScene, DumpLimits, ElementType as T};
 use crate::conversion_budget::{Budget, Path};
+use crate::fallible_map::{Map as BTreeMap, Set as BTreeSet};
 use crate::scene_property;
-use std::collections::{BTreeMap, BTreeSet};
+use crate::Error;
 
 fn auto_tangent(
     times: [f64; 3],
@@ -85,7 +86,7 @@ impl Reader<'_, '_> {
             .copied()
             .find(|&c| self.s.doc.nodes[c].name == name)
     }
-    fn array(&self, n: usize, name: &[u8], width: usize, limit: usize) -> Result<Vec<u8>, String> {
+    fn array(&self, n: usize, name: &[u8], width: usize, limit: usize) -> Result<Vec<u8>, Error> {
         let c = self
             .child(n, name)
             .ok_or("animation: missing curve array")?;
@@ -127,14 +128,15 @@ impl Reader<'_, '_> {
             }
         }
 
-        let (_, bytes) = crate::canon_dom::animation_array(&self.s.doc, c, self.s.ascii)
-            .ok_or("animation: invalid curve array")?;
+        let (_, bytes) =
+            crate::canon_dom::animation_array(&self.s.doc, c, self.s.ascii, &self.budget)?
+                .ok_or("animation: invalid curve array")?;
         if bytes.len() > limit || bytes.len() % width != 0 {
             return Err("animation: array limit or type".into());
         }
         Ok(bytes)
     }
-    fn ext(&self, n: usize, name: &[u8]) -> Result<Extrapolation, String> {
+    fn ext(&self, n: usize, name: &[u8]) -> Result<Extrapolation, Error> {
         use crate::canon_dom::{node_data, NodeData, Scalar};
         let mut out = Extrapolation {
             mode: ExtrapolationMode::Constant,
@@ -143,17 +145,23 @@ impl Reader<'_, '_> {
         let Some(n) = self.child(n, name) else {
             return Ok(out);
         };
-        let number = |name| {
+        let number = |name| -> Result<Option<i64>, Error> {
             self.child(n, name)
-                .and_then(|c| match node_data(&self.s.doc, c, self.s.ascii) {
-                    NodeData::Values(v) => v.first().and_then(|x| match x {
-                        Scalar::Num(i, _) => Some(*i),
-                        Scalar::Str(_) => None,
-                    }),
-                    _ => None,
+                .map(|c| {
+                    Ok(
+                        match node_data(&self.s.doc, c, self.s.ascii, &self.budget)? {
+                            NodeData::Values(v) => v.first().and_then(|x| match x {
+                                Scalar::Num(i, _) => Some(*i),
+                                Scalar::Str(_) => None,
+                            }),
+                            _ => None,
+                        },
+                    )
                 })
+                .transpose()
+                .map(Option::flatten)
         };
-        if let Some(c) = number(b"Type") {
+        if let Some(c) = number(b"Type")? {
             let c = i32::try_from(c).map_err(|_| "animation: extrapolation type out of range")?;
             out.mode = match c {
                 65 => ExtrapolationMode::RepeatRelative,
@@ -162,7 +170,7 @@ impl Reader<'_, '_> {
                 82 => ExtrapolationMode::Repeat,
                 _ => ExtrapolationMode::Constant,
             };
-            out.repeat_count = i32::try_from(number(b"Repetition").unwrap_or(-1))
+            out.repeat_count = i32::try_from(number(b"Repetition")?.unwrap_or(-1))
                 .map_err(|_| "animation: extrapolation repetition out of range")?
                 .max(-1);
         }
@@ -174,7 +182,7 @@ impl Reader<'_, '_> {
         n: usize,
         limit: usize,
         max_keys: usize,
-    ) -> Result<AnimationCurve, String> {
+    ) -> Result<AnimationCurve, Error> {
         let ticks = self.array(n, b"KeyTime", 8, limit.min(max_keys.saturating_mul(8)))?;
         let values = self.array(n, b"KeyValueFloat", 8, limit)?;
         let flags = self.array(n, b"KeyAttrFlags", 4, limit)?;
@@ -198,42 +206,46 @@ impl Reader<'_, '_> {
         {
             return Err("animation: mismatched curve arrays".into());
         }
-        let times: Vec<i64> = ticks
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|c| i64::from_le_bytes(*c))
-            .collect();
+        let times: Vec<i64> = self.budget.collect(
+            ticks
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| i64::from_le_bytes(*c)),
+        )?;
         if times.windows(2).any(|p| p[0] > p[1]) {
             return Err("animation: unsorted key times".into());
         }
-        let values: Vec<f64> = values
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|c| f64::from_le_bytes(*c))
-            .collect();
+        let values: Vec<f64> = self.budget.collect(
+            values
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| f64::from_le_bytes(*c)),
+        )?;
         if values.iter().any(|v| !v.is_finite()) {
             return Err("animation: nonfinite key value".into());
         }
-        let flags: Vec<u32> = flags
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c))
-            .collect();
-        let attrs: Vec<f32> = attrs
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| f32::from_le_bytes(*c))
-            .collect();
-        let refs: Vec<i32> = refs
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| i32::from_le_bytes(*c))
-            .collect();
+        let flags: Vec<u32> = self.budget.collect(
+            flags
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c)),
+        )?;
+        let attrs: Vec<f32> = self.budget.collect(
+            attrs
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c)),
+        )?;
+        let refs: Vec<i32> = self.budget.collect(
+            refs.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| i32::from_le_bytes(*c)),
+        )?;
         let mut total = 0usize;
         for &r in &refs {
             if r <= 0 {
@@ -250,8 +262,7 @@ impl Reader<'_, '_> {
             return Err("animation: attribute count mismatch".into());
         }
         let mut keys = Vec::new();
-        crate::allocation::reserve(&mut keys, count, &mut 0, limit)
-            .map_err(|_| "animation: allocation")?;
+        self.budget.reserve(&mut keys, count)?;
         let (mut sl, mut wl) = (0.0f32, 0.333333f32);
         let mut prev = 0.0;
         let mut run = 0;
@@ -371,7 +382,7 @@ impl Reader<'_, '_> {
             {
                 return Err("animation: nonfinite tangent".into());
             }
-            keys.push(key);
+            self.budget.push(&mut keys, key)?;
             sl = nsl;
             wl = nwl;
             prev = time;
@@ -390,15 +401,18 @@ impl Reader<'_, '_> {
         })
     }
 }
-fn property(p: &scene_property::AuthoredProperty<'_>) -> EvaluatedProperty {
-    EvaluatedProperty {
+fn property(
+    p: &scene_property::AuthoredProperty<'_>,
+    a: &crate::api_alloc::Budget,
+) -> Result<EvaluatedProperty, Error> {
+    Ok(EvaluatedProperty {
         property_type: p.kind as u8,
         flags: p.flags,
         value_int: p.value_int,
         components: p.value_real,
-        value_str: p.value_str.to_vec(),
-        value_blob: p.value_blob.to_vec(),
-    }
+        value_str: a.bytes(p.value_str)?,
+        value_blob: a.bytes(p.value_blob)?,
+    })
 }
 fn prop_obj(name: &[u8], p: &EvaluatedProperty) -> V {
     V::Obj(
@@ -418,14 +432,17 @@ fn binding_obj(b: &AnimationBinding, a: &Animation) -> Obj {
         .with("prop_name", s(&b.property))
         .with("anim_value", V::Ref(Some(a.values[b.value].element)))
 }
-fn child_index(doc: &crate::syntax::Document<'_>) -> Vec<Vec<usize>> {
-    let mut children = vec![Vec::new(); doc.nodes.len()];
+fn child_index(
+    doc: &crate::syntax::Document<'_>,
+    a: &crate::api_alloc::Budget,
+) -> Result<Vec<Vec<usize>>, Error> {
+    let mut children = a.filled(doc.nodes.len(), Vec::new())?;
     for (i, n) in doc.nodes.iter().enumerate() {
         if let Some(p) = n.parent {
-            children[p].push(i);
+            a.push(&mut children[p], i)?;
         }
     }
-    children
+    Ok(children)
 }
 // Validate and charge every source array before either helper detection or key
 // reconstruction can decode it. Repeated connections never repeat decoding.
@@ -435,7 +452,7 @@ fn preflight_curves(
     children: &[Vec<usize>],
     limits: &DumpLimits,
     budget: &Budget,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     for e in elements {
         if e.ty != T::AnimCurve {
             continue;
@@ -484,23 +501,20 @@ fn preflight_curves(
     }
     Ok(())
 }
-fn validate_cycles(
-    elements: &[crate::canon_scene::Element],
-    budget: &Budget,
-) -> Result<(), String> {
+fn validate_cycles(elements: &[crate::canon_scene::Element], budget: &Budget) -> Result<(), Error> {
     let anim = |k: usize| {
         matches!(
             elements[k].ty,
             T::AnimCurve | T::AnimValue | T::AnimLayer | T::AnimStack
         )
     };
-    let mut color = vec![0u8; elements.len()];
+    let mut color = budget.filled(elements.len(), 0u8)?;
     for start in 0..elements.len() {
         if !anim(start) || color[start] != 0 {
             continue;
         }
         color[start] = 1;
-        let mut stack = vec![(start, 0)];
+        let mut stack = budget.collect([(start, 0)])?;
         while let Some((i, next)) = stack.last_mut() {
             let conns = &elements[*i].src_conns;
             if *next == conns.len() {
@@ -519,26 +533,28 @@ fn validate_cycles(
             }
             if color[k] == 0 {
                 color[k] = 1;
-                stack.push((k, 0));
+                budget.push(&mut stack, (k, 0))?;
             }
         }
     }
     Ok(())
 }
 /// Element-indexed helper and owner membership, built once per projection.
+type HelperIndex = (Vec<Option<usize>>, Vec<Option<usize>>);
 pub(crate) fn helper_index(
     n: usize,
     pairs: &[(usize, usize)],
-) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
-    let mut helper = vec![None; n];
-    let mut owner = vec![None; n];
+    budget: &crate::api_alloc::Budget,
+) -> Result<HelperIndex, Error> {
+    let mut helper = budget.filled(n, None)?;
+    let mut owner = budget.filled(n, None)?;
     for &(o, h) in pairs {
         helper[o] = Some(h);
         owner[h] = Some(o);
     }
-    (helper, owner)
+    Ok((helper, owner))
 }
-pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), String> {
+pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), Error> {
     let budget = Budget::new(
         limits.max_allocation,
         limits.max_animation_work,
@@ -553,25 +569,23 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             budget.charge(prop.len(), 8)?;
         }
     }
-    let children = child_index(&scn.doc);
+    let children = child_index(&scn.doc, &budget)?;
     preflight_curves(&scn.doc, &scn.elements, &children, limits, &budget)?;
     validate_cycles(&scn.elements, &budget)?;
     let mut a = std::mem::take(&mut scn.animation);
-    a.ids = scn.elements.iter().map(|e| e.source_id).collect();
-    let mut authored = vec![BTreeMap::new(); scn.elements.len()];
-    let mut defaults = vec![BTreeMap::new(); scn.elements.len()];
-    let (helper_for, owner_for) = helper_index(scn.elements.len(), &scn.scale_helpers);
+    a.allocation_limit = limits.max_allocation;
+    a.ids = budget.collect(scn.elements.iter().map(|e| e.source_id))?;
+    let mut authored = budget.filled(scn.elements.len(), BTreeMap::new())?;
+    let mut defaults = budget.filled(scn.elements.len(), BTreeMap::new())?;
+    let (helper_for, owner_for) = helper_index(scn.elements.len(), &scn.scale_helpers, &budget)?;
     let r = Reader {
         s: scn,
         children,
         budget,
     };
-    let channel_index: BTreeMap<_, _> = scn
-        .deformers
-        .channels
-        .iter()
-        .map(|(k, c)| (*k, c))
-        .collect();
+    let alloc = &r.budget;
+    let channel_index: BTreeMap<_, _> =
+        BTreeMap::try_from_iter(scn.deformers.channels.iter().map(|(k, c)| (*k, c)), alloc)?;
     for (i, e) in scn.elements.iter().enumerate() {
         let Some(n) = e.node else {
             continue;
@@ -585,11 +599,11 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 limits,
             )?;
             for p in &layers.authored {
-                authored[i].insert(p.name.to_vec(), property(p));
+                authored[i].try_insert(alloc.bytes(p.name)?, property(p, alloc)?, alloc)?;
             }
             if let Some(list) = layers.defaults {
                 for p in &list {
-                    defaults[i].insert(p.name.to_vec(), property(p));
+                    defaults[i].try_insert(alloc.bytes(p.name)?, property(p, alloc)?, alloc)?;
                 }
             }
         }
@@ -603,25 +617,28 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                     limits.max_properties,
                     limits.max_allocation,
                 )
-                .map_err(|_| "animation: shape property")?;
+                .map_err(crate::api::property_error)?;
                 l.find(&e.name).map_or(weight * 100.0, |p| p.value_real[0])
             } else if authored[i].is_empty() {
                 use crate::canon_dom::{node_data, NodeData, Scalar};
                 r.child(n, b"DeformPercent")
-                    .and_then(|c| match node_data(&scn.doc, c, scn.ascii) {
-                        NodeData::Values(v) => match v.first() {
-                            Some(Scalar::Num(_, f)) => Some(*f),
+                    .map(|c| {
+                        Ok::<_, Error>(match node_data(&scn.doc, c, scn.ascii, alloc)? {
+                            NodeData::Values(v) => match v.first() {
+                                Some(Scalar::Num(_, f)) => Some(*f),
+                                _ => None,
+                            },
                             _ => None,
-                        },
-                        _ => None,
+                        })
                     })
+                    .transpose()?
+                    .flatten()
                     .unwrap_or(100.0)
             } else {
                 weight * 100.0
             };
-            authored[i]
-                .entry(b"DeformPercent".to_vec())
-                .or_insert(EvaluatedProperty {
+            authored[i].try_get_or_insert_with(alloc.bytes(b"DeformPercent")?, alloc, || {
+                Ok(EvaluatedProperty {
                     property_type: 3,
                     flags: if scn.doc.nodes[n].name == b"Shape" && percent != 0.0 {
                         0x8000
@@ -630,14 +647,17 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                     },
                     components: [percent, 0.0, 0.0, 0.0],
                     ..EvaluatedProperty::default()
-                });
+                })
+            })?;
         }
         if e.ty == T::AnimCurve {
-            a.curves
-                .push(r.curve(i, n, limits.max_allocation, limits.max_keys)?);
+            alloc.push(
+                &mut a.curves,
+                r.curve(i, n, limits.max_allocation, limits.max_keys)?,
+            )?;
         }
     }
-    let mut curve_index = vec![None; scn.elements.len()];
+    let mut curve_index = alloc.filled(scn.elements.len(), None)?;
     for (k, c) in a.curves.iter().enumerate() {
         curve_index[c.element] = Some(k);
     }
@@ -665,24 +685,24 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 .map_or(0.0, |p| p.components[0]);
         }
         r.budget.sort_work(e.dst_conns.len())?;
-        let mut conns = e.dst_conns.clone();
-        conns.sort_by(|a, b| a.1.cmp(&b.1));
+        let mut conns = alloc.collect(e.dst_conns.iter())?;
+        alloc.stable_sort(&mut conns, |a, b| a.1.cmp(&b.1))?;
         for (src, name) in conns {
-            if let Some(k) = curve_index[src] {
+            if let Some(k) = curve_index[*src] {
                 let c = match name.as_slice() {
                     b"Y" | b"d|Y" => 1,
                     b"Z" | b"d|Z" => 2,
                     _ => 0,
                 };
                 v.curves[c] = Some(k);
-                if let Some(p) = get(&name) {
+                if let Some(p) = get(name) {
                     v.default_value[c] = p.components[0];
                 }
             }
         }
-        a.values.push(v);
+        alloc.push(&mut a.values, v)?;
     }
-    let mut value_index = vec![None; scn.elements.len()];
+    let mut value_index = alloc.filled(scn.elements.len(), None)?;
     for (k, v) in a.values.iter().enumerate() {
         value_index[v.element] = Some(k);
     }
@@ -693,31 +713,30 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             if name.is_empty() {
                 continue;
             }
-            let p = authored[*dst].entry(name.clone()).or_insert_with(|| {
-                let mut p =
-                    defaults[*dst]
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| EvaluatedProperty {
-                            flags: 0,
-                            components: if name == b"Lcl Scaling" {
-                                [1.0, 1.0, 1.0, 0.0]
-                            } else {
-                                [0.0; 4]
-                            },
-                            property_type: match name.as_slice() {
-                                b"Lcl Translation" => 9,
-                                b"Lcl Rotation" => 10,
-                                b"Lcl Scaling" => 11,
-                                _ => 0,
-                            },
-                            ..EvaluatedProperty::default()
-                        });
+            let p = authored[*dst].try_get_or_insert_with(alloc.bytes(name)?, alloc, || {
+                let mut p = match defaults[*dst].get(name) {
+                    Some(p) => p.try_clone(alloc)?,
+                    None => EvaluatedProperty {
+                        flags: 0,
+                        components: if name == b"Lcl Scaling" {
+                            [1.0, 1.0, 1.0, 0.0]
+                        } else {
+                            [0.0; 4]
+                        },
+                        property_type: match name.as_slice() {
+                            b"Lcl Translation" => 9,
+                            b"Lcl Rotation" => 10,
+                            b"Lcl Scaling" => 11,
+                            _ => 0,
+                        },
+                        ..EvaluatedProperty::default()
+                    },
+                };
                 p.flags |= 0x1001;
                 p.value_str.clear();
                 p.value_blob.clear();
-                p
-            });
+                Ok(p)
+            })?;
             p.flags |= 0x2000;
         }
     }
@@ -731,7 +750,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         let mut layer = AnimationLayer {
             element: i,
             source_id: e.source_id.unwrap_or(0),
-            name: String::from_utf8_lossy(&e.name).into_owned(),
+            name: alloc.text(&e.name)?,
             weight: clamp_weight(get(b"Weight").map_or(1.0, |p| p.components[0] / 100.0)),
             weight_is_animated: false,
             blended: mode == 0 || mode == 2,
@@ -752,33 +771,36 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             let Some(value) = value_index[*src] else {
                 continue;
             };
-            if !seen.insert(value) {
+            if !seen.try_insert(value, alloc)? {
                 continue;
             }
-            layer.values.push(value);
+            alloc.push(&mut layer.values, value)?;
             r.budget.work(scn.elements[*src].src_conns.len())?;
             for (dst, prop) in &scn.elements[*src].src_conns {
                 if !prop.is_empty() {
                     r.budget
                         .charge(1, std::mem::size_of::<AnimationBinding>() * 4)?;
                     r.budget.charge(prop.len(), 2)?;
-                    layer.bindings.push(AnimationBinding {
-                        element: *dst,
-                        source_id: scn.elements[*dst].source_id.unwrap_or(0),
-                        property: prop.clone(),
-                        value,
-                    });
+                    alloc.push(
+                        &mut layer.bindings,
+                        AnimationBinding {
+                            element: *dst,
+                            source_id: scn.elements[*dst].source_id.unwrap_or(0),
+                            property: alloc.bytes(prop)?,
+                            value,
+                        },
+                    )?;
                 }
             }
         }
         r.budget.sort_work(layer.bindings.len())?;
-        layer
-            .bindings
-            .sort_by(|a, b| a.element.cmp(&b.element).then(a.property.cmp(&b.property)));
+        alloc.stable_sort(&mut layer.bindings, |a, b| {
+            a.element.cmp(&b.element).then(a.property.cmp(&b.property))
+        })?;
         layer.weight_is_animated = get(b"Weight").is_some_and(|p| p.flags & 0x2000 != 0);
-        a.layers.push(layer);
+        alloc.push(&mut a.layers, layer)?;
     }
-    let mut layer_index = vec![None; scn.elements.len()];
+    let mut layer_index = alloc.filled(scn.elements.len(), None)?;
     for (k, l) in a.layers.iter().enumerate() {
         layer_index[l.element] = Some(k);
     }
@@ -802,34 +824,38 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 continue;
             }
             if let Some(k) = layer_index[*src] {
-                if seen.insert(k) {
-                    layers.push(k);
+                if seen.try_insert(k, alloc)? {
+                    alloc.push(&mut layers, k)?;
                 }
             }
         }
-        a.stacks.push(AnimationStack {
-            element: i,
-            source_id: e.source_id.unwrap_or(0),
-            name: String::from_utf8_lossy(&e.name).into_owned(),
-            time_begin,
-            time_end,
-            layers,
-        });
+        alloc.push(
+            &mut a.stacks,
+            AnimationStack {
+                element: i,
+                source_id: e.source_id.unwrap_or(0),
+                name: alloc.text(&e.name)?,
+                time_begin,
+                time_end,
+                layers,
+            },
+        )?;
     }
     a.default_stack =
         (0..a.stacks.len()).min_by_key(|&i| scn.elements[a.stacks[i].element].ordinal);
     for (i, (base, def)) in authored.iter().zip(&defaults).enumerate() {
         for (name, p) in def.iter().chain(base) {
-            a.properties.insert((i, name.clone()), p.clone());
+            a.properties
+                .try_insert((i, alloc.bytes(name)?), p.try_clone(alloc)?, alloc)?;
         }
     }
-    let mut node_element = vec![None; scn.doc.nodes.len()];
+    let mut node_element = alloc.filled(scn.doc.nodes.len(), None)?;
     for (i, e) in scn.elements.iter().enumerate() {
         if let Some(n) = e.node {
             node_element[n].get_or_insert(i);
         }
     }
-    let mut node_slot = vec![None; scn.elements.len()];
+    let mut node_slot = alloc.filled(scn.elements.len(), None)?;
     for (k, n) in a.nodes.iter().enumerate() {
         node_slot[n.element] = Some(k);
     }
@@ -838,10 +864,13 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         if e.ty == T::BlendChannel && e.node.is_some_and(|n| scn.doc.nodes[n].name == b"Shape") {
             let owner = scn.doc.nodes[e.node.unwrap()].parent;
             if let Some(owner) = owner.and_then(|n| node_element[n]) {
-                if a.properties.contains_key(&(owner, e.name.clone())) {
-                    a.connections
-                        .insert((i, b"DeformPercent".to_vec()), (owner, e.name.clone()));
-                    if let Some(p) = a.properties.get_mut(&(i, b"DeformPercent".to_vec())) {
+                if a.properties.contains_key(&(owner, alloc.bytes(&e.name)?)) {
+                    a.connections.try_insert(
+                        (i, alloc.bytes(b"DeformPercent")?),
+                        (owner, alloc.bytes(&e.name)?),
+                        alloc,
+                    )?;
+                    if let Some(p) = a.properties.get_mut(&(i, alloc.bytes(b"DeformPercent")?)) {
                         p.flags |= 0x8000;
                     }
                     if let Some(p) = authored[i].get_mut(b"DeformPercent".as_slice()) {
@@ -851,22 +880,17 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             }
         }
     }
-    a.channels = scn.deformers.channels.iter().map(|(i, _)| *i).collect();
-    a.clusters = scn
-        .deformers
-        .clusters
-        .iter()
-        .map(|(_, c)| {
-            (
-                c.bone_node.and_then(|e| node_slot[e]),
-                if c.bone_node.is_some() {
-                    c.geometry_to_bone.0
-                } else {
-                    c.geometry_to_world.0
-                },
-            )
-        })
-        .collect();
+    a.channels = alloc.collect(scn.deformers.channels.iter().map(|(i, _)| *i))?;
+    a.clusters = alloc.collect(scn.deformers.clusters.iter().map(|(_, c)| {
+        (
+            c.bone_node.and_then(|e| node_slot[e]),
+            if c.bone_node.is_some() {
+                c.geometry_to_bone.0
+            } else {
+                c.geometry_to_world.0
+            },
+        )
+    }))?;
     if !scn.lean {
         for (i, e) in scn.elements.iter_mut().enumerate() {
             if let Some(V::Obj(header)) = e.obj.get_mut("element") {
@@ -1005,7 +1029,7 @@ pub(crate) fn scale_helpers(
     connections: &mut Vec<(usize, usize, Vec<u8>)>,
     ascii: bool,
     limits: &DumpLimits,
-) -> Result<Vec<(usize, usize)>, String> {
+) -> Result<Vec<(usize, usize)>, Error> {
     let budget = Budget::new(
         limits.max_allocation,
         limits.max_animation_work,
@@ -1014,13 +1038,13 @@ pub(crate) fn scale_helpers(
     budget.charge(doc.nodes.len(), 64)?;
     budget.charge(elements.len(), 512)?;
     budget.work(doc.nodes.len() + elements.len())?;
-    let dom_children = child_index(doc);
+    let dom_children = child_index(doc, &budget)?;
     preflight_curves(doc, elements, &dom_children, limits, &budget)?;
     let n = elements.len();
-    let mut original = vec![0; n];
-    let mut scale = vec![[1.0; 3]; n];
-    let mut animated = vec![false; n];
-    let mut parent = vec![None; n];
+    let mut original = budget.filled(n, 0)?;
+    let mut scale = budget.filled(n, [1.0; 3])?;
+    let mut animated = budget.filled(n, false)?;
+    let mut parent = budget.filled(n, None)?;
     for (i, e) in elements.iter().enumerate() {
         if e.ty != T::Node {
             continue;
@@ -1029,7 +1053,7 @@ pub(crate) fn scale_helpers(
             continue;
         };
         let l = scene_property::layers(doc, node, limits.max_properties, limits.max_allocation)
-            .map_err(|_| "animation: helper properties")?;
+            .map_err(crate::api::property_error)?;
         original[i] = match l.find(b"InheritType").map_or(-1, |p| p.value_int) {
             0 => 2,
             2 => 1,
@@ -1039,14 +1063,14 @@ pub(crate) fn scale_helpers(
             scale[i].copy_from_slice(&p.value_real[..3]);
         }
     }
-    let mut constant = vec![[f64::NAN; 3]; n];
-    let mut has_constant = vec![true; n];
+    let mut constant = budget.filled(n, [f64::NAN; 3])?;
+    let mut has_constant = budget.filled(n, true)?;
     for (i, e) in elements.iter().enumerate() {
         if e.ty == T::AnimValue {
             if let Some(node) = e.node {
                 let l =
                     scene_property::layers(doc, node, limits.max_properties, limits.max_allocation)
-                        .map_err(|_| "animation: constant value")?;
+                        .map_err(crate::api::property_error)?;
                 for (c, (plain, prefixed)) in [
                     (b"X".as_slice(), b"d|X".as_slice()),
                     (b"Y", b"d|Y"),
@@ -1063,7 +1087,7 @@ pub(crate) fn scale_helpers(
             }
         }
     }
-    let mut ranges = vec![None; n];
+    let mut ranges = budget.filled(n, None)?;
     for (i, e) in elements.iter().enumerate() {
         if e.ty != T::AnimCurve {
             continue;
@@ -1075,7 +1099,7 @@ pub(crate) fn scale_helpers(
             .find(|&c| doc.nodes[c].name == b"KeyValueFloat")
             .ok_or("animation: missing curve array")?;
         budget.work(crate::canon_dom::data_len(doc, value_node)?)?;
-        let values = crate::canon_dom::node_data(doc, value_node, ascii);
+        let values = crate::canon_dom::node_data(doc, value_node, ascii, &budget)?;
         ranges[i] = Some(match values {
             crate::canon_dom::NodeData::Reals(v) => v
                 .into_iter()
@@ -1127,7 +1151,7 @@ pub(crate) fn scale_helpers(
             parent[*src] = Some(*dst);
         }
     }
-    let mut required = vec![false; n];
+    let mut required = budget.filled(n, false)?;
     for (i, p) in parent.iter().enumerate() {
         if original[i] != 0 {
             if let Some(p) = p.filter(|&p| p != 0) {
@@ -1144,27 +1168,28 @@ pub(crate) fn scale_helpers(
     }
     // ufbxi_pre_finalize_scene recursively carries helpers through a
     // componentwise branch, including ignore-parent-scale descendants.
-    let mut children = vec![Vec::new(); n];
+    let mut children = budget.filled(n, Vec::new())?;
     for (i, p) in parent.iter().enumerate() {
         if let Some(p) = p {
-            children[*p].push(i);
+            budget.push(&mut children[*p], i)?;
         }
     }
-    let initial: Vec<_> = (1..n).filter(|&i| required[i]).collect();
-    let mut recursive = vec![false; n];
+    let initial: Vec<_> = budget.collect((1..n).filter(|&i| required[i]))?;
+    let mut recursive = budget.filled(n, false)?;
     for owner in initial {
-        let mut pending = children[owner].clone();
+        let mut pending = budget.collect(children[owner].iter().copied())?;
         while let Some(i) = pending.pop() {
             budget.work(1)?;
             if (parent[i] != Some(owner) || original[i] == 2) && original[i] != 0 && !recursive[i] {
                 recursive[i] = true;
                 required[i] = true;
+                budget.reserve(&mut pending, children[i].len())?;
                 pending.extend_from_slice(&children[i]);
             }
         }
     }
     let mut pairs = Vec::new();
-    let mut helpers = vec![None; n];
+    let mut helpers = budget.filled(n, None)?;
     for i in 1..n {
         if required[i] {
             if elements.len() >= limits.index.max_objects {
@@ -1173,8 +1198,11 @@ pub(crate) fn scale_helpers(
             budget.charge(1, 1024)?;
             let e = &elements[i];
             let helper = elements.len();
-            elements.push(crate::canon_scene::Element {
-                key: format!("synthetic:{}:role:scale-helper:type:1:ordinal:0", e.key),
+            let element = crate::canon_scene::Element {
+                key: budget.format(format_args!(
+                    "synthetic:{}:role:scale-helper:type:1:ordinal:0",
+                    e.key
+                ))?,
                 ordinal: e.ordinal,
                 source_id: e.source_id,
                 ty: T::Node,
@@ -1184,9 +1212,10 @@ pub(crate) fn scale_helpers(
                 dst_conns: Vec::new(),
                 instances: Vec::new(),
                 obj: Obj::new(),
-            });
+            };
+            budget.push(elements, element)?;
             helpers[i] = Some(helper);
-            pairs.push((i, helper));
+            budget.push(&mut pairs, (i, helper))?;
         }
     }
     budget.work(connections.len())?;
@@ -1207,7 +1236,7 @@ pub(crate) fn scale_helpers(
         }
     }
     for &(owner, helper) in &pairs {
-        connections.push((helper, owner, Vec::new()));
+        budget.push(connections, (helper, owner, Vec::new()))?;
     }
     Ok(pairs)
 }
@@ -1217,9 +1246,9 @@ pub(crate) fn node_layers<'a>(
     helper: bool,
     owner: bool,
     limits: &DumpLimits,
-) -> Result<scene_property::PropertyLayers<'a>, String> {
+) -> Result<scene_property::PropertyLayers<'a>, Error> {
     let mut l = scene_property::layers(doc, n, limits.max_properties, limits.max_allocation)
-        .map_err(|e| format!("node properties: {e:?}"))?;
+        .map_err(crate::api::property_error)?;
     let moved = |name: &[u8]| {
         matches!(
             name,
@@ -1295,14 +1324,14 @@ Connections: {
             let error = scale_helpers(&s.doc, &mut s.elements, &mut connections, false, &limits)
                 .unwrap_err();
             assert!(
-                error.contains("key limit")
-                    || error.contains("mismatched")
-                    || error.contains("allocation"),
+                error.to_string().contains("key limit")
+                    || error.to_string().contains("mismatched")
+                    || error.to_string().contains("allocation"),
                 "{name:?}: {error}"
             );
         }
         let s = crate::canon_scene::project_with(INPUT, &DumpLimits::default(), true).unwrap();
-        let children = child_index(&s.doc);
+        let children = child_index(&s.doc, &crate::api_alloc::Budget::new(usize::MAX)).unwrap();
         let budget = Budget::new(0, usize::MAX, Path::Curves);
         assert!(preflight_curves(
             &s.doc,
@@ -1312,6 +1341,7 @@ Connections: {
             &budget
         )
         .unwrap_err()
+        .to_string()
         .contains("allocation limit"));
         let mut elements = s.elements.clone();
         let curve = elements
@@ -1330,6 +1360,7 @@ Connections: {
             &budget
         )
         .unwrap_err()
+        .to_string()
         .contains("allocation limit"));
     }
 
@@ -1365,6 +1396,7 @@ Connections: {
         };
         assert!(project(&mut s, &limits)
             .unwrap_err()
+            .to_string()
             .contains("allocation limit"));
     }
 }

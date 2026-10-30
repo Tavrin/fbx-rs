@@ -13,6 +13,10 @@ ufbx function it follows (`ufbxi_...` names) and lives in these files of
   animation-stack structure.
 - `animation.rs`, `scene_animation.rs`, `animation_canon.rs`: curve reading,
   tangent reconstruction, extrapolation, layer blending and evaluation samples.
+- `bake.rs`: bounded key-time generation, stepped keys and per-channel
+  reduction (`ufbxi_bake_times`, `ufbxi_finalize_bake_times`,
+  `ufbxi_postprocess_step`, `ufbxi_bake_postprocess_vec3`/`quat`). This is a
+  subset with compatibility boundaries documented in `docs/VERIFICATION.md`.
 - `scene_attribute.rs`: camera, light and bone updates.
 - `scene_deform.rs`: skin influences, cluster and pose matrices, sparse blend
   offsets and in-between target weights.

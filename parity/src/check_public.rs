@@ -79,7 +79,60 @@ fn attrib<const N: usize>(
     Ok(())
 }
 
-fn map(c: &mut Check, what: &str, m: &MaterialMap, r: &Obj) -> Result<(), String> {
+fn list(v: Option<&V>) -> &[V] {
+    match v {
+        Some(V::Obj(o)) => list(o.get("data")),
+        Some(V::List(v)) => v,
+        _ => &[],
+    }
+}
+fn bytes(v: Option<&V>) -> &[u8] {
+    match v {
+        Some(V::Bytes(b)) => b,
+        _ => &[],
+    }
+}
+fn integer(v: Option<&V>) -> i64 {
+    match v {
+        Some(V::I(v)) => *v,
+        Some(V::U(v)) => i64::try_from(*v).unwrap(),
+        _ => 0,
+    }
+}
+fn texture_ref(v: Option<&V>, slots: &[Option<usize>]) -> Option<usize> {
+    match v {
+        Some(V::Ref(Some(i))) => slots[*i],
+        _ => None,
+    }
+}
+fn map(
+    c: &mut Check,
+    what: &str,
+    m: &MaterialMap,
+    r: &Obj,
+    slots: &[Option<usize>],
+) -> Result<(), String> {
+    c.eq(
+        "map texture",
+        m.texture,
+        texture_ref(r.get("texture"), slots),
+    )?;
+    c.eq("map integer", m.value_int, integer(r.get("value_int")))?;
+    c.eq(
+        "map components",
+        m.value_components,
+        u64::try_from(integer(r.get("value_components"))).unwrap(),
+    )?;
+    c.eq(
+        "map texture enabled",
+        m.texture_enabled,
+        matches!(r.get("texture_enabled"), Some(V::Bool(true))),
+    )?;
+    c.eq(
+        "map feature disabled",
+        m.feature_disabled,
+        matches!(r.get("feature_disabled"), Some(V::Bool(true))),
+    )?;
     c.f(what, &m.value, &floats(get(r, "value_vec4")))?;
     c.eq(
         what,
@@ -97,6 +150,14 @@ fn matrix(c: &mut Check, what: &str, m: &Matrix, r: Option<&V>) -> Result<(), St
 pub fn check(canon: &CanonScene<'_>, scene: &Scene) -> Result<u64, String> {
     let mut c = Check { values: 0 };
     let mut k = [0usize; 6];
+    let mut slots = vec![None; canon.elements.len()];
+    let mut count = 0;
+    for (i, e) in canon.elements.iter().enumerate() {
+        if e.ty == T::Texture {
+            slots[i] = Some(count);
+            count += 1;
+        }
+    }
     for e in &canon.elements {
         let o = &e.obj;
         match e.ty {
@@ -210,8 +271,106 @@ pub fn check(canon: &CanonScene<'_>, scene: &Scene) -> Result<u64, String> {
                         let Some(V::Obj(x)) = get(r, name) else {
                             return Err(format!("map {name}: no record"));
                         };
-                        map(&mut c, name, mm, x)?;
+                        map(&mut c, name, mm, x, &slots)?;
                     }
+                }
+                // Features and attachments must not disappear during public projection.
+                let Some(V::Obj(features)) = o.get("features") else {
+                    return Err("missing material features".into());
+                };
+                c.eq("feature count", m.features().count(), features.0.len())?;
+                for (name, feature) in m.features() {
+                    let Some(V::Obj(f)) = features.get(name) else {
+                        return Err("missing feature".into());
+                    };
+                    c.eq(
+                        "feature enabled",
+                        feature.enabled,
+                        matches!(f.get("enabled"), Some(V::Bool(true))),
+                    )?;
+                    c.eq(
+                        "feature explicit",
+                        feature.is_explicit,
+                        matches!(f.get("is_explicit"), Some(V::Bool(true))),
+                    )?;
+                }
+                let attachments = list(o.get("textures"));
+                c.eq("attachment count", m.textures().len(), attachments.len())?;
+                for (a, r) in m.textures().iter().zip(attachments) {
+                    let V::Obj(r) = r else {
+                        return Err("attachment record".into());
+                    };
+                    c.eq(
+                        "material property",
+                        a.material_prop.as_slice(),
+                        bytes(r.get("material_prop")),
+                    )?;
+                    c.eq(
+                        "shader property",
+                        a.shader_prop.as_slice(),
+                        bytes(r.get("shader_prop")),
+                    )?;
+                    c.eq(
+                        "attachment texture",
+                        Some(a.texture),
+                        texture_ref(r.get("texture"), &slots),
+                    )?;
+                }
+                // Canonical headers retain authored and default property layers.
+                let mut properties = std::collections::BTreeMap::new();
+                let source_props = match o.get("element") {
+                    Some(V::Obj(header)) => header.get("props"),
+                    _ => None,
+                };
+                if let Some(V::Obj(layers)) = source_props {
+                    if let Some(V::Obj(defaults)) = layers.get("defaults") {
+                        for p in list(defaults.get("props")) {
+                            if let V::Obj(p) = p {
+                                properties.insert(bytes(p.get("name")), p);
+                            }
+                        }
+                    }
+                    for p in list(layers.get("props")) {
+                        if let V::Obj(p) = p {
+                            properties.insert(bytes(p.get("name")), p);
+                        }
+                    }
+                }
+                c.eq(
+                    "source property count",
+                    m.source_properties().len(),
+                    properties.len(),
+                )?;
+                for p in m.source_properties() {
+                    let r = properties
+                        .get(p.name.as_slice())
+                        .ok_or("source property missing")?;
+                    c.eq(
+                        "property type",
+                        i64::from(p.property_type),
+                        integer(r.get("type")),
+                    )?;
+                    c.eq(
+                        "property flags",
+                        i64::from(p.flags),
+                        integer(r.get("flags")),
+                    )?;
+                    c.eq("property integer", p.value_int, integer(r.get("value_int")))?;
+                    c.f(
+                        "property real",
+                        &p.value_real,
+                        &floats(r.get("value_real_arr")),
+                    )?;
+                    c.eq(
+                        "property string",
+                        p.value_str.as_slice(),
+                        bytes(r.get("value_str")),
+                    )?;
+                    c.eq(
+                        "property blob",
+                        p.value_blob.as_slice(),
+                        bytes(r.get("value_blob")),
+                    )?;
                 }
             }
             T::Texture => {
@@ -222,6 +381,30 @@ pub fn check(canon: &CanonScene<'_>, scene: &Scene) -> Result<u64, String> {
                     _ => &[],
                 };
                 c.eq("texture content", t.content(), content)?;
+                c.eq(
+                    "layered texture",
+                    t.is_layered(),
+                    integer(o.get("type")) == 1,
+                )?;
+                let layers = list(o.get("layers"));
+                c.eq("texture layer count", t.layers().len(), layers.len())?;
+                for (a, r) in t.layers().iter().zip(layers) {
+                    let V::Obj(r) = r else {
+                        return Err("texture layer record".into());
+                    };
+                    c.eq(
+                        "layer texture",
+                        Some(a.texture),
+                        texture_ref(r.get("texture"), &slots),
+                    )?;
+                    c.eq("layer blend", a.blend_mode, integer(r.get("blend_mode")))?;
+                    c.f("layer alpha", &[a.alpha], &floats(r.get("alpha")))?;
+                }
+                let files: Vec<_> = list(o.get("file_textures"))
+                    .iter()
+                    .map(|v| texture_ref(Some(v), &slots).unwrap())
+                    .collect();
+                c.eq("file textures", t.file_textures(), files.as_slice())?;
             }
             T::Camera => {
                 let cam = scene.cameras().get(k[4]).ok_or("missing camera")?;

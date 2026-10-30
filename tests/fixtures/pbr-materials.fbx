@@ -1,0 +1,546 @@
+; FBX 7.4.0
+FBXHeaderExtension: { FBXVersion: 7400 }
+Objects: {
+ Material: 10, "Material::Physical0", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 1030429932
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 3735928833
+   P: "3dsMax|Parameters|base_weight", "Number", "", "A", 0.01
+   P: "3dsMax|Parameters|base_weight_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|base_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|base_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|roughness", "Number", "", "A", 0.03
+   P: "3dsMax|Parameters|roughness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|diff_rough", "Number", "", "A", 0.04
+   P: "3dsMax|Parameters|diff_rough_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|diff_roughness", "Number", "", "A", 0.05
+   P: "3dsMax|Parameters|diff_roughness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|metalness", "Number", "", "A", 0.06
+   P: "3dsMax|Parameters|metalness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|reflectivity", "Number", "", "A", 0.07
+   P: "3dsMax|Parameters|reflectivity_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|refl_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|refl_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|anisotropy", "Number", "", "A", 0.09
+   P: "3dsMax|Parameters|anisotropy_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|aniso_angle", "Number", "", "A", 0.1
+   P: "3dsMax|Parameters|aniso_angle_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|anisoangle", "Number", "", "A", 0.11
+   P: "3dsMax|Parameters|anisoangle_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|trans_ior", "Number", "", "A", 0.12
+   P: "3dsMax|Parameters|trans_ior_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|transparency", "Number", "", "A", 0.13
+   P: "3dsMax|Parameters|transparency_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|trans_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|trans_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|trans_depth", "Number", "", "A", 0.15
+   P: "3dsMax|Parameters|trans_depth_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|trans_rough", "Number", "", "A", 0.16
+   P: "3dsMax|Parameters|trans_rough_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|trans_roughness", "Number", "", "A", 0.17
+   P: "3dsMax|Parameters|trans_roughness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|scattering", "Number", "", "A", 0.18
+   P: "3dsMax|Parameters|scattering_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|sss_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|sss_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|sss_scatter_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|sss_scatter_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|sss_depth", "Number", "", "A", 0.21
+   P: "3dsMax|Parameters|sss_depth_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|sss_scale", "Number", "", "A", 0.22
+   P: "3dsMax|Parameters|sss_scale_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat", "Number", "", "A", 0.23
+   P: "3dsMax|Parameters|coat_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coating", "Number", "", "A", 0.24
+   P: "3dsMax|Parameters|coating_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|coat_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_rough", "Number", "", "A", 0.26
+   P: "3dsMax|Parameters|coat_rough_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_roughness", "Number", "", "A", 0.27
+   P: "3dsMax|Parameters|coat_roughness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_ior", "Number", "", "A", 0.28
+   P: "3dsMax|Parameters|coat_ior_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_bump", "Number", "", "A", 0.29
+   P: "3dsMax|Parameters|coat_bump_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|clearcoat_bump_map_amt", "Number", "", "A", 0.3
+   P: "3dsMax|Parameters|clearcoat_bump_map_amt_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_affect_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|coat_affect_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_affect_roughness", "Number", "", "A", 0.32
+   P: "3dsMax|Parameters|coat_affect_roughness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|emission", "Number", "", "A", 0.33
+   P: "3dsMax|Parameters|emission_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|emit_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|emit_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|cutout", "Number", "", "A", 0.35
+   P: "3dsMax|Parameters|cutout_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|bump", "Number", "", "A", 0.36
+   P: "3dsMax|Parameters|bump_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|bump_map_amt", "Number", "", "A", 0.37
+   P: "3dsMax|Parameters|bump_map_amt_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|displacement", "Number", "", "A", 0.38
+   P: "3dsMax|Parameters|displacement_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|displacement_map_amt", "Number", "", "A", 0.39
+   P: "3dsMax|Parameters|displacement_map_amt_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|subsurfaceType", "Number", "", "A", 0.4
+   P: "3dsMax|Parameters|subsurfaceType_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|thin_walled", "int", "", "", 0
+   P: "3dsMax|Parameters|material_mode", "int", "", "", 0
+   P: "3dsMax|Parameters|material_mode", "int", "", "", 0
+   P: "3dsMax|Parameters|trans_roughness_lock", "int", "", "", 0
+   P: "3dsMax|Parameters|roughness_inv", "int", "", "", 0
+   P: "3dsMax|Parameters|trans_roughness_inv", "int", "", "", 0
+   P: "3dsMax|Parameters|coat_roughness_inv", "int", "", "", 0
+  }
+ }
+ Material: 11, "Material::Physical1", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 1030429932
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 3735928833
+   P: "3dsMax|Parameters|base_weight", "Number", "", "A", 0.01
+   P: "3dsMax|Parameters|base_weight_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|base_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|base_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|roughness", "Number", "", "A", 0.03
+   P: "3dsMax|Parameters|roughness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|diff_rough", "Number", "", "A", 0.04
+   P: "3dsMax|Parameters|diff_rough_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|diff_roughness", "Number", "", "A", 0.05
+   P: "3dsMax|Parameters|diff_roughness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|metalness", "Number", "", "A", 0.06
+   P: "3dsMax|Parameters|metalness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|reflectivity", "Number", "", "A", 0.07
+   P: "3dsMax|Parameters|reflectivity_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|refl_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|refl_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|anisotropy", "Number", "", "A", 0.09
+   P: "3dsMax|Parameters|anisotropy_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|aniso_angle", "Number", "", "A", 0.1
+   P: "3dsMax|Parameters|aniso_angle_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|anisoangle", "Number", "", "A", 0.11
+   P: "3dsMax|Parameters|anisoangle_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|trans_ior", "Number", "", "A", 0.12
+   P: "3dsMax|Parameters|trans_ior_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|transparency", "Number", "", "A", 0.13
+   P: "3dsMax|Parameters|transparency_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|trans_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|trans_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|trans_depth", "Number", "", "A", 0.15
+   P: "3dsMax|Parameters|trans_depth_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|trans_rough", "Number", "", "A", 0.16
+   P: "3dsMax|Parameters|trans_rough_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|trans_roughness", "Number", "", "A", 0.17
+   P: "3dsMax|Parameters|trans_roughness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|scattering", "Number", "", "A", 0.18
+   P: "3dsMax|Parameters|scattering_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|sss_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|sss_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|sss_scatter_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|sss_scatter_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|sss_depth", "Number", "", "A", 0.21
+   P: "3dsMax|Parameters|sss_depth_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|sss_scale", "Number", "", "A", 0.22
+   P: "3dsMax|Parameters|sss_scale_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat", "Number", "", "A", 0.23
+   P: "3dsMax|Parameters|coat_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coating", "Number", "", "A", 0.24
+   P: "3dsMax|Parameters|coating_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|coat_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_rough", "Number", "", "A", 0.26
+   P: "3dsMax|Parameters|coat_rough_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_roughness", "Number", "", "A", 0.27
+   P: "3dsMax|Parameters|coat_roughness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_ior", "Number", "", "A", 0.28
+   P: "3dsMax|Parameters|coat_ior_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_bump", "Number", "", "A", 0.29
+   P: "3dsMax|Parameters|coat_bump_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|clearcoat_bump_map_amt", "Number", "", "A", 0.3
+   P: "3dsMax|Parameters|clearcoat_bump_map_amt_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_affect_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|coat_affect_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_affect_roughness", "Number", "", "A", 0.32
+   P: "3dsMax|Parameters|coat_affect_roughness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|emission", "Number", "", "A", 0.33
+   P: "3dsMax|Parameters|emission_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|emit_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|emit_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|cutout", "Number", "", "A", 0.35
+   P: "3dsMax|Parameters|cutout_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|bump", "Number", "", "A", 0.36
+   P: "3dsMax|Parameters|bump_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|bump_map_amt", "Number", "", "A", 0.37
+   P: "3dsMax|Parameters|bump_map_amt_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|displacement", "Number", "", "A", 0.38
+   P: "3dsMax|Parameters|displacement_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|displacement_map_amt", "Number", "", "A", 0.39
+   P: "3dsMax|Parameters|displacement_map_amt_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|subsurfaceType", "Number", "", "A", 0.4
+   P: "3dsMax|Parameters|subsurfaceType_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|thin_walled", "int", "", "", 1
+   P: "3dsMax|Parameters|material_mode", "int", "", "", 1
+   P: "3dsMax|Parameters|material_mode", "int", "", "", 1
+   P: "3dsMax|Parameters|trans_roughness_lock", "int", "", "", 1
+   P: "3dsMax|Parameters|roughness_inv", "int", "", "", 1
+   P: "3dsMax|Parameters|trans_roughness_inv", "int", "", "", 1
+   P: "3dsMax|Parameters|coat_roughness_inv", "int", "", "", 1
+  }
+ }
+ Material: 12, "Material::MetalRough0", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 3490651648
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 3195528448
+   P: "3dsMax|main|base_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|baseColor", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|roughness", "Number", "", "A", 0.03
+   P: "3dsMax|main|Roughness_Map", "Number", "", "A", 0.04
+   P: "3dsMax|main|metalness", "Number", "", "A", 0.05
+   P: "3dsMax|main|ao", "Number", "", "A", 0.06
+   P: "3dsMax|main|norm", "Number", "", "A", 0.07
+   P: "3dsMax|main|emit_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|displacement", "Number", "", "A", 0.09
+   P: "3dsMax|main|displacement_amt", "Number", "", "A", 0.1
+   P: "3dsMax|main|opacity", "Number", "", "A", 0.11
+   P: "3dsMax|main|useGlossiness", "int", "", "", 0
+  }
+ }
+ Material: 13, "Material::MetalRough1", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 3490651648
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 3195528448
+   P: "3dsMax|main|base_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|baseColor", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|roughness", "Number", "", "A", 0.03
+   P: "3dsMax|main|Roughness_Map", "Number", "", "A", 0.04
+   P: "3dsMax|main|metalness", "Number", "", "A", 0.05
+   P: "3dsMax|main|ao", "Number", "", "A", 0.06
+   P: "3dsMax|main|norm", "Number", "", "A", 0.07
+   P: "3dsMax|main|emit_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|displacement", "Number", "", "A", 0.09
+   P: "3dsMax|main|displacement_amt", "Number", "", "A", 0.1
+   P: "3dsMax|main|opacity", "Number", "", "A", 0.11
+   P: "3dsMax|main|useGlossiness", "int", "", "", 1
+  }
+ }
+ Material: 14, "Material::SpecGloss0", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 3490651648
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 31173939
+   P: "3dsMax|main|base_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|baseColor", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|Specular", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|specular", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|glossiness", "Number", "", "A", 0.05
+   P: "3dsMax|main|ao", "Number", "", "A", 0.06
+   P: "3dsMax|main|norm", "Number", "", "A", 0.07
+   P: "3dsMax|main|emit_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|displacement", "Number", "", "A", 0.09
+   P: "3dsMax|main|displacement_amt", "Number", "", "A", 0.1
+   P: "3dsMax|main|opacity", "Number", "", "A", 0.11
+   P: "3dsMax|main|useGlossiness", "int", "", "", 0
+  }
+ }
+ Material: 15, "Material::SpecGloss1", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 3490651648
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 31173939
+   P: "3dsMax|main|base_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|baseColor", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|Specular", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|specular", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|glossiness", "Number", "", "A", 0.05
+   P: "3dsMax|main|ao", "Number", "", "A", 0.06
+   P: "3dsMax|main|norm", "Number", "", "A", 0.07
+   P: "3dsMax|main|emit_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|displacement", "Number", "", "A", 0.09
+   P: "3dsMax|main|displacement_amt", "Number", "", "A", 0.1
+   P: "3dsMax|main|opacity", "Number", "", "A", 0.11
+   P: "3dsMax|main|useGlossiness", "int", "", "", 1
+  }
+ }
+ Material: 16, "Material::Gltf0", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 943849874
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 1174294043
+   P: "3dsMax|main|baseColor", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|roughness", "Number", "", "A", 0.02
+   P: "3dsMax|main|metalness", "Number", "", "A", 0.03
+   P: "3dsMax|main|normal", "Number", "", "A", 0.04
+   P: "3dsMax|main|ambientOcclusion", "Number", "", "A", 0.05
+   P: "3dsMax|main|emission", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|emissionColor", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|main|Alpha", "Number", "", "A", 0.08
+   P: "3dsMax|extension|clearcoat", "Number", "", "A", 0.09
+   P: "3dsMax|extension|clearcoatRoughness", "Number", "", "A", 0.1
+   P: "3dsMax|extension|clearcoatNormal", "Number", "", "A", 0.11
+   P: "3dsMax|extension|sheenColor", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|extension|sheenRoughness", "Number", "", "A", 0.13
+   P: "3dsMax|extension|specular", "Number", "", "A", 0.14
+   P: "3dsMax|extension|Specular", "Number", "", "A", 0.15
+   P: "3dsMax|extension|specularcolor", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|extension|specularColor", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|extension|transmission", "Number", "", "A", 0.18
+   P: "3dsMax|extension|indexOfRefraction", "Number", "", "A", 0.19
+   P: "3dsMax|main|DoubleSided", "int", "", "", 0
+   P: "3dsMax|extension|enableSheen", "int", "", "", 0
+   P: "3dsMax|extension|enableClearCoat", "int", "", "", 0
+   P: "3dsMax|extension|enableTransmission", "int", "", "", 0
+   P: "3dsMax|extension|enableIndexOfRefraction", "int", "", "", 0
+   P: "3dsMax|extension|enableSpecular", "int", "", "", 0
+   P: "3dsMax|extension|unlit", "int", "", "", 0
+  }
+ }
+ Material: 17, "Material::Gltf1", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 943849874
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 1174294043
+   P: "3dsMax|main|baseColor", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|roughness", "Number", "", "A", 0.02
+   P: "3dsMax|main|metalness", "Number", "", "A", 0.03
+   P: "3dsMax|main|normal", "Number", "", "A", 0.04
+   P: "3dsMax|main|ambientOcclusion", "Number", "", "A", 0.05
+   P: "3dsMax|main|emission", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|emissionColor", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|main|Alpha", "Number", "", "A", 0.08
+   P: "3dsMax|extension|clearcoat", "Number", "", "A", 0.09
+   P: "3dsMax|extension|clearcoatRoughness", "Number", "", "A", 0.1
+   P: "3dsMax|extension|clearcoatNormal", "Number", "", "A", 0.11
+   P: "3dsMax|extension|sheenColor", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|extension|sheenRoughness", "Number", "", "A", 0.13
+   P: "3dsMax|extension|specular", "Number", "", "A", 0.14
+   P: "3dsMax|extension|Specular", "Number", "", "A", 0.15
+   P: "3dsMax|extension|specularcolor", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|extension|specularColor", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|extension|transmission", "Number", "", "A", 0.18
+   P: "3dsMax|extension|indexOfRefraction", "Number", "", "A", 0.19
+   P: "3dsMax|main|DoubleSided", "int", "", "", 1
+   P: "3dsMax|extension|enableSheen", "int", "", "", 1
+   P: "3dsMax|extension|enableClearCoat", "int", "", "", 1
+   P: "3dsMax|extension|enableTransmission", "int", "", "", 1
+   P: "3dsMax|extension|enableIndexOfRefraction", "int", "", "", 1
+   P: "3dsMax|extension|enableSpecular", "int", "", "", 1
+   P: "3dsMax|extension|unlit", "int", "", "", 1
+  }
+ }
+ Material: 18, "Material::OpenPBR0", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 4048887347
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 939201335
+   P: "3dsMax|Parameters|base_weight", "Number", "", "A", 0.01
+   P: "3dsMax|Parameters|base_weight_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|base_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|base_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|specular_roughness", "Number", "", "A", 0.03
+   P: "3dsMax|Parameters|specular_roughness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|base_diffuse_roughness", "Number", "", "A", 0.04
+   P: "3dsMax|Parameters|base_diffuse_roughness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|base_metalness", "Number", "", "A", 0.05
+   P: "3dsMax|Parameters|base_metalness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|specular_weight", "Number", "", "A", 0.06
+   P: "3dsMax|Parameters|specular_weight_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|specular_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|specular_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|specular_roughness_anisotropy", "Number", "", "A", 0.08
+   P: "3dsMax|Parameters|specular_roughness_anisotropy_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|specular_ior", "Number", "", "A", 0.09
+   P: "3dsMax|Parameters|specular_ior_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|transmission_weight", "Number", "", "A", 0.1
+   P: "3dsMax|Parameters|transmission_weight_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|transmission_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|transmission_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|transmission_depth", "Number", "", "A", 0.12
+   P: "3dsMax|Parameters|transmission_depth_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|transmission_scatter", "Number", "", "A", 0.13
+   P: "3dsMax|Parameters|transmission_scatter_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|transmission_scatter_anisotropy", "Number", "", "A", 0.14
+   P: "3dsMax|Parameters|transmission_scatter_anisotropy_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|transmission_dispersion_scale", "Number", "", "A", 0.15
+   P: "3dsMax|Parameters|transmission_dispersion_scale_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|subsurface_weight", "Number", "", "A", 0.16
+   P: "3dsMax|Parameters|subsurface_weight_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|subsurface_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|subsurface_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|subsurface_radius_scale", "Number", "", "A", 0.18
+   P: "3dsMax|Parameters|subsurface_radius_scale_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|subsurface_radius", "Number", "", "A", 0.19
+   P: "3dsMax|Parameters|subsurface_radius_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|subsurface_scatter_anisotropy", "Number", "", "A", 0.2
+   P: "3dsMax|Parameters|subsurface_scatter_anisotropy_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_weight", "Number", "", "A", 0.21
+   P: "3dsMax|Parameters|coat_weight_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|coat_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_roughness", "Number", "", "A", 0.23
+   P: "3dsMax|Parameters|coat_roughness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_roughness_anisotropy", "Number", "", "A", 0.24
+   P: "3dsMax|Parameters|coat_roughness_anisotropy_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_ior", "Number", "", "A", 0.25
+   P: "3dsMax|Parameters|coat_ior_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_normal_map", "Number", "", "A", 0.26
+   P: "3dsMax|Parameters|coat_normal_map_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|fuzz_weight", "Number", "", "A", 0.27
+   P: "3dsMax|Parameters|fuzz_weight_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|fuzz_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|fuzz_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|fuzz_roughness", "Number", "", "A", 0.29
+   P: "3dsMax|Parameters|fuzz_roughness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|emission_weight", "Number", "", "A", 0.3
+   P: "3dsMax|Parameters|emission_weight_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|emission_luminance", "Number", "", "A", 0.31
+   P: "3dsMax|Parameters|emission_luminance_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|emission_color", "Color", "", "A", 0.2,0.3,0.4
+   P: "3dsMax|Parameters|emission_color_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|thin_film_weight", "Number", "", "A", 0.33
+   P: "3dsMax|Parameters|thin_film_weight_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|thin_film_thickness", "Number", "", "A", 0.34
+   P: "3dsMax|Parameters|thin_film_thickness_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|thin_film_ior", "Number", "", "A", 0.35
+   P: "3dsMax|Parameters|thin_film_ior_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|bump", "Number", "", "A", 0.36
+   P: "3dsMax|Parameters|bump_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|bump_map_amt", "Number", "", "A", 0.37
+   P: "3dsMax|Parameters|bump_map_amt_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|displacement", "Number", "", "A", 0.38
+   P: "3dsMax|Parameters|displacement_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|displacement_map_amt", "Number", "", "A", 0.39
+   P: "3dsMax|Parameters|displacement_map_amt_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_bump", "Number", "", "A", 0.4
+   P: "3dsMax|Parameters|coat_bump_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|coat_bump_map_amt", "Number", "", "A", 0.41
+   P: "3dsMax|Parameters|coat_bump_map_amt_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|geometry_tangent_map", "Number", "", "A", 0.42
+   P: "3dsMax|Parameters|geometry_tangent_map_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|geometry_opacity", "Number", "", "A", 0.43
+   P: "3dsMax|Parameters|geometry_opacity_map_on", "bool", "", "", 0
+   P: "3dsMax|Parameters|geometry_thin_walled", "int", "", "", 0
+  }
+ }
+ Material: 19, "Material::OpenPBR1", "" {
+  ShadingModel: "unknown"
+  Properties70: {
+   P: "3dsMax|ClassIDa", "int", "Integer", "", 4048887347
+   P: "3dsMax|ClassIDb", "int", "Integer", "", 939201335
+   P: "3dsMax|Parameters|base_weight", "Number", "", "A", 0.01
+   P: "3dsMax|Parameters|base_weight_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|base_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|base_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|specular_roughness", "Number", "", "A", 0.03
+   P: "3dsMax|Parameters|specular_roughness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|base_diffuse_roughness", "Number", "", "A", 0.04
+   P: "3dsMax|Parameters|base_diffuse_roughness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|base_metalness", "Number", "", "A", 0.05
+   P: "3dsMax|Parameters|base_metalness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|specular_weight", "Number", "", "A", 0.06
+   P: "3dsMax|Parameters|specular_weight_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|specular_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|specular_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|specular_roughness_anisotropy", "Number", "", "A", 0.08
+   P: "3dsMax|Parameters|specular_roughness_anisotropy_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|specular_ior", "Number", "", "A", 0.09
+   P: "3dsMax|Parameters|specular_ior_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|transmission_weight", "Number", "", "A", 0.1
+   P: "3dsMax|Parameters|transmission_weight_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|transmission_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|transmission_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|transmission_depth", "Number", "", "A", 0.12
+   P: "3dsMax|Parameters|transmission_depth_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|transmission_scatter", "Number", "", "A", 0.13
+   P: "3dsMax|Parameters|transmission_scatter_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|transmission_scatter_anisotropy", "Number", "", "A", 0.14
+   P: "3dsMax|Parameters|transmission_scatter_anisotropy_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|transmission_dispersion_scale", "Number", "", "A", 0.15
+   P: "3dsMax|Parameters|transmission_dispersion_scale_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|subsurface_weight", "Number", "", "A", 0.16
+   P: "3dsMax|Parameters|subsurface_weight_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|subsurface_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|subsurface_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|subsurface_radius_scale", "Number", "", "A", 0.18
+   P: "3dsMax|Parameters|subsurface_radius_scale_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|subsurface_radius", "Number", "", "A", 0.19
+   P: "3dsMax|Parameters|subsurface_radius_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|subsurface_scatter_anisotropy", "Number", "", "A", 0.2
+   P: "3dsMax|Parameters|subsurface_scatter_anisotropy_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_weight", "Number", "", "A", 0.21
+   P: "3dsMax|Parameters|coat_weight_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|coat_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_roughness", "Number", "", "A", 0.23
+   P: "3dsMax|Parameters|coat_roughness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_roughness_anisotropy", "Number", "", "A", 0.24
+   P: "3dsMax|Parameters|coat_roughness_anisotropy_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_ior", "Number", "", "A", 0.25
+   P: "3dsMax|Parameters|coat_ior_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_normal_map", "Number", "", "A", 0.26
+   P: "3dsMax|Parameters|coat_normal_map_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|fuzz_weight", "Number", "", "A", 0.27
+   P: "3dsMax|Parameters|fuzz_weight_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|fuzz_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|fuzz_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|fuzz_roughness", "Number", "", "A", 0.29
+   P: "3dsMax|Parameters|fuzz_roughness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|emission_weight", "Number", "", "A", 0.3
+   P: "3dsMax|Parameters|emission_weight_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|emission_luminance", "Number", "", "A", 0.31
+   P: "3dsMax|Parameters|emission_luminance_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|emission_color", "ColorAndAlpha", "", "A", 0.2,0.3,0.4,0.7
+   P: "3dsMax|Parameters|emission_color_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|thin_film_weight", "Number", "", "A", 0.33
+   P: "3dsMax|Parameters|thin_film_weight_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|thin_film_thickness", "Number", "", "A", 0.34
+   P: "3dsMax|Parameters|thin_film_thickness_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|thin_film_ior", "Number", "", "A", 0.35
+   P: "3dsMax|Parameters|thin_film_ior_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|bump", "Number", "", "A", 0.36
+   P: "3dsMax|Parameters|bump_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|bump_map_amt", "Number", "", "A", 0.37
+   P: "3dsMax|Parameters|bump_map_amt_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|displacement", "Number", "", "A", 0.38
+   P: "3dsMax|Parameters|displacement_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|displacement_map_amt", "Number", "", "A", 0.39
+   P: "3dsMax|Parameters|displacement_map_amt_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_bump", "Number", "", "A", 0.4
+   P: "3dsMax|Parameters|coat_bump_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|coat_bump_map_amt", "Number", "", "A", 0.41
+   P: "3dsMax|Parameters|coat_bump_map_amt_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|geometry_tangent_map", "Number", "", "A", 0.42
+   P: "3dsMax|Parameters|geometry_tangent_map_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|geometry_opacity", "Number", "", "A", 0.43
+   P: "3dsMax|Parameters|geometry_opacity_map_on", "bool", "", "", 1
+   P: "3dsMax|Parameters|geometry_thin_walled", "int", "", "", 1
+  }
+ }
+ Texture: 100, "Texture::Suffix", "TextureVideoClip" { FileName: "suffix.png" }
+ Texture: 101, "Texture::Direct", "TextureVideoClip" { FileName: "direct.png" }
+}
+Connections: {
+ C: "OP", 100, 10, "3dsMax|Parameters|base_color_map"
+ C: "OP", 101, 10, "3dsMax|Parameters|base_color"
+ C: "OP", 100, 11, "3dsMax|Parameters|base_color_map"
+ C: "OP", 101, 11, "3dsMax|Parameters|base_color"
+ C: "OP", 100, 12, "3dsMax|main|base_color_map"
+ C: "OP", 101, 12, "3dsMax|main|base_color"
+ C: "OP", 100, 13, "3dsMax|main|base_color_map"
+ C: "OP", 101, 13, "3dsMax|main|base_color"
+ C: "OP", 100, 14, "3dsMax|main|base_color_map"
+ C: "OP", 101, 14, "3dsMax|main|base_color"
+ C: "OP", 100, 15, "3dsMax|main|base_color_map"
+ C: "OP", 101, 15, "3dsMax|main|base_color"
+ C: "OP", 100, 16, "3dsMax|main|baseColorMap"
+ C: "OP", 101, 16, "3dsMax|main|baseColor"
+ C: "OP", 100, 17, "3dsMax|main|baseColorMap"
+ C: "OP", 101, 17, "3dsMax|main|baseColor"
+ C: "OP", 100, 18, "3dsMax|Parameters|base_color_map"
+ C: "OP", 101, 18, "3dsMax|Parameters|base_color"
+ C: "OP", 100, 19, "3dsMax|Parameters|base_color_map"
+ C: "OP", 101, 19, "3dsMax|Parameters|base_color"
+}

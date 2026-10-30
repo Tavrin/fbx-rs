@@ -6,6 +6,7 @@
 //! `ufbxi_is_array_node`, `ufbxi_is_raw_string`, `ufbxi_retain_dom_node`,
 //! `ufbxi_push_sanitized_string` and the binary/ASCII array conversions.
 use crate::syntax::{AsciiValue, Document, Property};
+use crate::{api_alloc::Budget, Error};
 #[cfg(feature = "parity")]
 use {
     crate::canon::{f64_into, hex, Emitter, Wr},
@@ -224,14 +225,20 @@ fn utf8_step(b: &[u8], i: usize) -> usize {
 }
 /// The string view ufbx retains for `raw` source bytes in a given context.
 /// In a raw context ufbx 0.23.1 keeps no UTF-8 view at all (empty string).
-pub(crate) fn string_view(raw: &[u8], raw_context: bool) -> Vec<u8> {
+pub(crate) fn string_view(raw: &[u8], raw_context: bool, a: &Budget) -> Result<Vec<u8>, Error> {
     if raw_context {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     if raw.iter().all(|&c| c > 0 && c < 0x80) {
-        return raw.to_vec();
+        return a.bytes(raw);
     }
-    let mut out = Vec::with_capacity(raw.len());
+    let mut out = Vec::new();
+    a.reserve(
+        &mut out,
+        raw.len()
+            .checked_mul(3)
+            .ok_or(Error::ResourceLimit("string view"))?,
+    )?;
     let mut i = 0;
     while i < raw.len() {
         let step = utf8_step(raw, i);
@@ -243,7 +250,7 @@ pub(crate) fn string_view(raw: &[u8], raw_context: bool) -> Vec<u8> {
             i += 1;
         }
     }
-    out
+    Ok(out)
 }
 
 pub(crate) fn f64_to_i64(x: f64) -> i64 {
@@ -302,24 +309,28 @@ fn word(w: &[u8]) -> Tok {
     let (i, f) = crate::syntax::bare_number(w);
     Tok::Word(i, f)
 }
-fn ascii_tokens(p: &Property<'_>, out: &mut Vec<Tok>) {
+fn ascii_tokens(p: &Property<'_>, out: &mut Vec<Tok>, a: &Budget) -> Result<(), Error> {
     match p {
-        Property::I64(v) => out.push(Tok::Int(*v)),
-        Property::F64(bits) => out.push(Tok::Float(f64::from_bits(*bits))),
-        Property::AsciiNegativeZero => out.push(Tok::NegZero),
-        Property::AsciiBare(w) => out.push(word(w)),
+        Property::I64(v) => a.push(out, Tok::Int(*v))?,
+        Property::F64(bits) => a.push(out, Tok::Float(f64::from_bits(*bits)))?,
+        Property::AsciiNegativeZero => a.push(out, Tok::NegZero)?,
+        Property::AsciiBare(w) => a.push(out, word(w))?,
         Property::AsciiArray(values) => {
             for v in values {
-                out.push(match v {
-                    AsciiValue::I64(v) => Tok::Int(*v),
-                    AsciiValue::F64(bits) => Tok::Float(f64::from_bits(*bits)),
-                    AsciiValue::NegativeZero => Tok::NegZero,
-                    AsciiValue::Bare(w) => word(w),
-                });
+                a.push(
+                    out,
+                    match v {
+                        AsciiValue::I64(v) => Tok::Int(*v),
+                        AsciiValue::F64(bits) => Tok::Float(f64::from_bits(*bits)),
+                        AsciiValue::NegativeZero => Tok::NegZero,
+                        AsciiValue::Bare(w) => word(w),
+                    },
+                )?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 fn scalar_from_token(t: Tok) -> DomValue {
     match t {
@@ -336,8 +347,15 @@ enum Num {
     I(i64),
     F(f64),
 }
-fn encode(target: u8, values: &[Num], boolean: bool) -> DomValue {
+fn encode(target: u8, values: &[Num], boolean: bool, a: &Budget) -> Result<DomValue, Error> {
     let mut bytes = Vec::new();
+    a.reserve(
+        &mut bytes,
+        values
+            .len()
+            .checked_mul(8)
+            .ok_or(Error::ResourceLimit("array bytes"))?,
+    )?;
     for &v in values {
         match target {
             b'c' | b'b' => bytes.push(match (v, boolean) {
@@ -371,13 +389,13 @@ fn encode(target: u8, values: &[Num], boolean: bool) -> DomValue {
         }
     }
     let ty = match target {
-        b'c' | b'b' => return DomValue::Bytes(bytes),
+        b'c' | b'b' => return Ok(DomValue::Bytes(bytes)),
         b'i' => ARRAY_I32,
         b'l' => ARRAY_I64,
         b'f' => ARRAY_F32,
         _ => ARRAY_F64,
     };
-    DomValue::Array(ty, values.len(), bytes)
+    Ok(DomValue::Array(ty, values.len(), bytes))
 }
 
 /// Element width of a binary array kind, after checking the byte length.
@@ -414,14 +432,23 @@ fn binary_num(kind: u8, big_endian: bool, c: &[u8]) -> Num {
 }
 
 /// Decode a binary array property into numbers (file byte order respected).
-fn binary_array(kind: u8, count: usize, big_endian: bool, bytes: &[u8]) -> Option<Vec<Num>> {
-    let width = binary_width(kind, count, bytes)?;
-    Some(
-        bytes
-            .chunks_exact(width)
-            .map(|c| binary_num(kind, big_endian, c))
-            .collect(),
-    )
+fn binary_array(
+    kind: u8,
+    count: usize,
+    big_endian: bool,
+    bytes: &[u8],
+    a: &Budget,
+) -> Result<Option<Vec<Num>>, Error> {
+    let Some(width) = binary_width(kind, count, bytes) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        a.collect(
+            bytes
+                .chunks_exact(width)
+                .map(|c| binary_num(kind, big_endian, c)),
+        )?,
+    ))
 }
 
 /// [`encode`]'s element conversion for an `ARRAY_F64` target.
@@ -444,7 +471,12 @@ fn num_i32(v: Num) -> i32 {
 /// [`node_data`] for a binary-array node whose target type is `f64` or
 /// `i32`: the same conversions as [`project`] then [`encode`], without the
 /// intermediate number and byte vectors. `None` for other cases.
-fn binary_array_data(doc: &Document<'_>, i: usize, target: u8) -> Option<NodeData> {
+fn binary_array_data(
+    doc: &Document<'_>,
+    i: usize,
+    target: u8,
+    a: &Budget,
+) -> Result<Option<NodeData>, Error> {
     let node = &doc.nodes[i];
     let Some(Property::Array {
         kind,
@@ -453,7 +485,7 @@ fn binary_array_data(doc: &Document<'_>, i: usize, target: u8) -> Option<NodeDat
         bytes,
     }) = doc.properties[node.properties.clone()].first()
     else {
-        return None;
+        return Ok(None);
     };
     let (kind, be) = (*kind, *big_endian);
     let valid = binary_width(kind, *count, bytes).is_some();
@@ -461,18 +493,22 @@ fn binary_array_data(doc: &Document<'_>, i: usize, target: u8) -> Option<NodeDat
     match (target, kind, be, valid) {
         (b'i', b'i', false, true) => {
             let v = bytes.as_chunks::<4>().0.iter();
-            return Some(NodeData::Ints(v.map(|c| i32::from_le_bytes(*c)).collect()));
+            return Ok(Some(NodeData::Ints(
+                a.collect(v.map(|c| i32::from_le_bytes(*c)))?,
+            )));
         }
         (b'c' | b'b' | b'i' | b'l' | b'f' | b'C', _, _, _) => {}
         (_, b'd', false, true) => {
             let v = bytes.as_chunks::<8>().0.iter();
-            return Some(NodeData::Reals(v.map(|c| f64::from_le_bytes(*c)).collect()));
+            return Ok(Some(NodeData::Reals(
+                a.collect(v.map(|c| f64::from_le_bytes(*c)))?,
+            )));
         }
         (_, b'f', false, true) => {
             let v = bytes.as_chunks::<4>().0.iter();
-            return Some(NodeData::Reals(
-                v.map(|c| f64::from(f32::from_le_bytes(*c))).collect(),
-            ));
+            return Ok(Some(NodeData::Reals(
+                a.collect(v.map(|c| f64::from(f32::from_le_bytes(*c))))?,
+            )));
         }
         _ => {}
     }
@@ -483,14 +519,21 @@ fn binary_array_data(doc: &Document<'_>, i: usize, target: u8) -> Option<NodeDat
             .take(if width.is_some() { *count } else { 0 })
             .map(move |c| binary_num(kind, be, c))
     };
-    match target {
+    Ok(match target {
         b'c' | b'b' | b'l' | b'f' | b'C' => None,
-        b'i' => Some(NodeData::Ints(elements().map(num_i32).collect())),
-        _ => Some(NodeData::Reals(elements().map(num_f64).collect())),
-    }
+        b'i' => Some(NodeData::Ints(a.collect(elements().map(num_i32))?)),
+        _ => Some(NodeData::Reals(a.collect(elements().map(num_f64))?)),
+    })
 }
 
-fn project(doc: &Document<'_>, i: usize, _state: St, parent: St, ascii: bool) -> Vec<DomValue> {
+fn project(
+    doc: &Document<'_>,
+    i: usize,
+    _state: St,
+    parent: St,
+    ascii: bool,
+    a: &Budget,
+) -> Result<Vec<DomValue>, Error> {
     let node = &doc.nodes[i];
     let values = &doc.properties[node.properties.clone()];
     let name = node.name;
@@ -498,16 +541,13 @@ fn project(doc: &Document<'_>, i: usize, _state: St, parent: St, ascii: bool) ->
         if target == b'C' {
             // ASCII embedded content is base64 that ufbx decodes while parsing
             // (`ufbxi_ascii_parse_node`), so the retained DOM holds the bytes.
-            let strings = values
-                .iter()
-                .filter_map(|v| match v {
-                    Property::String(s) if ascii => Some(decode_base64(s)),
-                    Property::String(s) => Some(s.to_vec()),
-                    Property::Raw(r) => Some(r.to_vec()),
-                    _ => None,
-                })
-                .collect();
-            return vec![DomValue::Strings(strings)];
+            let strings = a.try_collect(values.iter().filter_map(|v| match v {
+                Property::String(s) if ascii => Some(decode_base64(s, a)),
+                Property::String(s) => Some(a.bytes(s)),
+                Property::Raw(r) => Some(a.bytes(r)),
+                _ => None,
+            }))?;
+            return a.collect([DomValue::Strings(strings)]);
         }
         let boolean = target == b'b';
         let mut nums = Vec::new();
@@ -519,24 +559,27 @@ fn project(doc: &Document<'_>, i: usize, _state: St, parent: St, ascii: bool) ->
                     big_endian,
                     bytes,
                 }) => {
-                    nums = binary_array(*kind, *count, *big_endian, bytes).unwrap_or_default();
+                    nums = binary_array(*kind, *count, *big_endian, bytes, a)?.unwrap_or_default();
                     if matches!(kind, b'b' | b'c') && matches!(target, b'b' | b'c') {
                         // Byte sources keep raw bytes (signed wrap) unless boolean.
                     }
                 }
                 _ => {
                     for v in values {
-                        nums.push(match v {
-                            Property::Bool(b) | Property::BoolAlt(b) => {
-                                Num::I(i64::from(i8::from_ne_bytes([*b])))
-                            }
-                            Property::I16(x) => Num::I(i64::from(*x)),
-                            Property::I32(x) => Num::I(i64::from(*x)),
-                            Property::I64(x) => Num::I(*x),
-                            Property::F32(b) => Num::F(f64::from(f32::from_bits(*b))),
-                            Property::F64(b) => Num::F(f64::from_bits(*b)),
-                            _ => continue,
-                        });
+                        a.push(
+                            &mut nums,
+                            match v {
+                                Property::Bool(b) | Property::BoolAlt(b) => {
+                                    Num::I(i64::from(i8::from_ne_bytes([*b])))
+                                }
+                                Property::I16(x) => Num::I(i64::from(*x)),
+                                Property::I32(x) => Num::I(i64::from(*x)),
+                                Property::I64(x) => Num::I(*x),
+                                Property::F32(b) => Num::F(f64::from(f32::from_bits(*b))),
+                                Property::F64(b) => Num::F(f64::from_bits(*b)),
+                                _ => continue,
+                            },
+                        )?;
                     }
                 }
             }
@@ -544,77 +587,89 @@ fn project(doc: &Document<'_>, i: usize, _state: St, parent: St, ascii: bool) ->
             let accurate = name == b"KeyAttrDataFloat" && doc.version >= 7200;
             let mut toks = Vec::new();
             for v in values {
-                ascii_tokens(v, &mut toks);
+                ascii_tokens(v, &mut toks, a)?;
             }
             for t in toks {
-                nums.push(match t {
-                    Tok::NegZero if boolean => Num::I(0),
-                    Tok::NegZero => match target {
-                        b'f' | b'd' => Num::F(-0.0),
-                        _ => Num::I(0),
-                    },
-                    Tok::Int(v) => Num::I(v),
-                    Tok::Word(i, f) => {
-                        if matches!(target, b'f' | b'd') {
-                            Num::F(f)
-                        } else {
-                            Num::I(i)
+                a.push(
+                    &mut nums,
+                    match t {
+                        Tok::NegZero if boolean => Num::I(0),
+                        Tok::NegZero => match target {
+                            b'f' | b'd' => Num::F(-0.0),
+                            _ => Num::I(0),
+                        },
+                        Tok::Int(v) => Num::I(v),
+                        Tok::Word(i, f) => {
+                            if matches!(target, b'f' | b'd') {
+                                Num::F(f)
+                            } else {
+                                Num::I(i)
+                            }
                         }
-                    }
-                    Tok::Float(x) if accurate && target == b'i' => {
-                        Num::F(f64::from(crate::numeric::round_f32(x)))
-                    }
-                    Tok::Float(x) => Num::F(x),
-                });
+                        Tok::Float(x) if accurate && target == b'i' => {
+                            Num::F(f64::from(crate::numeric::round_f32(x)))
+                        }
+                        Tok::Float(x) => Num::F(x),
+                    },
+                )?;
             }
         }
-        return vec![encode(target, &nums, boolean)];
+        return a.collect([encode(target, &nums, boolean, a)?]);
     }
     let mut out = Vec::new();
     let raw_context = raw_string(parent, name);
     for v in values {
         match v {
-            Property::String(b) => out.push(DomValue::Str(string_view(b, raw_context), b.to_vec())),
-            Property::Raw(b) => out.push(DomValue::Str(string_view(b, raw_context), b.to_vec())),
+            Property::String(b) => a.push(
+                &mut out,
+                DomValue::Str(string_view(b, raw_context, a)?, a.bytes(b)?),
+            )?,
+            Property::Raw(b) => a.push(
+                &mut out,
+                DomValue::Str(string_view(b, raw_context, a)?, a.bytes(b)?),
+            )?,
             Property::Bool(b) | Property::BoolAlt(b) => {
                 let v = i64::from(i8::from_ne_bytes([*b]));
-                out.push(DomValue::Number(v, v as f64))
+                a.push(&mut out, DomValue::Number(v, v as f64))?
             }
-            Property::I16(x) => out.push(DomValue::Number(i64::from(*x), f64::from(*x))),
-            Property::I32(x) => out.push(DomValue::Number(i64::from(*x), f64::from(*x))),
-            Property::I64(x) if !ascii => out.push(DomValue::Number(*x, *x as f64)),
+            Property::I16(x) => a.push(&mut out, DomValue::Number(i64::from(*x), f64::from(*x)))?,
+            Property::I32(x) => a.push(&mut out, DomValue::Number(i64::from(*x), f64::from(*x)))?,
+            Property::I64(x) if !ascii => a.push(&mut out, DomValue::Number(*x, *x as f64))?,
             Property::F32(b) => {
                 let x = f64::from(f32::from_bits(*b));
-                out.push(DomValue::Number(f64_to_i64(x), x))
+                a.push(&mut out, DomValue::Number(f64_to_i64(x), x))?
             }
             Property::F64(b) if !ascii => {
                 let x = f64::from_bits(*b);
-                out.push(DomValue::Number(f64_to_i64(x), x))
+                a.push(&mut out, DomValue::Number(f64_to_i64(x), x))?
             }
             Property::Array { .. } => break,
             other => {
                 let mut toks = Vec::new();
-                ascii_tokens(other, &mut toks);
+                ascii_tokens(other, &mut toks, a)?;
+                a.reserve(&mut out, toks.len())?;
                 out.extend(toks.into_iter().map(scalar_from_token));
             }
         }
     }
     out.truncate(8);
-    out
+    Ok(out)
 }
 
 /// Parse state of DOM node `i` (`ufbxi_update_parse_state` along its ancestors).
 fn state_of(doc: &Document<'_>, i: Option<usize>) -> St {
-    let mut chain = Vec::new();
+    let mut chain = [0usize; 257];
+    let mut length = 0;
     let mut cur = i;
     while let Some(c) = cur {
-        if chain.len() > 256 {
+        if length == chain.len() {
             return St::Unknown;
         }
-        chain.push(c);
+        chain[length] = c;
+        length += 1;
         cur = doc.nodes[c].parent;
     }
-    chain
+    chain[..length]
         .iter()
         .rev()
         .fold(St::Root, |s, &c| child_state(s, doc.nodes[c].name))
@@ -644,7 +699,7 @@ pub(crate) enum NodeData {
 
 /// Upper bound on numeric values, without decoding or allocating. Includes
 /// scalar properties for binary nodes that do not use an array property.
-pub(crate) fn data_len(doc: &Document<'_>, i: usize) -> Result<usize, String> {
+pub(crate) fn data_len(doc: &Document<'_>, i: usize) -> Result<usize, Error> {
     doc.properties[doc.nodes[i].properties.clone()]
         .iter()
         .try_fold(0usize, |n, p| {
@@ -660,7 +715,12 @@ pub(crate) fn data_len(doc: &Document<'_>, i: usize) -> Result<usize, String> {
 
 /// The converted values of DOM node `i` (`ufbxi_get_array` / `ufbxi_get_val*`),
 /// shared with the retained-DOM projection so both see the same conversions.
-pub(crate) fn node_data(doc: &Document<'_>, i: usize, ascii: bool) -> NodeData {
+pub(crate) fn node_data(
+    doc: &Document<'_>,
+    i: usize,
+    ascii: bool,
+    a: &Budget,
+) -> Result<NodeData, Error> {
     let parent = state_of(doc, doc.nodes[i].parent);
     let state = child_state(parent, doc.nodes[i].name);
     let target = array_type(parent, doc.nodes[i].name, ascii, doc.version);
@@ -686,55 +746,54 @@ pub(crate) fn node_data(doc: &Document<'_>, i: usize, ascii: bool) -> NodeData {
                 })
             };
             match target {
-                Some(b'i') => return NodeData::Ints(nums().map(num_i32).collect()),
-                Some(b'd') => return NodeData::Reals(nums().map(num_f64).collect()),
+                Some(b'i') => return Ok(NodeData::Ints(a.collect(nums().map(num_i32))?)),
+                Some(b'd') => return Ok(NodeData::Reals(a.collect(nums().map(num_f64))?)),
                 _ => {}
             }
         }
     }
     if let (Some(t), false) = (target, ascii) {
-        if let Some(data) = binary_array_data(doc, i, t) {
-            return data;
+        if let Some(data) = binary_array_data(doc, i, t, a)? {
+            return Ok(data);
         }
     }
-    let values = project(doc, i, state, parent, ascii);
+    let values = project(doc, i, state, parent, ascii, a)?;
     if target.is_some() {
-        return match values.into_iter().next() {
+        return Ok(match values.into_iter().next() {
             Some(DomValue::Array(ARRAY_F64, _, bytes)) => NodeData::Reals(
-                bytes
-                    .as_chunks::<8>()
-                    .0
-                    .iter()
-                    .map(|c| f64::from_le_bytes(*c))
-                    .collect(),
+                a.collect(
+                    bytes
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|c| f64::from_le_bytes(*c)),
+                )?,
             ),
             Some(DomValue::Array(ARRAY_I32, _, bytes)) => NodeData::Ints(
-                bytes
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|c| i32::from_le_bytes(*c))
-                    .collect(),
+                a.collect(
+                    bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| i32::from_le_bytes(*c)),
+                )?,
             ),
             _ => NodeData::OtherArray,
-        };
+        });
     }
-    NodeData::Values(
-        values
-            .into_iter()
-            .filter_map(|v| match v {
-                DomValue::Number(i, f) => Some(Scalar::Num(i, f)),
-                DomValue::Str(view, _) => Some(Scalar::Str(view)),
-                _ => None,
-            })
-            .collect(),
-    )
+    Ok(NodeData::Values(a.collect(
+        values.into_iter().filter_map(|v| match v {
+            DomValue::Number(i, f) => Some(Scalar::Num(i, f)),
+            DomValue::Str(view, _) => Some(Scalar::Str(view)),
+            _ => None,
+        }),
+    )?))
 }
 
 /// `ufbxi_decode_base64`: 4-character groups through ufbx's table (invalid
 /// characters map to 0x80, `=` to 0x40, both truncated into the output
 /// bytes), then the trailing padding rule. Bad input only warns in ufbx.
-fn decode_base64(src: &[u8]) -> Vec<u8> {
+fn decode_base64(src: &[u8], a: &Budget) -> Result<Vec<u8>, Error> {
     let table = |c: u8| -> u32 {
         match c {
             b'A'..=b'Z' => u32::from(c - b'A'),
@@ -746,7 +805,8 @@ fn decode_base64(src: &[u8]) -> Vec<u8> {
             _ => 0x80,
         }
     };
-    let mut out = Vec::with_capacity(src.len() / 4 * 3 + 3);
+    let mut out = Vec::new();
+    a.reserve(&mut out, src.len() / 4 * 3 + 3)?;
     for g in src.as_chunks::<4>().0 {
         let (a, b, c, d) = (table(g[0]), table(g[1]), table(g[2]), table(g[3]));
         out.push(u8::try_from((a << 2 | b >> 4) & 0xff).unwrap());
@@ -767,51 +827,69 @@ fn decode_base64(src: &[u8]) -> Vec<u8> {
             out.truncate(out.len() - 2);
         }
     }
-    out
+    Ok(out)
 }
 
 /// First string value of DOM node `i` as `(utf8 view, raw bytes)`, the
 /// `"S"`/`"b"` views of `ufbxi_get_val1`. `None` when the first value is not a
 /// string, or for the UTF-8 view in a raw-string context (no view retained).
+type StringViews = (Option<Vec<u8>>, Vec<u8>);
 pub(crate) fn node_string(
     doc: &Document<'_>,
     i: usize,
     ascii: bool,
-) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+    a: &Budget,
+) -> Result<Option<StringViews>, Error> {
     let parent = state_of(doc, doc.nodes[i].parent);
     let state = child_state(parent, doc.nodes[i].name);
     let raw_context = raw_string(parent, doc.nodes[i].name);
-    match project(doc, i, state, parent, ascii).into_iter().next() {
-        Some(DomValue::Str(view, raw)) => Some(((!raw_context).then_some(view), raw)),
-        _ => None,
-    }
+    Ok(
+        match project(doc, i, state, parent, ascii, a)?.into_iter().next() {
+            Some(DomValue::Str(view, raw)) => Some(((!raw_context).then_some(view), raw)),
+            _ => None,
+        },
+    )
 }
 
 /// `ufbxi_read_embedded_blob` over DOM node `i`: the 'C' array parts joined
 /// (a single binary part is used as is). Empty when the node is no 'C' array.
-pub(crate) fn node_content(doc: &Document<'_>, i: usize, ascii: bool) -> Vec<u8> {
+pub(crate) fn node_content(
+    doc: &Document<'_>,
+    i: usize,
+    ascii: bool,
+    a: &Budget,
+) -> Result<Vec<u8>, Error> {
     let parent = state_of(doc, doc.nodes[i].parent);
     if array_type(parent, doc.nodes[i].name, ascii, doc.version) != Some(b'C') {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let state = child_state(parent, doc.nodes[i].name);
-    match project(doc, i, state, parent, ascii).into_iter().next() {
-        Some(DomValue::Strings(parts)) => parts.concat(),
-        _ => Vec::new(),
-    }
+    Ok(
+        match project(doc, i, state, parent, ascii, a)?.into_iter().next() {
+            Some(DomValue::Strings(parts)) => a.collect(parts.into_iter().flatten())?,
+            _ => Vec::new(),
+        },
+    )
 }
 
 /// Boolean ('b') array of DOM node `i` as ufbx converts it, if it is one.
-pub(crate) fn node_bools(doc: &Document<'_>, i: usize, ascii: bool) -> Option<Vec<bool>> {
+pub(crate) fn node_bools(
+    doc: &Document<'_>,
+    i: usize,
+    ascii: bool,
+    a: &Budget,
+) -> Result<Option<Vec<bool>>, Error> {
     let parent = state_of(doc, doc.nodes[i].parent);
     if array_type(parent, doc.nodes[i].name, ascii, doc.version) != Some(b'b') {
-        return None;
+        return Ok(None);
     }
     let state = child_state(parent, doc.nodes[i].name);
-    match project(doc, i, state, parent, ascii).into_iter().next() {
-        Some(DomValue::Bytes(b)) => Some(b.iter().map(|&x| x != 0).collect()),
-        _ => None,
-    }
+    Ok(
+        match project(doc, i, state, parent, ascii, a)?.into_iter().next() {
+            Some(DomValue::Bytes(b)) => Some(a.collect(b.iter().map(|&x| x != 0))?),
+            _ => None,
+        },
+    )
 }
 
 #[cfg(feature = "parity")]
@@ -955,7 +1033,8 @@ fn emit_node<W: Write>(
     let values = if o == 0 {
         Vec::new()
     } else {
-        project(doc, o - 1, state, parent, ascii)
+        project(doc, o - 1, state, parent, ascii, &Budget::new(usize::MAX))
+            .map_err(io::Error::other)?
     };
     let m = em.push("values");
     em.count("length", values.len())?;
@@ -1004,13 +1083,20 @@ pub fn write_dom<W: Write>(
 }
 
 /// Numeric animation arrays in their retained byte representation.
-pub(crate) fn animation_array(doc: &Document<'_>, i: usize, ascii: bool) -> Option<(i64, Vec<u8>)> {
+pub(crate) fn animation_array(
+    doc: &Document<'_>,
+    i: usize,
+    ascii: bool,
+    a: &Budget,
+) -> Result<Option<(i64, Vec<u8>)>, Error> {
     let parent = state_of(doc, doc.nodes[i].parent);
     let state = child_state(parent, doc.nodes[i].name);
-    match project(doc, i, state, parent, ascii).into_iter().next()? {
-        DomValue::Array(kind, _, bytes) => Some((kind, bytes)),
-        _ => None,
-    }
+    Ok(
+        match project(doc, i, state, parent, ascii, a)?.into_iter().next() {
+            Some(DomValue::Array(kind, _, bytes)) => Some((kind, bytes)),
+            _ => None,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1026,8 +1112,19 @@ mod tests {
                 continue;
             }
             let parent = state_of(&doc, n.parent);
-            let values = project(&doc, i, child_state(parent, n.name), parent, true);
-            match (node_data(&doc, i, true), &values[0]) {
+            let values = project(
+                &doc,
+                i,
+                child_state(parent, n.name),
+                parent,
+                true,
+                &Budget::new(usize::MAX),
+            )
+            .unwrap();
+            match (
+                node_data(&doc, i, true, &Budget::new(usize::MAX)).unwrap(),
+                &values[0],
+            ) {
                 (NodeData::Ints(v), DomValue::Array(ARRAY_I32, _, bytes)) => {
                     assert_eq!(
                         v,
@@ -1057,10 +1154,22 @@ mod tests {
 
     #[test]
     fn ascii_content_base64_matches_ufbx_padding_rules() {
-        assert_eq!(decode_base64(b"TWVzaA=="), b"Mesh");
-        assert_eq!(decode_base64(b"TWVzaC4="), b"Mesh.");
-        assert_eq!(decode_base64(b"TWVzaC4h"), b"Mesh.!");
+        assert_eq!(
+            decode_base64(b"TWVzaA==", &Budget::new(usize::MAX)).unwrap(),
+            b"Mesh"
+        );
+        assert_eq!(
+            decode_base64(b"TWVzaC4=", &Budget::new(usize::MAX)).unwrap(),
+            b"Mesh."
+        );
+        assert_eq!(
+            decode_base64(b"TWVzaC4h", &Budget::new(usize::MAX)).unwrap(),
+            b"Mesh.!"
+        );
         // A trailing partial group is dropped; ufbx only warns.
-        assert_eq!(decode_base64(b"TWVzaC4hTQ"), b"Mesh.!");
+        assert_eq!(
+            decode_base64(b"TWVzaC4hTQ", &Budget::new(usize::MAX)).unwrap(),
+            b"Mesh.!"
+        );
     }
 }

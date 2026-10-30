@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.2 (unreleased)
+
+- Make every allocation on the default loading and evaluation paths fallible,
+  including converter graphs, geometry, materials, deformers and ordered
+  property indexes. Allocator refusal returns typed `Error::Allocation`.
+  Real allocator sweeps cover ASCII/compressed binary load, evaluation, bake
+  and error reporting; see `docs/VERIFICATION.md` for the contract boundary.
+- Materials retain computed feature flags, authored/template source properties,
+  and every texture attachment. Textures expose ordered layers and flattened
+  file-texture links.
+- `Scene::bake_animation()` adds bounded, independently reduced transform and
+  property channels, tick-based start trimming and original stack durations.
+  Compatibility with the complete ufbx bake is not claimed; see the verification
+  notes for the tested option subset and remaining differences.
+
+
 All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate uses
 [Semantic Versioning](https://semver.org/).

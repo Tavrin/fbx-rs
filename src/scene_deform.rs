@@ -5,9 +5,10 @@ use crate::canon::{Obj, V};
 use crate::canon_dom::{data_len, node_data, NodeData, Scalar};
 use crate::canon_scene::{CanonScene, DumpLimits, ElementType as T};
 use crate::deform::*;
+use crate::fallible_map::{Map as BTreeMap, Set as BTreeSet};
 use crate::scene_node as sn;
+use crate::Error;
 use crate::{Matrix, Transform};
-use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
 pub(crate) struct Deformers {
@@ -20,6 +21,7 @@ pub(crate) struct Deformers {
 }
 struct Reader<'a, 'd> {
     s: &'a CanonScene<'d>,
+    allocation: crate::api_alloc::Budget,
     children: Vec<Vec<usize>>,
     used: std::cell::Cell<usize>,
     limit: usize,
@@ -28,9 +30,10 @@ struct Reader<'a, 'd> {
     path: std::cell::Cell<crate::conversion_budget::Path>,
 }
 impl Reader<'_, '_> {
-    fn new<'a, 'd>(s: &'a CanonScene<'d>, limits: &DumpLimits) -> Result<Reader<'a, 'd>, String> {
+    fn new<'a, 'd>(s: &'a CanonScene<'d>, limits: &DumpLimits) -> Result<Reader<'a, 'd>, Error> {
         let mut r = Reader {
             s,
+            allocation: crate::api_alloc::Budget::new(limits.max_allocation),
             children: Vec::new(),
             used: std::cell::Cell::new(0),
             limit: limits.max_allocation,
@@ -42,15 +45,15 @@ impl Reader<'_, '_> {
         // for Vec growth, before constructing any of the adjacency table.
         r.charge(s.doc.nodes.len(), std::mem::size_of::<Vec<usize>>() + 32)?;
         r.work(s.doc.nodes.len())?;
-        r.children = vec![Vec::new(); s.doc.nodes.len()];
+        r.children = r.allocation.filled(s.doc.nodes.len(), Vec::new())?;
         for (i, n) in s.doc.nodes.iter().enumerate() {
             if let Some(p) = n.parent {
-                r.children[p].push(i);
+                r.allocation.push(&mut r.children[p], i)?;
             }
         }
         Ok(r)
     }
-    fn work(&self, count: usize) -> Result<(), String> {
+    fn work(&self, count: usize) -> Result<(), Error> {
         let used = self
             .work
             .get()
@@ -63,14 +66,14 @@ impl Reader<'_, '_> {
         crate::conversion_budget::record(self.path.get(), count);
         Ok(())
     }
-    fn sort_work(&self, count: usize) -> Result<(), String> {
+    fn sort_work(&self, count: usize) -> Result<(), Error> {
         self.work(
             count
                 .checked_mul((usize::BITS - count.leading_zeros()) as usize + 1)
                 .ok_or("deformer: work limit")?,
         )
     }
-    fn charge(&self, count: usize, width: usize) -> Result<(), String> {
+    fn charge(&self, count: usize, width: usize) -> Result<(), Error> {
         let used = count
             .checked_mul(width)
             .and_then(|n| self.used.get().checked_add(n))
@@ -87,7 +90,7 @@ impl Reader<'_, '_> {
             .copied()
             .find(|&c| self.s.doc.nodes[c].name == name)
     }
-    fn data(&self, n: usize, name: &[u8]) -> Result<Option<NodeData>, String> {
+    fn data(&self, n: usize, name: &[u8]) -> Result<Option<NodeData>, Error> {
         self.work(self.children[n].len())?;
         let Some(c) = self.child(n, name) else {
             return Ok(None);
@@ -103,25 +106,30 @@ impl Reader<'_, '_> {
             }
         }
         self.work(count)?;
-        Ok(Some(node_data(&self.s.doc, c, self.s.ascii)))
+        Ok(Some(node_data(
+            &self.s.doc,
+            c,
+            self.s.ascii,
+            &self.allocation,
+        )?))
     }
-    fn reals(&self, n: usize, name: &[u8]) -> Result<Vec<f64>, String> {
+    fn reals(&self, n: usize, name: &[u8]) -> Result<Vec<f64>, Error> {
         match self.data(n, name)? {
             None => Ok(Vec::new()),
             Some(NodeData::Reals(v)) if v.iter().all(|x| x.is_finite()) => Ok(v),
-            _ => Err(format!("deformer: invalid real array at {n}")),
+            _ => Err(Error::InvalidData("deformer: invalid real array")),
         }
     }
-    fn indices(&self, n: usize, name: &[u8]) -> Result<Vec<u32>, String> {
+    fn indices(&self, n: usize, name: &[u8]) -> Result<Vec<u32>, Error> {
         match self.data(n, name)? {
             None => Ok(Vec::new()),
-            Some(NodeData::Ints(v)) if v.iter().all(|&x| x >= 0) => {
-                Ok(v.into_iter().map(|x| u32::try_from(x).unwrap()).collect())
-            }
-            _ => Err(format!("deformer: invalid index array at {n}")),
+            Some(NodeData::Ints(v)) if v.iter().all(|&x| x >= 0) => self
+                .allocation
+                .collect(v.into_iter().map(|x| u32::try_from(x).unwrap())),
+            _ => Err(Error::InvalidData("deformer: invalid index array")),
         }
     }
-    fn matrix(&self, n: usize, name: &[u8]) -> Result<sn::Mat, String> {
+    fn matrix(&self, n: usize, name: &[u8]) -> Result<sn::Mat, Error> {
         let v = self.reals(n, name)?;
         if v.is_empty() && self.child(n, name).is_none() {
             return Ok([0.0; 12]);
@@ -131,34 +139,38 @@ impl Reader<'_, '_> {
         }
         Ok(std::array::from_fn(|i| v[i / 3 * 4 + i % 3]))
     }
-    fn connected(&self, conns: &[(usize, Vec<u8>)], ty: T) -> Result<Vec<usize>, String> {
+    fn connected(&self, conns: &[(usize, Vec<u8>)], ty: T) -> Result<Vec<usize>, Error> {
         self.sort_work(conns.len())?;
         self.charge(conns.len(), 80)?;
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
         for (k, p) in conns {
-            if p.is_empty() && self.s.elements[*k].ty == ty && seen.insert(*k) {
-                out.push(*k);
+            if p.is_empty()
+                && self.s.elements[*k].ty == ty
+                && seen.try_insert(*k, &self.allocation)?
+            {
+                self.allocation.push(&mut out, *k)?;
             }
         }
         Ok(out)
     }
-    fn dst(&self, i: usize, ty: T) -> Result<Vec<usize>, String> {
+    fn dst(&self, i: usize, ty: T) -> Result<Vec<usize>, Error> {
         self.connected(&self.s.elements[i].dst_conns, ty)
     }
-    fn src(&self, i: usize, ty: T) -> Result<Vec<usize>, String> {
+    fn src(&self, i: usize, ty: T) -> Result<Vec<usize>, Error> {
         self.connected(&self.s.elements[i].src_conns, ty)
     }
-    fn mesh_targets(&self, i: usize) -> Result<Vec<usize>, String> {
+    fn mesh_targets(&self, i: usize) -> Result<Vec<usize>, Error> {
         let mut out = self.src(i, T::Mesh)?;
         for node in self.src(i, T::Node)? {
             let meshes = self.dst(node, T::Mesh)?;
             self.charge(meshes.len(), 16)?;
+            self.allocation.reserve(&mut out, meshes.len())?;
             out.extend(meshes);
         }
         Ok(out)
     }
-    fn num_vertices(&self, mesh: usize) -> Result<usize, String> {
+    fn num_vertices(&self, mesh: usize) -> Result<usize, Error> {
         let n = self.s.elements[mesh]
             .node
             .ok_or("deformer: mesh has no source")?;
@@ -176,9 +188,9 @@ impl Reader<'_, '_> {
             e.source_id
         }
     }
-    fn name(&self, i: usize) -> Result<String, String> {
+    fn name(&self, i: usize) -> Result<String, Error> {
         self.charge(self.s.elements[i].name.len(), 3)?;
-        Ok(String::from_utf8_lossy(&self.s.elements[i].name).into_owned())
+        self.allocation.text(&self.s.elements[i].name)
     }
 }
 fn refs(v: &[usize]) -> V {
@@ -223,7 +235,7 @@ fn metadata_real(s: &CanonScene<'_>, name: &str, def: f64) -> f64 {
 }
 
 /// Convert, validate and retain typed data for both the API and canonical dump.
-pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), String> {
+pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), Error> {
     if !s.elements.iter().any(|e| {
         matches!(
             e.ty,
@@ -238,11 +250,12 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         return Ok(());
     }
     let r = Reader::new(s, limits)?;
+    let a = &r.allocation;
     // Element-indexed maps, traversal stacks and typed record headers.
     r.charge(s.elements.len(), 1024)?;
     r.work(s.elements.len())?;
     // Reject deformer-only cycles, including unconnected cycles, without recursion.
-    let mut color = vec![0u8; s.elements.len()];
+    let mut color = a.filled(s.elements.len(), 0u8)?;
     for start in 0..s.elements.len() {
         if !matches!(
             s.elements[start].ty,
@@ -251,7 +264,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         {
             continue;
         }
-        let mut stack = vec![(start, 0)];
+        let mut stack = a.collect([(start, 0)])?;
         color[start] = 1;
         while let Some((i, next)) = stack.last_mut() {
             let conns = &s.elements[*i].src_conns;
@@ -280,7 +293,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             }
             if color[*k] == 0 {
                 color[*k] = 1;
-                stack.push((*k, 0));
+                a.push(&mut stack, (*k, 0))?;
             }
         }
     }
@@ -308,7 +321,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         m
     };
     let mut d = Deformers::default();
-    let mut node_bind = vec![None; s.elements.len()];
+    let mut node_bind = a.filled(s.elements.len(), None)?;
     // Resolve poses in source order: the first bind pose wins for each node.
     let parent_of =
         |k: usize| {
@@ -325,14 +338,14 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
     for (k, e) in s.elements.iter().enumerate() {
         if e.ty == T::Node {
             if let Some(id) = e.source_id {
-                by_source.entry(id).or_insert(k);
+                by_source.try_get_or_insert_with(id, a, || Ok(k))?;
             }
         }
     }
     // Memoize parent depth once. Each node is walked at most twice, even
     // for deep chains and multiple poses; sorting never walks ancestors.
-    let mut depths: Vec<Option<usize>> = vec![None; s.elements.len()];
-    let mut visiting = vec![false; s.elements.len()];
+    let mut depths: Vec<Option<usize>> = a.filled(s.elements.len(), None)?;
+    let mut visiting = a.filled(s.elements.len(), false)?;
     let mut path = Vec::new();
     for start in 0..s.elements.len() {
         if s.elements[start].ty != T::Node || depths[start].is_some() {
@@ -348,7 +361,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 return Err("pose: parent cycle".into());
             }
             visiting[k] = true;
-            path.push(k);
+            a.push(&mut path, k)?;
             at = parent_of(k);
         }
         let depth = at.and_then(|k| depths[k]).map_or(0, |d| d + 1);
@@ -357,17 +370,20 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             visiting[k] = false;
         }
     }
-    let mut first_bind = vec![None; s.elements.len()];
-    let mut pose_bone = vec![None; s.elements.len()];
-    let mut pose_ids: Vec<usize> = s
-        .elements
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.ty == T::Pose)
-        .map(|(i, _)| i)
-        .collect();
+    let mut first_bind = a.filled(s.elements.len(), None)?;
+    let mut pose_bone = a.filled(s.elements.len(), None)?;
+    let mut pose_ids: Vec<usize> = a.collect(
+        s.elements
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.ty == T::Pose)
+            .map(|(i, _)| i),
+    )?;
     r.sort_work(pose_ids.len())?;
-    pose_ids.sort_by_key(|&i| s.elements[i].ordinal);
+    a.stable_sort(&mut pose_ids, |left, right| {
+        let key = |&i: &usize| s.elements[i].ordinal;
+        key(left).cmp(&key(right))
+    })?;
     for i in pose_ids {
         let e = &s.elements[i];
         let n = e.node.ok_or("pose: missing source")?;
@@ -397,21 +413,27 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 node_bind[k] = Some(i);
                 first_bind[k] = Some(m);
             }
-            bones.push(BonePose {
-                bone_node: k,
-                bone_to_world: Matrix(m),
-                bone_to_parent: Matrix([0.0; 12]),
-            });
+            a.push(
+                &mut bones,
+                BonePose {
+                    bone_node: k,
+                    bone_to_world: Matrix(m),
+                    bone_to_parent: Matrix([0.0; 12]),
+                },
+            )?;
         }
         // ufbx typed node order: depth, original parent element ID, original ID.
         r.sort_work(bones.len())?;
-        bones.sort_by_key(|b| {
-            (
-                depths[b.bone_node],
-                parent_of(b.bone_node).map(|k| s.elements[k].ordinal),
-                s.elements[b.bone_node].ordinal,
-            )
-        });
+        a.stable_sort(&mut bones, |left, right| {
+            let key = |b: &BonePose| {
+                (
+                    depths[b.bone_node],
+                    parent_of(b.bone_node).map(|k| s.elements[k].ordinal),
+                    s.elements[b.bone_node].ordinal,
+                )
+            };
+            key(left).cmp(&key(right))
+        })?;
         for (j, b) in bones.iter().enumerate() {
             // Preserve the first entry when malformed poses repeat a node.
             pose_bone[b.bone_node].get_or_insert(j);
@@ -434,19 +456,22 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         for b in &bones {
             pose_bone[b.bone_node] = None;
         }
-        d.poses.push((
-            i,
-            Pose {
-                name: r.name(i)?,
-                source_id: r.source_id(i),
-                is_bind_pose: bind,
-                bone_poses: bones,
-            },
-        ));
+        a.push(
+            &mut d.poses,
+            (
+                i,
+                Pose {
+                    name: r.name(i)?,
+                    source_id: r.source_id(i),
+                    is_bind_pose: bind,
+                    bone_poses: bones,
+                },
+            ),
+        )?;
     }
     r.path.set(crate::conversion_budget::Path::Deformers);
-    let mut cluster_index = vec![None; s.elements.len()];
-    let mut shape_index = vec![None; s.elements.len()];
+    let mut cluster_index = a.filled(s.elements.len(), None)?;
+    let mut shape_index = a.filled(s.elements.len(), None)?;
     let mut shape_orders = Vec::new();
     for (i, e) in s.elements.iter().enumerate() {
         let Some(n) = e.node else {
@@ -478,42 +503,45 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                     }
                 }
                 r.sort_work(indices.len())?;
-                let mut order: Vec<usize> = (0..indices.len()).collect();
-                order.sort_by_key(|&j| indices[j]);
-                let offsets = |values: &[f64], scale: f64| -> Vec<[f64; 3]> {
+                let mut order: Vec<usize> = a.collect(0..indices.len())?;
+                a.stable_sort(&mut order, |left, right| {
+                    let key = |&j: &usize| indices[j];
+                    key(left).cmp(&key(right))
+                })?;
+                let offsets = |values: &[f64], scale: f64| -> Result<Vec<[f64; 3]>, Error> {
                     if values.is_empty() {
-                        return Vec::new();
+                        return Ok(Vec::new());
                     }
-                    order
-                        .iter()
-                        .map(|&j| {
-                            let mut v = [values[j * 3], values[j * 3 + 1], values[j * 3 + 2]];
-                            if scale != 1.0 {
-                                for x in &mut v {
-                                    *x *= scale;
-                                }
+                    a.collect(order.iter().map(|&j| {
+                        let mut v = [values[j * 3], values[j * 3 + 1], values[j * 3 + 2]];
+                        if scale != 1.0 {
+                            for x in &mut v {
+                                *x *= scale;
                             }
-                            if axis != 0 {
-                                v[usize::try_from(axis).expect("validated mirror axis") - 1] =
-                                    -v[usize::try_from(axis).expect("validated mirror axis") - 1];
-                            }
-                            v
-                        })
-                        .collect()
+                        }
+                        if axis != 0 {
+                            v[usize::try_from(axis).expect("validated mirror axis") - 1] =
+                                -v[usize::try_from(axis).expect("validated mirror axis") - 1];
+                        }
+                        v
+                    }))
                 };
                 shape_index[i] = Some(d.shapes.len());
-                d.shapes.push((
-                    i,
-                    BlendShape {
-                        name: r.name(i)?,
-                        source_id: r.source_id(i),
-                        offset_vertices: order.iter().map(|&j| indices[j]).collect(),
-                        position_offsets: offsets(&pos, scale),
-                        normal_offsets: offsets(&normal, 1.0),
-                        offset_weights: Vec::new(),
-                    },
-                ));
-                shape_orders.push(order);
+                a.push(
+                    &mut d.shapes,
+                    (
+                        i,
+                        BlendShape {
+                            name: r.name(i)?,
+                            source_id: r.source_id(i),
+                            offset_vertices: a.collect(order.iter().map(|&j| indices[j]))?,
+                            position_offsets: offsets(&pos, scale)?,
+                            normal_offsets: offsets(&normal, 1.0)?,
+                            offset_weights: Vec::new(),
+                        },
+                    ),
+                )?;
+                a.push(&mut shape_orders, order)?;
             }
             T::SkinCluster => {
                 let vertices = r.indices(n, b"Indexes")?;
@@ -574,21 +602,24 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                     .unwrap_or(bind);
                 let world = sn::matrix_mul(&bone_world, &geom);
                 cluster_index[i] = Some(d.clusters.len());
-                d.clusters.push((
-                    i,
-                    SkinCluster {
-                        name: r.name(i)?,
-                        source_id: r.source_id(i),
-                        bone_node: bone,
-                        geometry_to_bone: Matrix(geom),
-                        mesh_node_to_bone: Matrix(mesh_mat),
-                        bind_to_world: Matrix(bind),
-                        geometry_to_world: Matrix(world),
-                        geometry_to_world_transform: tr(&sn::matrix_to_transform(&world)),
-                        vertices,
-                        weights,
-                    },
-                ));
+                a.push(
+                    &mut d.clusters,
+                    (
+                        i,
+                        SkinCluster {
+                            name: r.name(i)?,
+                            source_id: r.source_id(i),
+                            bone_node: bone,
+                            geometry_to_bone: Matrix(geom),
+                            mesh_node_to_bone: Matrix(mesh_mat),
+                            bind_to_world: Matrix(bind),
+                            geometry_to_world: Matrix(world),
+                            geometry_to_world_transform: tr(&sn::matrix_to_transform(&world)),
+                            vertices,
+                            weights,
+                        },
+                    ),
+                )?;
             }
             _ => {}
         }
@@ -611,13 +642,10 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                     },
                     _ => SkinningMethod::Linear,
                 };
-                let clusters: Vec<usize> = r
-                    .dst(i, T::SkinCluster)?
-                    .into_iter()
-                    .filter(|&k| {
+                let clusters: Vec<usize> =
+                    a.collect(r.dst(i, T::SkinCluster)?.into_iter().filter(|&k| {
                         cluster_index[k].is_some_and(|j| d.clusters[j].1.bone_node.is_some())
-                    })
-                    .collect();
+                    }))?;
                 let mut count = 0;
                 for mesh in r.mesh_targets(i)? {
                     count = count.max(r.num_vertices(mesh)?);
@@ -634,7 +662,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                     count,
                     std::mem::size_of::<SkinVertex>() + std::mem::size_of::<Vec<SkinWeight>>(),
                 )?;
-                let mut per_vertex = vec![Vec::new(); count];
+                let mut per_vertex = a.filled(count, Vec::new())?;
                 for (ci, k) in clusters.iter().enumerate() {
                     let c = &d.clusters[cluster_index[*k].ok_or("skin: missing cluster")?].1;
                     r.charge(c.weights.len(), std::mem::size_of::<SkinWeight>() * 8)?;
@@ -643,10 +671,13 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                         let dst = per_vertex
                             .get_mut(v as usize)
                             .ok_or("skin: vertex out of range")?;
-                        dst.push(SkinWeight {
-                            cluster_index: ci,
-                            weight: w,
-                        });
+                        a.push(
+                            dst,
+                            SkinWeight {
+                                cluster_index: ci,
+                                weight: w,
+                            },
+                        )?;
                     }
                 }
                 let dq_vertices = r.indices(n, b"Indexes")?;
@@ -656,54 +687,65 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 {
                     return Err("skin: invalid dual-quaternion weights".into());
                 }
-                let mut vertices = Vec::with_capacity(count);
+                let mut vertices = Vec::new();
+                a.reserve(&mut vertices, count)?;
                 let mut weights = Vec::new();
                 let mut max_weights = 0;
                 for mut w in per_vertex {
                     r.sort_work(w.len())?;
-                    w.sort_by(|a, b| {
+                    a.stable_sort(&mut w, |a, b| {
                         b.weight
                             .partial_cmp(&a.weight)
                             .unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    })?;
                     max_weights = max_weights.max(w.len());
-                    vertices.push(SkinVertex {
-                        weight_begin: weights.len(),
-                        num_weights: w.len(),
-                        dq_weight: if method == SkinningMethod::DualQuaternion {
-                            1.0
-                        } else {
-                            0.0
+                    a.push(
+                        &mut vertices,
+                        SkinVertex {
+                            weight_begin: weights.len(),
+                            num_weights: w.len(),
+                            dq_weight: if method == SkinningMethod::DualQuaternion {
+                                1.0
+                            } else {
+                                0.0
+                            },
                         },
-                    });
+                    )?;
+                    a.reserve(&mut weights, w.len())?;
                     weights.extend(w);
                 }
                 for (&v, &w) in dq_vertices.iter().zip(&dq_weights) {
                     vertices[v as usize].dq_weight = w;
                 }
-                d.skins.push((
+                a.push(
+                    &mut d.skins,
+                    (
+                        i,
+                        SkinDeformer {
+                            name: r.name(i)?,
+                            source_id: r.source_id(i),
+                            skinning_method: method,
+                            clusters,
+                            vertices,
+                            weights,
+                            max_weights_per_vertex: max_weights,
+                            dq_vertices,
+                            dq_weights,
+                        },
+                    ),
+                )?;
+            }
+            T::BlendDeformer => a.push(
+                &mut d.blends,
+                (
                     i,
-                    SkinDeformer {
+                    BlendDeformer {
                         name: r.name(i)?,
                         source_id: r.source_id(i),
-                        skinning_method: method,
-                        clusters,
-                        vertices,
-                        weights,
-                        max_weights_per_vertex: max_weights,
-                        dq_vertices,
-                        dq_weights,
+                        channels: r.dst(i, T::BlendChannel)?,
                     },
-                ));
-            }
-            T::BlendDeformer => d.blends.push((
-                i,
-                BlendDeformer {
-                    name: r.name(i)?,
-                    source_id: r.source_id(i),
-                    channels: r.dst(i, T::BlendChannel)?,
-                },
-            )),
+                ),
+            )?,
             T::BlendChannel => {
                 let shapes = r.dst(i, T::BlendShape)?;
                 let full = r.reals(n, b"FullWeights")?;
@@ -722,7 +764,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                         limits.max_properties,
                         limits.max_allocation,
                     )
-                    .map_err(|e| format!("blend properties: {e:?}"))?
+                    .map_err(crate::api::property_error)?
                 };
                 let percent = if s.doc.nodes[n].name == b"Shape" {
                     let parent = s.doc.nodes[n].parent.ok_or("shape: missing geometry")?;
@@ -732,7 +774,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                         limits.max_properties,
                         limits.max_allocation,
                     )
-                    .map_err(|e| format!("shape properties: {e:?}"))?;
+                    .map_err(crate::api::property_error)?;
                     p.find(&e.name)
                         .filter(|p| {
                             matches!(
@@ -766,16 +808,14 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                                 r.charge(full.len(), 8)?;
                                 r.work(full.len())?;
                                 target.offset_weights =
-                                    shape_orders[j].iter().map(|&k| full[k] / 100.0).collect();
+                                    a.collect(shape_orders[j].iter().map(|&k| full[k] / 100.0))?;
                             }
                         }
                     }
                 }
                 r.charge(shapes.len(), std::mem::size_of::<BlendKeyframe>() * 3)?;
-                let mut keys: Vec<BlendKeyframe> = shapes
-                    .iter()
-                    .enumerate()
-                    .map(|(j, &shape)| BlendKeyframe {
+                let mut keys: Vec<BlendKeyframe> =
+                    a.collect(shapes.iter().enumerate().map(|(j, &shape)| BlendKeyframe {
                         shape,
                         target_weight: if s.exporter == 2 {
                             1.0
@@ -783,36 +823,43 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                             full.get(j).map_or(1.0, |w| w / 100.0)
                         },
                         effective_weight: 0.0,
-                    })
-                    .collect();
+                    }))?;
                 r.sort_work(keys.len())?;
-                keys.sort_by(|a, b| {
+                a.stable_sort(&mut keys, |a, b| {
                     a.target_weight
                         .partial_cmp(&b.target_weight)
                         .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                })?;
                 let weight = percent * 0.01;
                 effective_weights(&mut keys, weight);
                 let target_shape = keys.last().map(|k| k.shape);
-                d.channels.push((
-                    i,
-                    BlendChannel {
-                        name: r.name(i)?,
-                        source_id: r.source_id(i),
-                        weight,
-                        keyframes: keys,
-                        target_shape,
-                    },
-                ));
+                a.push(
+                    &mut d.channels,
+                    (
+                        i,
+                        BlendChannel {
+                            name: r.name(i)?,
+                            source_id: r.source_id(i),
+                            weight,
+                            keyframes: keys,
+                            target_shape,
+                        },
+                    ),
+                )?;
             }
             _ => {}
         }
     }
     r.sort_work(d.poses.len())?;
-    d.poses.sort_by_key(|(i, _)| *i);
+    a.stable_sort(&mut d.poses, |left, right| {
+        let key = |(i, _): &(usize, Pose)| *i;
+        key(left).cmp(&key(right))
+    })?;
+    let allocation = r.allocation;
+    let a = &allocation;
     for (k, p) in node_bind.into_iter().enumerate() {
         if let Some(p) = p {
-            s.elements[k].obj.set("bind_pose", V::Ref(Some(p)));
+            s.elements[k].obj.try_set("bind_pose", V::Ref(Some(p)), a)?;
         }
     }
     if !s.lean {
@@ -1022,7 +1069,7 @@ mod tests {
                 if (0..=i32::MAX as i64).contains(&value) {
                     assert_eq!(result.unwrap(), [u32::try_from(value).unwrap()]);
                 } else {
-                    assert!(result.unwrap_err().contains("invalid index"));
+                    assert!(result.unwrap_err().to_string().contains("invalid index"));
                 }
             }
         }
@@ -1035,7 +1082,9 @@ mod tests {
             max_allocation: 0,
             ..Default::default()
         };
-        assert!(matches!(Reader::new(&s, &limits), Err(e) if e.contains("allocation limit")));
+        assert!(
+            matches!(Reader::new(&s, &limits), Err(e) if e.to_string().contains("allocation limit"))
+        );
         let n = s
             .doc
             .nodes
@@ -1055,6 +1104,7 @@ mod tests {
         assert!(r
             .indices(s.doc.nodes[n].parent.unwrap(), b"Indexes")
             .unwrap_err()
+            .to_string()
             .contains("allocation limit"));
         let weights = s
             .doc
@@ -1067,6 +1117,7 @@ mod tests {
         assert!(r
             .reals(s.doc.nodes[weights].parent.unwrap(), b"Weights")
             .unwrap_err()
+            .to_string()
             .contains("allocation limit"));
     }
 }

@@ -156,7 +156,9 @@ fn dump_prop<W: Write>(
     b: &AnimationBinding,
     time: f64,
 ) -> io::Result<()> {
-    let p = a.property(layers, b.element, &b.property, time);
+    let p = a
+        .property(layers, b.element, &b.property, time)
+        .map_err(io::Error::other)?;
     let m = em.push("binding");
     em.emit_struct(
         "ufbx_anim_prop",
@@ -275,7 +277,7 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
                 em.restore(li);
                 em.restore(lm);
             }
-            let states = a.states(layers, s.time);
+            let states = a.states(layers, s.time).map_err(io::Error::other)?;
             let nm = em.push("nodes");
             em.count("length", states.len())?;
             for (i, st) in states.iter().enumerate() {
@@ -318,6 +320,7 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
                     "weight",
                     "eval_f64",
                     &[a.property(layers, element, b"DeformPercent", s.time)
+                        .map_err(io::Error::other)?
                         .components[0]
                         * 0.01],
                 )?;

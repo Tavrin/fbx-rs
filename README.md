@@ -130,3 +130,17 @@ Unless you explicitly state otherwise, any contribution intentionally
 submitted for inclusion in this crate by you, as defined in the Apache-2.0
 license, shall be dual licensed as above, without any additional terms or
 conditions.
+
+
+Material inspection includes `Material::features()`, `source_property(b"Opacity")`
+(with source-template fallback), and `textures()` for every attachment, including
+unmapped property names. `Texture::layers()` preserves blend modes and alpha;
+`file_textures()` exposes flattened unique file texture indices.
+
+`Scene::bake_animation(stack, &BakeOptions::default())` produces independently
+reduced translation, quaternion, scale and numeric property channels. Baking is
+fallible, with aggregate candidate-key, allocation and evaluation-work limits.
+The default candidate-key cap is 16 million. Set `trim_start_time` to shift keys
+using FBX ticks; playback bounds and duration retain the original stack range.
+This is a subset of ufbx's baking controls. See [verification](docs/VERIFICATION.md)
+for the compatibility boundary, including scale-helper scheduling.
