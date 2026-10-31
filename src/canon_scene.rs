@@ -1386,6 +1386,27 @@ fn project_graph(
     }
     let (_, owner_for) =
         crate::scene_animation::helper_index(n, &scene.scale_helpers, &allocation)?;
+    // A node with no parent connection hangs from the root: ufbx sets
+    // `node->parent = root_node` for it (`ufbxi_finalize_scene`, ufbx.c lines
+    // 18938-18943, `allow_nodes_out_of_root` is off), so its children are one
+    // level deeper than the node and it is listed among the root's children.
+    // ufbx lists the children of a node in creation order (they are slices of the
+    // sorted `scene.nodes`, ufbx.c line 21724).
+    let mut adopted = false;
+    for i in 1..n {
+        let e = &scene.elements[i];
+        if e.ty == Node && e.node.is_some() && owner_for[i].is_none() && parent[i].is_none() {
+            parent[i] = Some(0);
+            allocation.push(&mut children[0], i)?;
+            adopted = true;
+        }
+    }
+    if adopted {
+        budget.sort_work(children[0].len())?;
+        allocation.stable_sort(&mut children[0], |&a, &b| {
+            scene.created(a).cmp(&scene.created(b))
+        })?;
+    }
     // ufbxi_cmp_node_less puts scale helpers before ordinary siblings.
     for list in &mut children {
         budget.sort_work(list.len())?;
@@ -2413,7 +2434,11 @@ fn project_globals(
         source_axes
     };
     // Target axes/units after import profile conversion (right-handed Y-up,
-    // metres) when the source coordinate system is known.
+    // metres) when the source coordinate system is known. ufbx itself leaves the
+    // file's axes in `settings.axes` after converting (`ufbxi_transform_to_axes`
+    // never writes the target back, ufbx.c line 24954); `SceneSettings::axes` is
+    // documented as the axes of the loaded scene, so the two differ on any file
+    // that is converted, and `compare_large.py` names that difference.
     scene.settings.try_set(
         "axes",
         V::Obj(

@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.1.3 (unreleased)
+All notable changes to this crate are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate uses
+[Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+### Added
 
 - Add legacy FBX construction for name-based connections, embedded model
   attributes, Properties60, Takes and heterogeneous animation keys, older
@@ -10,7 +16,9 @@
   receipts and proved retained-DOM mutation checks, plus authored legacy
   regression fixtures and reproducible fuzz seeds.
 
-## 0.1.2 (unreleased)
+## [0.1.2] - 2026-10-31
+
+### Added
 
 - Make every allocation on the default loading and evaluation paths fallible,
   including converter graphs, geometry, materials, deformers and ordered
@@ -22,18 +30,8 @@
   file-texture links.
 - `Scene::bake_animation()` adds bounded, independently reduced transform and
   property channels, tick-based start trimming and original stack durations.
-  Compatibility with the complete ufbx bake is not claimed; see the verification
-  notes for the tested option subset and remaining differences.
-
-
-All notable changes to this crate are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate uses
-[Semantic Versioning](https://semver.org/).
-
-## [Unreleased]
-
-### Added
-
+  Baked streams match ufbx on the tested inputs and option sets; see the
+  verification notes.
 - `Limit` and `Error::LimitExceeded(Limit)`: a refusal caused by a `Limits`
   field now names that field (`Limit::field()`) instead of a free-text message.
   `Error::InputTooLarge` still reports `max_input_bytes`.
@@ -68,6 +66,12 @@ All notable changes to this crate are documented here. The format follows
   (ufbx.c:12850 and 12903, `ufbxi_warn_polygon_mapping`), so the layer element is
   dropped and the mesh loads. fbx-rs now does the same for normals, tangents, UV
   sets, colors, materials and smoothing.
+- A layer element whose `ReferenceInformationType` is not `Direct`, `Index` or
+  `IndexToDirect` no longer fails the whole mesh, and a missing label no longer
+  does either. ufbx 0.23.1 never reads the label (the string does not occur in
+  ufbx.c): `ufbxi_read_vertex_element` indexes a layer exactly when the layer
+  has an index array (ufbx.c:12743). fbx-rs does the same for a missing or
+  unrecognised label; a recognised label keeps its existing meaning.
 - Triangulation no longer charges the allocation budget quadratically: a mesh of
   160,000 quads was refused under a 4 GiB `max_allocation` because every polygon
   grew the output by exactly its own size and the budget charges the vector's
@@ -90,8 +94,20 @@ All notable changes to this crate are documented here. The format follows
   helper's baked keys and evaluated from them, nodes are baked in node order and
   baked properties are ordered by object.
 
+- A node with no parent connection is a child of the root, as in ufbx
+  (`ufbxi_finalize_scene`, ufbx.c:18938): its descendants were one level too
+  shallow, so `Scene::nodes()` could list them before shallower nodes. Found by
+  the `load` fuzz target.
+
 ### Verification
 
+- `fbx-parity dump-scene --max-output 0`, `fbx-parity sections` and
+  `reference/compare_large.py` compare whole canonical streams of production-size
+  files section by section (the 8 GiB output cap no longer stops the Bistro
+  interiors); see `docs/VERIFICATION.md`. They exposed that the canonical dump
+  walked animation curves, evaluated nodes, skins and morph channels in the
+  public list order instead of the canonical element order of `reference/canon.c`;
+  the public lists were already correct, so only the parity dump changes.
 - The canonical stream ends with an `order` section recording each typed list,
   and `reference/compare_order.py` and `reference/compare_bake.py` compare list
   and bake order. The earlier "316/316 bit-exact" claim compared values by
@@ -127,5 +143,6 @@ All notable changes to this crate are documented here. The format follows
   preserving each weight's association with its vertex.
 - Reject animation-connection cycles, including disconnected cycles and self-links.
 
-[Unreleased]: https://github.com/Tavrin/fbx-rs/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Tavrin/fbx-rs/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Tavrin/fbx-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Tavrin/fbx-rs/compare/v0.1.0...v0.1.1

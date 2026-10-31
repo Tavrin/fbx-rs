@@ -154,3 +154,45 @@ fn by_control_point_mapping_is_ignored_like_ufbx() {
     assert!(used.meshes()[0].normals().is_some());
     assert_eq!(used.meshes()[0].uv_sets().len(), 1);
 }
+
+#[test]
+fn unknown_reference_label_is_ignored_like_ufbx() {
+    // ufbx never reads ReferenceInformationType (the string does not occur in
+    // ufbx.c); a layer is indexed exactly when it has an index array. A label
+    // that is neither Direct nor IndexToDirect must therefore not fail the mesh.
+    let normals = "*9 { a: 1,0,0,0,1,0,0,0,1 }";
+    let build = |label: &str, indexed: bool| {
+        let index = if indexed {
+            "   NormalsIndex: *3 { a: 2,1,0 }\n"
+        } else {
+            ""
+        };
+        let element = format!(
+            "  LayerElementNormal: 0 {{
+   Name: \"\"
+   MappingInformationType: \"ByPolygonVertex\"
+   ReferenceInformationType: \"{label}\"
+   Normals: {normals}
+{index}  }}
+"
+        );
+        load(&mesh_doc(3, &element), &Limits::default()).expect("loads")
+    };
+    let direct = build("Direct", false);
+    let unknown_direct = build("NoSuchReference", false);
+    let indexed = build("IndexToDirect", true);
+    let unknown_indexed = build("NoSuchReference", true);
+    assert_eq!(
+        unknown_direct.meshes()[0].normals(),
+        direct.meshes()[0].normals()
+    );
+    assert_eq!(
+        unknown_indexed.meshes()[0].normals(),
+        indexed.meshes()[0].normals()
+    );
+    // The index array is what selects the data, not the label.
+    assert_ne!(
+        unknown_indexed.meshes()[0].normals(),
+        unknown_direct.meshes()[0].normals()
+    );
+}

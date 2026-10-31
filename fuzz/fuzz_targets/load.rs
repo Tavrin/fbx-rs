@@ -316,6 +316,13 @@ fuzz_target!(|data: &[u8]| {
         max_allocation: 1 << 20,
         max_deformer_work: 1 << 20,
         max_animation_work: 1 << 20,
+        // Just above what the corpus needs (measured: every supported file loads
+        // at 8 meshes, 16 layers, 16 face vertices and 256 work units), so that a
+        // seed of a few hundred bytes reaches each of these four limits.
+        max_meshes: 16,
+        max_layers: 32,
+        max_face_vertices: 128,
+        max_triangulation_work: 256,
     };
     if let Ok(scene) = load_with_limits(data, &LoadOptions::default(), &limits) {
         walk(&scene);

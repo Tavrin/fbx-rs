@@ -47,6 +47,32 @@ fn lists_follow_file_order_and_nodes_follow_depth_then_file_order() {
     assert_eq!(scene.root().children(), &[1, 2]);
 }
 
+/// A node with no parent connection hangs from the root in ufbx, so its
+/// children are one level deeper than it (found by the `load` fuzz target).
+const ORPHAN: &str = r#"; FBX 7.4.0 project file
+FBXHeaderExtension: { FBXVersion: 7400 }
+Objects: {
+ Model: 1, "Model::C", "Null" { }
+ Model: 2, "Model::A", "Null" { }
+ Model: 3, "Model::B", "Null" { }
+ Model: 4, "Model::D", "Null" { }
+}
+Connections: {
+ C: "OO",1,0
+ C: "OO",3,2
+ C: "OO",4,1
+}
+"#;
+
+#[test]
+fn a_node_without_a_parent_connection_is_a_child_of_the_root() {
+    let scene = load(ORPHAN.as_bytes(), &LoadOptions::default()).unwrap();
+    let names: Vec<&str> = scene.nodes().iter().map(|n| n.name()).collect();
+    // ufbx: depth 1 is C and the orphan A, depth 2 is D (under C) then B (under A).
+    assert_eq!(names, ["", "C", "A", "D", "B"]);
+    assert_eq!(scene.root().children(), &[1, 2]);
+}
+
 /// A scale helper bakes its siblings: `J3` has no animation of its own and
 /// inherits no scale, so it is only baked because the helper of its animated
 /// parent is.
