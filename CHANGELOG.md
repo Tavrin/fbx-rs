@@ -6,6 +6,8 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-31
+
 ### Added
 
 - Add legacy FBX construction for name-based connections, embedded model
@@ -157,6 +159,7 @@ All notable changes to this crate are documented here. The format follows
   preserving each weight's association with its vertex.
 - Reject animation-connection cycles, including disconnected cycles and self-links.
 
-[Unreleased]: https://github.com/Tavrin/fbx-rs/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Tavrin/fbx-rs/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Tavrin/fbx-rs/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Tavrin/fbx-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Tavrin/fbx-rs/compare/v0.1.0...v0.1.1
