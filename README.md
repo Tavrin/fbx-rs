@@ -2,9 +2,11 @@
 
 A pure-Rust loader for FBX files. It reads binary and ASCII FBX 7.x files
 into an owned scene: nodes, meshes, materials, textures, cameras and
-lights, skins, blend shapes and animation. On the verification corpus,
-316/316 supported files are bit-exact against
-[ufbx](https://github.com/ufbx/ufbx) 0.23.1 with the same import options.
+lights, skins, blend shapes and animation. On the verification corpus, all 316
+supported files match [ufbx](https://github.com/ufbx/ufbx) 0.23.1 with the same
+import options: every value bit for bit (matched by object identity, with the
+differences in [docs/VERIFICATION.md](docs/VERIFICATION.md) explained), and the
+order of every list identical.
 
 ## What it does
 
@@ -21,6 +23,10 @@ lights, skins, blend shapes and animation. On the verification corpus,
   curves with weighted tangents and extrapolation; evaluates node transforms,
   blend-shape weights and skin poses at any finite time.
 - Converts to right-handed Y-up with 1 m units.
+- Lists the nodes, materials, meshes and every other collection in the order
+  ufbx does (file order of the objects; nodes by depth, then parent, then file
+  position). The order is part of the public contract; see the crate
+  documentation, "Order of the lists".
 - Bounds every allocation with configurable limits, and contains no `unsafe`
   code. It builds for `wasm32-unknown-unknown`.
 
@@ -91,15 +97,25 @@ for (node, evaluated) in scene.nodes().iter().zip(&pose.nodes) {
 object property's numeric and retained nonnumeric values; `evaluate_binding`
 also addresses generated scaling helpers. Evaluation leaves loaded data unchanged.
 
-`fbx_rs::load_with_limits` takes explicit `Limits` for untrusted input. The
-lower-level `fbx_rs::syntax::parse` returns the raw node/property tree.
+`fbx_rs::load_with_limits` takes explicit `Limits` for untrusted input. Every
+limit that can reject a file is a field of `Limits`, documented with its
+default, and a refusal returns `Error::LimitExceeded(Limit)` naming the field
+(`Limit::field()`), or `Error::InputTooLarge` for `max_input_bytes`. The
+defaults accept production-size exports (a 355 MiB scene with 7.5 million DOM
+nodes loads with them, at a peak of about 11 times the file size); lower them
+for untrusted input. The lower-level
+`fbx_rs::syntax::parse` returns the raw node/property tree.
 
 ## Status and limits
 
 Version 0.1.1 covers static scenes, stored deformers and animation evaluation.
 On a corpus of 340 FBX files (see [docs/VERIFICATION.md](docs/VERIFICATION.md)),
-316/316 supported files are bit-exact against ufbx 0.23.1, including authored
-curves and evaluated samples. Deliberate differences for malformed inputs and
+all 316 supported files match ufbx 0.23.1 bit for bit by object identity,
+including authored curves and evaluated samples, and the order of nodes,
+materials, meshes, textures, cameras, lights, bones, deformers, poses and
+animation lists is identical. Baked animation matches ufbx on the 8 animated
+corpus files and 4 generated fixtures under four option sets, with node and
+property order compared. Deliberate differences for malformed inputs and
 Blender weight order are described in that verification report.
 The 24 remaining files are FBX 6.1 or older and are rejected. Camera and light
 modes that the corpus does not contain are ported but not exercised. The parser
@@ -143,4 +159,4 @@ fallible, with aggregate candidate-key, allocation and evaluation-work limits.
 The default candidate-key cap is 16 million. Set `trim_start_time` to shift keys
 using FBX ticks; playback bounds and duration retain the original stack range.
 This is a subset of ufbx's baking controls. See [verification](docs/VERIFICATION.md)
-for the compatibility boundary, including scale-helper scheduling.
+for the compatibility boundary and for how baked output is compared with ufbx.

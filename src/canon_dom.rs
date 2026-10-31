@@ -709,7 +709,7 @@ pub(crate) fn data_len(doc: &Document<'_>, i: usize) -> Result<usize, Error> {
                 _ => 1,
             };
             n.checked_add(count)
-                .ok_or_else(|| "deformer: allocation limit".into())
+                .ok_or(crate::Error::LimitExceeded(crate::Limit::Allocation))
         })
 }
 

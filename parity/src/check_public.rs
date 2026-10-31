@@ -3,7 +3,7 @@
 //! value must match its canonical record bit for bit.
 
 use fbx_rs::canon::{Obj, V};
-use fbx_rs::canon_scene::{CanonScene, ElementType as T};
+use fbx_rs::canon_scene::{CanonScene, DumpLimits, ElementType as T};
 use fbx_rs::{MaterialMap, Matrix, Scene, VertexAttribute};
 
 struct Check {
@@ -147,18 +147,26 @@ fn matrix(c: &mut Check, what: &str, m: &Matrix, r: Option<&V>) -> Result<(), St
 
 /// Compare `scene` with `canon` (a full canonical projection of the same
 /// input); returns the number of values compared.
-pub fn check(canon: &CanonScene<'_>, scene: &Scene) -> Result<u64, String> {
+pub fn check(canon: &CanonScene<'_>, scene: &Scene, limits: &DumpLimits) -> Result<u64, String> {
+    // The public slices follow ufbx's list order, not the canonical element
+    // order, so every pairing below walks the elements in that order.
+    let order = canon
+        .typed_order(limits)
+        .map_err(|e| format!("order: {e:?}"))?;
+    let flat: Vec<usize> = order
+        .iter()
+        .flat_map(|(_, list)| list.iter().copied())
+        .collect();
     let mut c = Check { values: 0 };
     let mut k = [0usize; 6];
     let mut slots = vec![None; canon.elements.len()];
-    let mut count = 0;
-    for (i, e) in canon.elements.iter().enumerate() {
-        if e.ty == T::Texture {
+    for (_, list) in order.iter().filter(|(ty, _)| *ty == T::Texture) {
+        for (count, &i) in list.iter().enumerate() {
             slots[i] = Some(count);
-            count += 1;
         }
     }
-    for e in &canon.elements {
+    for &element in &flat {
+        let e = &canon.elements[element];
         let o = &e.obj;
         match e.ty {
             T::Node => {
@@ -448,10 +456,7 @@ pub fn check(canon: &CanonScene<'_>, scene: &Scene) -> Result<u64, String> {
         scene.unsupported().len(),
         canon.unsupported.len(),
     )?;
-    let mut by_type = std::collections::BTreeMap::<T, Vec<usize>>::new();
-    for (i, e) in canon.elements.iter().enumerate() {
-        by_type.entry(e.ty).or_default().push(i);
-    }
+    let by_type: std::collections::BTreeMap<T, Vec<usize>> = order.iter().cloned().collect();
     let elems = by_type.get(&T::Bone).cloned().unwrap_or_default();
     c.eq("bones count", scene.bones().len(), elems.len())?;
     for (p, &i) in scene.bones().iter().zip(&elems) {

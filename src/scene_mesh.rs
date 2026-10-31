@@ -12,9 +12,9 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_meshes: 1 << 20,
-            max_layers: 1 << 22,
-            max_allocation: 512 << 20,
+            max_meshes: 1 << 22,
+            max_layers: 1 << 23,
+            max_allocation: crate::allocation::DEFAULT_MAX_ALLOCATION,
         }
     }
 }
@@ -25,6 +25,7 @@ pub enum Mapping {
     ByPolygon,
     ByEdge,
     AllSame,
+    /// `NoMappingInformation` or any mode this reader does not recognise.
     None,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,10 +183,16 @@ impl Layer<'_> {
             Mapping::AllSame => 0,
             Mapping::None => return Err(Error::InvalidMesh { node: self.node }),
         };
-        match self
-            .reference
-            .ok_or(Error::InvalidMesh { node: self.node })?
-        {
+        // ufbx never reads the label (the string "ReferenceInformationType"
+        // does not occur in ufbx.c): a layer is indexed exactly when it has an
+        // index array (`ufbxi_read_vertex_element`, ufbx.c line 12743). A missing
+        // or unrecognised label resolves the same way.
+        let reference = self.reference.unwrap_or(if self.indices.is_some() {
+            Reference::IndexToDirect
+        } else {
+            Reference::Direct
+        });
+        match reference {
             Reference::Direct => Ok(mapped),
             Reference::IndexToDirect => {
                 let v = self
@@ -248,17 +255,26 @@ fn layer_kind(name: &[u8]) -> Option<LayerKind> {
         _ => None,
     }
 }
-fn mapping(s: &[u8]) -> Option<Mapping> {
+/// Classify a `MappingInformationType` string. ufbx 0.23.1 compares it against
+/// exactly these names (`ufbxi_read_vertex_element`, ufbx.c lines 12797 and
+/// 12872 for the `ByVertex`/`ByVertice` spelling pair) and ignores a layer
+/// element whose mapping is anything else, with a missing-polygon-mapping
+/// warning (ufbx.c lines 12850 and 12903): there is no `ByControlPoint` alias
+/// in ufbx. Any other string therefore maps to [`Mapping::None`] instead of
+/// failing the mesh.
+fn mapping(s: &[u8]) -> Mapping {
     match s {
-        b"ByPolygonVertex" => Some(Mapping::ByPolygonVertex),
-        b"ByVertice" | b"ByVertex" => Some(Mapping::ByVertex),
-        b"ByPolygon" => Some(Mapping::ByPolygon),
-        b"ByEdge" => Some(Mapping::ByEdge),
-        b"AllSame" => Some(Mapping::AllSame),
-        b"NoMappingInformation" => Some(Mapping::None),
-        _ => None,
+        b"ByPolygonVertex" => Mapping::ByPolygonVertex,
+        b"ByVertice" | b"ByVertex" => Mapping::ByVertex,
+        b"ByPolygon" => Mapping::ByPolygon,
+        b"ByEdge" => Mapping::ByEdge,
+        b"AllSame" => Mapping::AllSame,
+        _ => Mapping::None,
     }
 }
+/// The authored reference label. `None` for a label that is not `Direct`,
+/// `Index` or `IndexToDirect`: ufbx (which does not read the label at all, see
+/// [`Layer::direct_index`]) keeps the mesh, so that label must not fail it.
 fn reference(s: &[u8]) -> Option<Reference> {
     match s {
         b"Direct" => Some(Reference::Direct),
@@ -367,16 +383,14 @@ pub fn extract<'a>(
                     l.name = Some(first_bytes(doc, i).ok_or(Error::InvalidMesh { node: i })?)
                 }
                 b"MappingInformationType" => {
-                    l.mapping = Some(
-                        mapping(first_bytes(doc, i).ok_or(Error::InvalidMesh { node: i })?)
-                            .ok_or(Error::InvalidMesh { node: i })?,
-                    )
+                    l.mapping = Some(mapping(
+                        first_bytes(doc, i).ok_or(Error::InvalidMesh { node: i })?,
+                    ))
                 }
                 b"ReferenceInformationType" => {
-                    l.reference = Some(
+                    // An unrecognised label is not an error: see `reference`.
+                    l.reference =
                         reference(first_bytes(doc, i).ok_or(Error::InvalidMesh { node: i })?)
-                            .ok_or(Error::InvalidMesh { node: i })?,
-                    )
                 }
                 b"Normals" | b"Tangents" | b"Binormals" | b"UV" | b"Colors" | b"Materials"
                 | b"Smoothing" => {

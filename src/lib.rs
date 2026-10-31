@@ -49,9 +49,34 @@
 //! - Only the default [`LoadOptions`] (right-handed Y-up, 1 m units) are
 //!   implemented; other values return [`Error::UnsupportedOptions`].
 //!
+//! # Order of the lists
+//!
+//! The order of every [`Scene`] list is part of the public contract and is the
+//! order ufbx 0.23.1 exposes for the same file:
+//!
+//! - Objects keep file order: [`Scene::meshes`], [`Scene::materials`],
+//!   [`Scene::textures`], [`Scene::cameras`], [`Scene::lights`], bones,
+//!   deformers, poses and the animation lists (stacks, layers, values, curves)
+//!   follow the order of their objects in the `Objects` section.
+//!   Source object IDs play no part, so a file whose IDs are not ascending is
+//!   still listed in file order.
+//! - [`Scene::nodes`] is sorted by hierarchy depth, then by the file position
+//!   of the parent, then scale helper nodes before ordinary siblings, then by
+//!   file position. Index 0 is the root and a parent always precedes its
+//!   children, so the root's children (the roots of the scene) are the nodes
+//!   with [`Node::parent`] equal to `Some(0)`, in node order.
+//! - A node's children, a mesh's materials and every connection list keep
+//!   connection order.
+//! - Generated elements (scale helper nodes, legacy blend-shape deformers)
+//!   come after all objects of the file, in the order they are generated.
+//! - Baked output follows the same order: [`BakedAnimation::nodes`] by node
+//!   index and [`BakedAnimation::properties`] by object order, then property
+//!   name.
+//!
 //! Every [`load`] call is bounded by [`Limits`]: input size, node counts,
-//! array lengths and decompressed sizes are checked before allocation. The
-//! crate contains no `unsafe` code.
+//! array lengths and decompressed sizes are checked before allocation. Every
+//! limit that can reject a file is a [`Limits`] field, and a refusal reports
+//! which one as [`Error::LimitExceeded`]. The crate contains no `unsafe` code.
 //!
 //! The [`syntax`] module is the lower layer: a bounded binary and ASCII FBX
 //! parser producing a node/property tree.
@@ -173,7 +198,7 @@ pub mod scene_transform;
 
 pub use api::{
     load, load_with_limits, Axis, Camera, ColorSet, CoordinateAxes, Error, Face,
-    GeometryTransformHandling, InheritModeHandling, Light, LightKind, Limits, LoadOptions,
+    GeometryTransformHandling, InheritModeHandling, Light, LightKind, Limit, Limits, LoadOptions,
     Material, MaterialFeature, MaterialMap, MaterialTexture, Matrix, Mesh, MeshPart, Node, Scene,
     SceneSettings, SourceProperty, SpaceConversion, Texture, TextureLayer, Transform, Unsupported,
     UnsupportedKind, UvSet, VertexAttribute,

@@ -31,9 +31,9 @@ impl Budget {
         let used = count
             .checked_mul(width)
             .and_then(|n| self.used.get().checked_add(n))
-            .ok_or("conversion: allocation limit")?;
+            .ok_or(crate::Error::LimitExceeded(crate::Limit::Allocation))?;
         if used > self.allocation_limit {
-            return Err("conversion: allocation limit".into());
+            return Err(crate::Error::LimitExceeded(crate::Limit::Allocation));
         }
         self.used.set(used);
         Ok(())
@@ -43,9 +43,9 @@ impl Budget {
             .work
             .get()
             .checked_add(count)
-            .ok_or("conversion: work limit")?;
+            .ok_or_else(|| self.work_error())?;
         if work > self.work_limit {
-            return Err("conversion: work limit".into());
+            return Err(self.work_error());
         }
         self.work.set(work);
         record(self.path.get(), count);
@@ -55,8 +55,15 @@ impl Budget {
         self.work(
             count
                 .checked_mul(usize::try_from(usize::BITS - count.leading_zeros()).unwrap() + 1)
-                .ok_or("conversion: work limit")?,
+                .ok_or_else(|| self.work_error())?,
         )
+    }
+    /// The work limit that applies to the stage being converted.
+    fn work_error(&self) -> crate::Error {
+        crate::Error::LimitExceeded(match self.path.get() {
+            Path::Deformers | Path::Poses => crate::Limit::DeformerWork,
+            Path::Curves | Path::Layers | Path::Helpers => crate::Limit::AnimationWork,
+        })
     }
 }
 pub(crate) fn record(path: Path, count: usize) {

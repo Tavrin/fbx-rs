@@ -1,8 +1,8 @@
 # Verification
 
-For the scene content it converts, fbx-rs targets the same values as
-ufbx 0.23.1 loaded with the same import options, with the deliberate edge
-case differences below. This page says how
+For the scene content it converts, fbx-rs targets the same values, in the same
+order of every list, as ufbx 0.23.1 loaded with the same import options, with
+the deliberate edge case differences below. This page says how
 that is checked, on which files, with what result, and what is not covered.
 
 ## How equivalence with ufbx is checked
@@ -26,6 +26,15 @@ triangles, authored curves and evaluated animation samples.
   coverage, options, section order, counts, checksums) and then compares them
   value by value. Its standalone evaluated comparison supports tolerances;
   the per-file gate below compares the raw bit strings directly.
+- The `order` section is the only part of the stream that records sequence.
+  Every other section is keyed by object identity (source ID and DOM ordinal,
+  or an owner-derived key for generated elements), and lists such as children
+  or material slots hold references to those keys. `order` lists, for every
+  element type, the elements in the order ufbx exposes the typed list
+  (`nodes`, `materials`, `anim_stacks`, and the rest of `elements_by_type`).
+  The Rust side writes it from the same ordering that the public `Scene`
+  slices use, and the comparison requires it to be identical, record for
+  record.
 - Each compared path is checked under these rules:
   - DOM mutation: ufbx modifies some retained DOM arrays in place while
     loading (`Geometry/Vertices`, `LayerElementNormal/Normals`, blend-shape
@@ -42,7 +51,10 @@ triangles, authored curves and evaluated animation samples.
   exposes (nodes, transforms, meshes, bones, skins, poses, blend shapes,
   material maps, texture content, cameras, lights, animation records, evaluated
   poses and counts) with the canonical records of the same file, bit for bit,
-  so the public API and the compared stream cannot drift apart.
+  so the public API and the compared stream cannot drift apart. The records
+  are paired with the `Scene` slices in the order written to the `order`
+  section, so the public slices are tied to the order that is compared with
+  ufbx.
 - The syntax layer is checked separately: `reference/dom_equivalence.py`
   projects the parser's node/property tree onto ufbx's retained DOM (the
   rules cite ufbx source lines) and compares every value bit for bit.
@@ -56,6 +68,36 @@ nondeterminism was observed or used to justify a tolerance.
 
 The per-file classification script that applies the rules above
 is not yet part of this repository; the dumpers and comparators it drives are.
+
+## What the per-file comparison did not cover, until order was added
+
+The earlier statement "316/316 bit-exact" was true of the values it compared and
+silent about sequence. Measured with the `order` section against the previous
+public lists, 182 of the 316 files had at least one list in a different order
+from ufbx: materials in 165 files, nodes in 29, meshes in 27, textures and videos
+in 3 each, bones in 3, animation curves and values in 5 each, and single files
+for skin clusters, blend channels, animation layers and animation stacks. Three
+properties of the checks hid it:
+
+- The canonical stream is keyed by identity. Its element table is sorted by
+  source ID and ordinal, every record sits under its own key, and every
+  cross-reference is a key, so permuting a list left the stream unchanged. The
+  stream deliberately never carries ufbx's dense typed indices.
+- `check-public` paired the public `Scene` slices with the canonical records of
+  the same converter by position. Both followed source-ID order, so they agreed
+  with each other and not with ufbx.
+- The bake comparison normalised node and property record order and replaced
+  typed indices by source identities before comparing.
+
+The `order` section, the strict `check-public` pairing and
+`reference/compare_bake.py` (which requires the sequence of baked nodes and
+properties to match line for line) close those gaps. `reference/compare_order.py`
+runs the stream comparison of the `order` section over a list of files.
+
+ufbx's rules, as implemented: typed lists keep creation order, which is file
+order of the objects with generated elements after them; `nodes` are sorted by
+depth, then by the creation order of the parent, then scale helpers before
+ordinary siblings, then creation order.
 
 ## Corpus
 
@@ -81,15 +123,111 @@ On ufbx 0.23.1 with the options above:
 | --- | --- |
 | Original static files (no rig or animation tags) | 306 of 306 equal: 43 with no difference at all, 263 differing only by proved in-place DOM mutation (460 arrays) |
 | Stored skin and blend-shape records | 7 of 7 rig files bit-exact, including both FBX 7.1 nested-shape encodings |
-| Whole-file classification | 316 equal (including proved DOM mutation), 0 deferred, 0 unexplained |
+| Whole-file classification, values matched by object identity | 316 equal (including proved DOM mutation), 0 deferred, 0 unexplained |
+| Order of every typed list (`order` section) | 316 of 316 files identical to ufbx, 3,165 records over every non-empty list (nodes, meshes, materials, textures, cameras, lights, bones, deformers, poses, animation stacks, layers, values, curves) |
 | Authored animation and evaluated samples | 8 animated files, 121 curves, all bit-exact; key/tick neighbours, segment fractions, take bounds and a 30 Hz grid |
+| Baked animation (`reference/compare_bake.py`) | 12 inputs (the 8 animated corpus files and 4 generated fixtures), 4 option sets each (reduced, reduced and trimmed, reduced with rotation-aware reduction and trimmed, raw and trimmed): 48 of 48 streams identical, with baked node and property order and every key compared bit for bit; the scale-inheritance file `maya_scale_no_inherit_7700_ascii.fbx` included |
 | Additional animation fixtures | 39 complete streams bit-exact: interpolation, weighted tangents, extrapolation, all rotation orders, layers, animated layer weights and recursive scale helpers |
 | Unexplained differences | 0 files |
 | Rejected (FBX 6.1 and older) | 24 |
-| Public `Scene` against canonical records | 316 of 316 files equal, 3,664,695 values, including authored animation and evaluated poses |
+| Public `Scene` against canonical records, paired in ufbx list order | 316 of 316 files equal, 4,134,768 values, including authored animation and evaluated poses |
 | Syntax layer against ufbx's retained DOM | 315 equal, 1 explained (ufbx sorts blend-shape offsets in place), 0 failing |
 | Unsupported-object report against oracle counts | 316 files, 0 mismatches |
 | wasm32 | canonical dump, public scene and evaluated poses identical to native on one animated morph fixture (Wasmtime); default-feature library build passes |
+
+## Production-size files, whole streams
+
+The corpus files are small. Three production-size inputs were compared against
+the oracle over the whole canonical stream, every section, including `evaluated`
+(a full scene evaluation at every sample time) and `order`: the generated
+`grid400` benchmark (15 MiB) and the two Bistro interiors (40 and 46 MiB), plus
+a small file with a `ByControlPoint` layer. `Surveyor.fbx` (355 MiB, 7.5 million
+DOM nodes) could not be, see below. The streams are 1.3 to 40 million records, tens of GiB as
+text, so `fbx-parity dump-scene --max-output 0` lifts the dumper's 8 GiB output
+cap and `reference/compare_large.py` pipes each dump through `fbx-parity sections
+--save`, which validates the stream in one pass (framing, checksums, identities)
+and keeps one file per section. Two sections are equal exactly when their
+record count and SHA-256 agree, which compares them record for record, in order,
+bit for bit, with no tolerance. Equal sections are deleted, a differing section
+is classified or printed.
+
+| File | Records (oracle, Rust) | Oracle, Rust (s) | Sections equal | Differing sections |
+| --- | ---: | ---: | --- | --- |
+| `grid2-bycontrolpoint.fbx` | 2,177 and 2,173 | 0.0 | 15 of 17 | `globals`, `dom` |
+| `grid400.fbx` | 1,279,040 and 1,279,036 | 15.1, 15.1 | 15 of 17 | `globals`, `dom` |
+| `BistroInterior.fbx` | 32,755,827 and 32,755,827 | 104.7, 114.3 | 16 of 17 | `dom` |
+| `BistroInterior_Wine.fbx` | 40,539,927 and 40,539,923 | 144.5, 159.5 | 15 of 17 | `globals`, `dom` |
+| `Surveyor.fbx` | not compared | oracle refuses after about 8,000 | none | see below |
+
+`Surveyor.fbx` could not be compared in full. The pinned oracle takes 2 h 14 min
+of CPU on it (no output for the first 1 h 50 min), writes 5.5 GB of the `dom`
+section and then stops with `canonical oracle: serialization/evaluation work
+limit`: `reference/canon.c:31` caps the serialization work at 50,000,000 units
+and the file has 7.5 million DOM nodes and 14.8 million values. The silent first
+phase is consistent with the quadratic primary-element search in
+`index_elements` (canon.c:216 to 223), which was not profiled further. A full
+comparison needs a scratch build of the oracle with that cap raised
+(`reference/build.py` on a copy of `canon.c`) and a run of
+`compare_large.py --sequential`; the Rust side needs no change (its dump is
+streamed and uncapped). Until then the 355 MiB file has no stream comparison;
+its load is measured (time and memory) and nothing more.
+
+The differing sections are the two classes the script names, never an
+unexplained value:
+
+- `dom`: ufbx modifies retained DOM arrays in place while loading, and the
+  oracle dumps the modified array; fbx-rs keeps the file's content. Every
+  differing record is a numeric array block of identical path and length: 3,029
+  `Normals` arrays (Bistro), 3,223 `Normals` and one `UVIndex` (Wine, the
+  array whose 1,188 out-of-range indices ufbx clamps), 118 `Vertices` (grid400).
+  The corpus has the same class (271 of its 316 files, 0 other).
+  The per-array proof (the oracle's array equals the oracle's own converted mesh
+  data) is not repeated here; the `meshes` section is equal in every file.
+- `globals`: ufbx records warnings (`Clamped index` x 1,188 on one mesh of the
+  Wine file, `Ignoring geometry 'Normals' with bad mapping mode
+  'ByControlPoint'` on the grid files) and fbx-rs does not reproduce the warning
+  list; and `settings.axes` of the grid files, which are Z-up: ufbx leaves the
+  file's axes there after converting to Y-up, fbx-rs records the axes of the
+  loaded scene (`SceneSettings::axes`, documented as the target axes).
+
+The comparison first failed on an ordering difference in the canonical dump, not
+in the public lists (those were already ufbx's, 316 of 316 in `order`):
+`curve_samples` listed curves in the public (creation) order, and `evaluated`
+listed nodes, skin clusters and morph channels in it too. `reference/canon.c`
+walks every element kind in canonical element order (`ordered_elements`, sorted
+by `element_order`, canon.c:184 and :301; used at :677 and :633 to :685). The
+Rust dump now does the same (`src/animation_canon.rs`). The 316 corpus files did
+not show it: re-run over them with the section comparison, 45 are equal in every
+section and 271 differ only in `dom`.
+
+Memory of `load` on `Surveyor.fbx`, measured with a counting global allocator that
+attributes every allocation of 1 MiB or more to its call stack (a scratch probe,
+not in the repository): peak live heap 3,991 MiB, resident high-water mark 3.83
+GiB (4,020,096 kB), 10.8 times the 355 MiB input, in 15.6 s. At the peak:
+
+| Holder (phase that creates it) | MiB |
+| --- | ---: |
+| Input bytes, held by the caller | 355 |
+| `syntax::Property` vector, 14.8 M values (parse) | 640 |
+| `syntax::Node` vector, 7.5 M nodes (parse) | 384 |
+| `Vec<Option<NodeState>>`, one slot per element (projection) | 568 |
+| Element table (projection) | 192 |
+| `Vec<Option<Element>>` (projection) | 162 |
+| Allocations under 1 MiB: names, keys, per-element vectors | 598 |
+| Large allocations made through the allocation budget helper, not attributed to a named frame: decompressed arrays (about 65), the public scene lists and matrices, curves, `Adjust` and property-layer tables | about 1,090 |
+
+The DOM is not kept alive after the scene is built: the projection is dropped when
+`Scene::from_projection` returns (live heap 805 MiB afterwards, the scene and
+the caller's input). It cannot be dropped earlier, because that function
+re-reads the DOM arrays to extract the meshes. The one clearly avoidable item is
+the per-element `NodeState` table (568 MiB, 14 % of the peak): only nodes hold a
+state, and a table indexed by node would remove most of it. It touches the node
+transform, animation and deformer stages, which share the table, so it is left as
+follow-up work rather than folded into this change; the output does not change
+either way. `BistroInterior.fbx` peaks at 534 MiB of heap (13 times its 40 MiB).
+
+Reproduce: `cargo build --release -p fbx-parity`, then
+`python3 reference/compare_large.py ORACLE target/release/fbx-parity WORKDIR FILE...`.
 
 ## Robustness
 
@@ -133,6 +271,66 @@ CPU-seconds include corpus loading, so the last chunk of `scene_dom` and
 process ran at a tenth of its usual speed on a loaded machine. It is not a
 defect and the run was resumed. No crash, out-of-memory or memory-limit
 failure occurred in any target.
+
+Pre-release run for 0.1.2 (fallible load, material and texture API, linear
+bake, list ordering, scale-helper bakes). The `load` target now also checks the
+documented node order (a parent precedes its children, depth never decreases),
+the material and texture API (index ranges, lookups against the ordered
+iterators, sorted source properties) and bakes every stack (default and the
+first three) under four option sets (defaults; raw and trimmed; rotation-aware
+reduction with transform properties; one set derived from a hash of the input
+that varies rates, segment counts, thresholds, passes and the key, allocation
+and work caps), checking that baked node indices are in range and increasing.
+Reach, measured with `cargo fuzz coverage` on the 343 seeds alone (the 340
+corpus files plus the three files in `tests/fixtures`): `bake.rs` 89.2 % of
+lines, `scene_material.rs` 76.8 %, `api.rs` 68.2 %, `scene_animation.rs`
+76.8 %. Same rule and flags as above (`-rss_limit_mb=512`, `-malloc_limit_mb=512`,
+5 s timeout), four libFuzzer processes in parallel:
+
+| Target | CPU-minutes | Executions | Edge coverage, initial to final | Crashes | Stop | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `binary` | 40.0 | 123.2 M | 438 to 891 | 0 | chunk 4 added no coverage | 52 MiB |
+| `ascii` | 79.4 | 261.2 M | 438 to 902 | 0 | chunk 8 added no coverage | 52 MiB |
+| `scene_dom` | 121.0 | 4.9 M | 8,512 to 13,420 | 0 | chunk 13 added no coverage, at the cap | 140 MiB |
+| `load` | 120.5 | 27.0 M | 7,749 to 12,335 | 0 | chunk 14 added no coverage, at the cap | 151 MiB |
+
+A first `load` run stopped after 50 CPU-seconds on an assertion in the new
+harness code: it compared two `SourceProperty` values that hold a NaN with
+`assert_eq!`. That is a harness error (NaN never equals itself), not a library
+defect; the harness now compares names and map identity, the input was kept
+aside as a harness false positive, and `load` was restarted from the same
+corpus and run in full. No library crash, timeout, out-of-memory or
+memory-limit failure occurred in any target.
+
+Delta run for the four limits added after that run (`max_meshes`,
+`max_layers`, `max_face_vertices`, `max_triangulation_work`), `load` target only.
+The harness limits for the four are 16 meshes, 32 layers, 128 face vertices and
+256 work units: every supported corpus file loads under them (measured: all load
+with 8 meshes, 16 layers, 16 face vertices and 256 work units; 21 files are
+refused at 8 layers, 8 at 8 face vertices and 2 at 64 work units), and a seed of a few
+hundred bytes reaches each, one per limit (`limit-meshes.fbx`, `limit-layers.fbx`,
+`limit-face-vertices.fbx`, `limit-triangulation-work.fbx`, each refused with
+its own named `Limit`). Start: the 343 corpus seeds, the 4 limit seeds, the
+earlier `load` corpus. Same flags as above (`-rss_limit_mb=512`,
+`-malloc_limit_mb=512`, 5 s timeout, `-max_len=262144`), 600-second chunks, stop
+at a chunk that adds no edge, with a 3,600 CPU-second cap:
+
+| Target | CPU-minutes | Executions | Edge coverage, seeds to final | Crashes | Stop | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `load` | 60.0 | 17.8 M | 7,814 to 12,517 | 1 found and fixed, 0 after | cap reached; the last chunk still added 24 edges | 157 MiB |
+
+The one crash, at 2,090 CPU-seconds, was a library defect, not a harness error:
+the `load` harness asserts the documented node order (a parent precedes its
+children, depth never decreases), and a node with no parent connection was not
+treated as a child of the root. ufbx attaches such a node to the root
+(`ufbxi_finalize_scene`, ufbx.c lines 18938 to 18943), so its children are one
+level deeper than the node; fbx-rs gave them the node's own depth and
+`Scene::nodes()` could list a child before a shallower node. The oracle confirms
+it on a five-node file (`/graph/<child>/node_depth` 2, and the orphan listed in
+`root.children`, against 1 and absent). Fixed in `project_graph`; regression
+test `a_node_without_a_parent_connection_is_a_child_of_the_root`; the input is
+kept as a seed and the run was resumed from the same corpus on the rebuilt
+target (chunk 4 above ended in the crash, the other six chunks are clean).
 
 Malformed-curve regressions
 require errors for unsorted and nonfinite times, invalid attribute counts and
@@ -291,8 +489,23 @@ stricter than the former node-visit count.
 
 The bake API implements a subset of ufbx options. Maximum sample-rate culling,
 custom step handling, transform overrides and configurable evaluate flags are
-not exposed. Scale-helper baking does not yet reproduce ufbx's resampled helper
-dependency scheduling and inclusion of otherwise unanimated sibling nodes.
+not exposed.
+
+Scale helpers follow ufbx's rule (`ufbxi_bake_node_imp`). A scale helper node
+carries the animated scale of the node it was generated for, and the nodes that
+do not inherit that scale depend on its baked keys. When such a helper has
+been baked, the dependent channel is resampled at the helper's baked key times
+(a step key moves to its neighbour's time), its own animated keys are resampled
+when the helper's scale is not constant, and its values are multiplied by the
+helper's baked scale evaluated linearly between baked keys, as ufbx does, not by
+the analytic scale. Nodes are baked in node order, so a helper precedes the
+nodes that read it; baking a scale helper also bakes every sibling that has no
+animation of its own, and a sibling's own scale helper when the helper of the
+node whose scale that sibling inherits is scheduled. Such an unanimated sibling
+has translation keys from the helper only and the stack bounds as rotation
+and scale keys. This is the rule that was missing for `joint4` of
+`maya_scale_no_inherit_7700_ascii.fbx`, whose omission also changed the key-time
+extents. Baked properties are ordered by object, then by property name.
 Spherical rotation reduction and floating-point arithmetic require exact oracle
 comparison before claiming interchangeability on a file. The source and reference
 probes are `examples/bake_dump.rs` and `reference/bake_probe.c`; they emit all times,

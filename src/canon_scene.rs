@@ -46,7 +46,7 @@ impl Default for DumpLimits {
             draft: crate::scene_draft::Limits::default(),
             max_keys: 1 << 24,
             max_properties: 1 << 20,
-            max_allocation: 512 << 20,
+            max_allocation: crate::allocation::DEFAULT_MAX_ALLOCATION,
             max_deformer_work: 1 << 28,
             max_animation_work: 1 << 28,
             max_line: 64 << 20,
@@ -102,6 +102,8 @@ pub enum ElementType {
     MetadataObject = 41,
 }
 impl ElementType {
+    /// Largest `ufbx_element_type` discriminant.
+    pub(crate) const MAX_ID: usize = ElementType::MetadataObject as usize;
     fn schema(self) -> &'static str {
         use ElementType::*;
         match self {
@@ -356,6 +358,8 @@ fn percent_props(layers: &scene_property::PropertyLayers<'_>, percent: f64, conn
 /// The projected scene: elements in canonical order plus scene-level records.
 pub struct CanonScene<'a> {
     pub doc: Document<'a>,
+    /// Lookup tables of `doc` for reading object properties.
+    pub(crate) props: scene_property::PropertyIndex,
     pub elements: Vec<Element>,
     pub connections: Vec<V>,
     pub settings: Obj,
@@ -387,6 +391,12 @@ pub struct CanonScene<'a> {
     pub anim: Obj,
     pub(crate) animation: crate::animation::Animation,
     pub(crate) scale_helpers: Vec<(usize, usize)>,
+    /// Creation index (ufbx `element_id`) of each element, by canonical
+    /// element index: root first, then objects in file order, then synthetic
+    /// elements. Canonical order is by source ID; ufbx's lists follow this.
+    pub(crate) creation: Vec<usize>,
+    /// Node element indices in `ufbx_scene.nodes` order, set by the graph stage.
+    pub(crate) node_order: Vec<usize>,
     /// Lean projection (public `load`): no per-element canonical records are
     /// built; the converted values are kept typed in [`CanonScene::typed`].
     pub(crate) lean: bool,
@@ -408,9 +418,14 @@ fn project_takes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), 
         let (ElementType::AnimStack, Some(d)) = (e.ty, e.node) else {
             continue;
         };
-        let props =
-            scene_property::layers(&scene.doc, d, limits.max_properties, limits.max_allocation)
-                .map_err(crate::api::property_error)?;
+        let props = scene_property::layers_indexed(
+            &scene.doc,
+            &scene.props,
+            d,
+            limits.max_properties,
+            limits.max_allocation,
+        )
+        .map_err(crate::api::property_error)?;
         let (mut begin, mut end) = (props.find(b"LocalStart"), props.find(b"LocalStop"));
         if begin.is_none() || end.is_none() {
             begin = props.find(b"ReferenceStart");
@@ -492,8 +507,9 @@ fn project_anim_structure(
             }
             (AnimLayer, Some(node)) => {
                 let values = sources_of(scene, i, AnimValue)?;
-                let props = scene_property::layers(
+                let props = scene_property::layers_indexed(
                     &scene.doc,
+                    &scene.props,
                     node,
                     limits.max_properties,
                     limits.max_allocation,
@@ -552,6 +568,13 @@ fn project_anim_structure(
     Ok(())
 }
 
+fn parse_message(allocation: &crate::api_alloc::Budget, e: &syntax::Error) -> crate::Error {
+    match allocation.format(format_args!("syntax: {e:?}")) {
+        Ok(s) => crate::Error::Parse(s),
+        Err(e) => e,
+    }
+}
+
 /// Build the canonical projection of `input`.
 pub fn project<'a>(input: &'a [u8], limits: &DumpLimits) -> Result<CanonScene<'a>, String> {
     project_with(input, limits, false).map_err(|e| e.to_string())
@@ -567,10 +590,12 @@ pub(crate) fn project_with<'a>(
     let allocation = crate::api_alloc::Budget::new(limits.max_allocation);
     let doc = syntax::parse(input, &limits.syntax).map_err(|e| match e {
         syntax::Error::AllocationFailed => crate::Error::Allocation,
-        _ => match allocation.format(format_args!("syntax: {e:?}")) {
-            Ok(s) => crate::Error::Parse(s),
-            Err(e) => e,
+        syntax::Error::TooDeep => crate::Error::LimitExceeded(crate::Limit::Depth),
+        syntax::Error::LimitExceeded { what } => match crate::Limit::from_stage(what) {
+            Some(limit) => crate::Error::LimitExceeded(limit),
+            None => parse_message(&allocation, &e),
         },
+        _ => parse_message(&allocation, &e),
     })?;
     if !syntax::supported_version(doc.version) {
         return Err(crate::Error::Parse(allocation.format(format_args!(
@@ -578,6 +603,8 @@ pub(crate) fn project_with<'a>(
             doc.version
         ))?));
     }
+    let props = scene_property::PropertyIndex::build(&doc, limits.max_allocation)
+        .map_err(crate::api::property_error)?;
     let ascii = !input.starts_with(b"Kaydara FBX Binary  \x00\x1a");
     let (mut elements, mut connections, unsupported) = {
         let index = scene::index(&doc, &limits.index).map_err(crate::api::scene_error)?;
@@ -748,9 +775,14 @@ pub(crate) fn project_with<'a>(
                     },
                 )?;
             }
-            let owner_props =
-                scene_property::layers(&doc, node, limits.max_properties, limits.max_allocation)
-                    .map_err(crate::api::property_error)?;
+            let owner_props = scene_property::layers_indexed(
+                &doc,
+                &props,
+                node,
+                limits.max_properties,
+                limits.max_allocation,
+            )
+            .map_err(crate::api::property_error)?;
             if owner_props.find(&name).is_some_and(|p| {
                 matches!(
                     p.kind,
@@ -768,6 +800,7 @@ pub(crate) fn project_with<'a>(
     }
     let scale_helpers = crate::scene_animation::scale_helpers(
         &doc,
+        &props,
         &mut elements,
         &mut connections,
         ascii,
@@ -775,6 +808,7 @@ pub(crate) fn project_with<'a>(
     )?;
     let mut scene = CanonScene {
         doc,
+        props,
         elements,
         connections: Vec::new(),
         settings: Obj::new(),
@@ -790,6 +824,8 @@ pub(crate) fn project_with<'a>(
         anim: Obj::new(),
         animation: Default::default(),
         scale_helpers,
+        creation: Vec::new(),
+        node_order: Vec::new(),
         lean,
         typed: Lean::default(),
         deformers: Default::default(),
@@ -818,6 +854,7 @@ pub(crate) fn project_with<'a>(
             .iter()
             .map(|&(o, h)| (remap[o], remap[h])),
     )?;
+    scene.creation = order;
     let conn = |src: usize, dst: usize, prop: &[u8]| {
         V::Obj(
             Obj::new()
@@ -895,6 +932,7 @@ pub(crate) fn project_with<'a>(
             } else {
                 crate::scene_animation::node_layers(
                     &scene.doc,
+                    &scene.props,
                     n,
                     owner_for[i].is_some(),
                     helper_for[i].is_some(),
@@ -903,8 +941,9 @@ pub(crate) fn project_with<'a>(
             };
             if scene.doc.nodes[n].name == b"Shape" && e.ty == ElementType::BlendChannel {
                 let owner = scene.doc.nodes[n].parent.ok_or("shape: missing geometry")?;
-                let parent_props = scene_property::layers(
+                let parent_props = scene_property::layers_indexed(
                     &scene.doc,
+                    &scene.props,
                     owner,
                     limits.max_properties,
                     limits.max_allocation,
@@ -948,6 +987,79 @@ pub(crate) fn project_with<'a>(
     project_rest(scene, input, limits, &oo)
 }
 
+/// `ufbx_scene.nodes` order (`ufbxi_cmp_node_less`): by depth, then the
+/// parent's creation index, then scale helpers before ordinary siblings, then
+/// creation index. Geometry-transform helpers do not exist under the import
+/// profile's `ModifyGeometry` handling.
+fn node_list_order(
+    scene: &CanonScene<'_>,
+    links: &Links,
+    limits: &DumpLimits,
+) -> Result<Vec<usize>, crate::Error> {
+    let allocation = crate::api_alloc::Budget::new(limits.max_allocation);
+    let n = scene.elements.len();
+    let budget = crate::conversion_budget::Budget::new(
+        limits.max_allocation,
+        limits.max_animation_work,
+        crate::conversion_budget::Path::Helpers,
+    );
+    let (_, owner_for) =
+        crate::scene_animation::helper_index(n, &scene.scale_helpers, &allocation)?;
+    let mut nodes =
+        allocation.collect((0..n).filter(|&i| scene.elements[i].ty == ElementType::Node))?;
+    budget.sort_work(nodes.len())?;
+    let key = |i: usize| {
+        (
+            links.depth[i],
+            links.parent[i].map_or(0, |p| scene.created(p)),
+            owner_for[i].is_none(),
+            scene.created(i),
+        )
+    };
+    allocation.stable_sort(&mut nodes, |&a, &b| key(a).cmp(&key(b)))?;
+    Ok(nodes)
+}
+
+impl CanonScene<'_> {
+    /// Creation index of an element: its position before canonical sorting.
+    /// Scenes assembled without projection (unit tests) have none, and then
+    /// the element index itself is the creation order.
+    pub(crate) fn created(&self, element: usize) -> usize {
+        self.creation.get(element).copied().unwrap_or(element)
+    }
+
+    /// Element indices of each element type in the order ufbx exposes them
+    /// (`ufbx_scene.elements_by_type`): nodes by hierarchy sort, every other
+    /// type by creation index. Types without elements are omitted.
+    pub fn typed_order(
+        &self,
+        limits: &DumpLimits,
+    ) -> Result<Vec<(ElementType, Vec<usize>)>, crate::Error> {
+        let allocation = crate::api_alloc::Budget::new(limits.max_allocation);
+        let mut by_type: Vec<(Option<ElementType>, Vec<usize>)> =
+            allocation.filled(ElementType::MAX_ID + 1, (None, Vec::new()))?;
+        for (i, e) in self.elements.iter().enumerate() {
+            let slot = &mut by_type[e.ty as usize];
+            slot.0 = Some(e.ty);
+            if e.ty != ElementType::Node {
+                allocation.push(&mut slot.1, i)?;
+            }
+        }
+        by_type[ElementType::Node as usize].1 =
+            allocation.collect(self.node_order.iter().copied())?;
+        for (ty, list) in by_type.iter_mut() {
+            if *ty != Some(ElementType::Node) {
+                allocation.stable_sort(list, |&a, &b| self.created(a).cmp(&self.created(b)))?;
+            }
+        }
+        allocation.collect(
+            by_type
+                .into_iter()
+                .filter_map(|(ty, list)| ty.map(|ty| (ty, list))),
+        )
+    }
+}
+
 /// The projection stages after the element headers.
 fn project_rest<'a>(
     mut scene: CanonScene<'a>,
@@ -956,6 +1068,7 @@ fn project_rest<'a>(
     oo: &[(usize, usize)],
 ) -> Result<CanonScene<'a>, crate::Error> {
     let links = project_graph(&mut scene, oo, limits)?;
+    scene.node_order = node_list_order(&scene, &links, limits)?;
     project_globals(&mut scene, input, limits)?;
     project_transforms(&mut scene, &links, oo, limits)?;
     if !scene.lean {
@@ -1018,8 +1131,9 @@ fn project_attributes(
         else {
             continue;
         };
-        let props = scene_property::layers(
+        let props = scene_property::layers_indexed(
             &scene.doc,
+            &scene.props,
             node,
             limits.max_properties,
             limits.max_allocation,
@@ -1084,8 +1198,9 @@ fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<
         let (Material | Texture | Video, Some(node)) = (e.ty, e.node) else {
             continue;
         };
-        let props = scene_property::layers(
+        let props = scene_property::layers_indexed(
             &scene.doc,
+            &scene.props,
             node,
             limits.max_properties,
             limits.max_allocation,
@@ -1176,6 +1291,27 @@ fn project_graph(
     }
     let (_, owner_for) =
         crate::scene_animation::helper_index(n, &scene.scale_helpers, &allocation)?;
+    // A node with no parent connection hangs from the root: ufbx sets
+    // `node->parent = root_node` for it (`ufbxi_finalize_scene`, ufbx.c lines
+    // 18938-18943, `allow_nodes_out_of_root` is off), so its children are one
+    // level deeper than the node and it is listed among the root's children.
+    // ufbx lists the children of a node in creation order (they are slices of the
+    // sorted `scene.nodes`, ufbx.c line 21724).
+    let mut adopted = false;
+    for i in 1..n {
+        let e = &scene.elements[i];
+        if e.ty == Node && e.node.is_some() && owner_for[i].is_none() && parent[i].is_none() {
+            parent[i] = Some(0);
+            allocation.push(&mut children[0], i)?;
+            adopted = true;
+        }
+    }
+    if adopted {
+        budget.sort_work(children[0].len())?;
+        allocation.stable_sort(&mut children[0], |&a, &b| {
+            scene.created(a).cmp(&scene.created(b))
+        })?;
+    }
     // ufbxi_cmp_node_less puts scale helpers before ordinary siblings.
     for list in &mut children {
         budget.sort_work(list.len())?;
@@ -1360,6 +1496,7 @@ fn project_transforms(
             match (e.ty, e.node) {
                 (Node, Some(d)) => Some(crate::scene_animation::node_layers(
                     &scene.doc,
+                    &scene.props,
                     d,
                     owner_for[slot].is_some(),
                     helper_for[slot].is_some(),
@@ -1383,8 +1520,14 @@ fn project_transforms(
         .iter()
         .position(|x| x.parent.is_none() && x.name == b"GlobalSettings")
     {
-        global = scene_property::authored(doc, g, limits.max_properties, limits.max_allocation)
-            .map_err(crate::api::property_error)?;
+        global = scene_property::authored_indexed(
+            doc,
+            &scene.props,
+            g,
+            limits.max_properties,
+            limits.max_allocation,
+        )
+        .map_err(crate::api::property_error)?;
     }
     let gfind = |name: &[u8]| global.iter().find(|p| p.name == name);
     let gint = |name: &[u8], d: i64| gfind(name).map_or(d, |p| p.value_int);
@@ -1531,7 +1674,8 @@ fn project_transforms(
     let mut states: Vec<Option<sn::NodeState>> = a.filled(n, None)?;
     let mut eval_nodes = Vec::new();
     let mut eval_slot = a.filled(n, None)?;
-    for i in 0..n {
+    // Public node order (`ufbx_scene.nodes`), not canonical element order.
+    for &i in &scene.node_order {
         if is_node[i] {
             eval_slot[i] = Some(eval_nodes.len());
             a.push(
@@ -1545,6 +1689,9 @@ fn project_transforms(
                     use_rotation_space: false,
                     translation_scale: None,
                     inherited_scale: None,
+                    is_scale_helper: false,
+                    own_helper: None,
+                    inherit_helper: None,
                 },
             )?;
         }
@@ -1594,6 +1741,11 @@ fn project_transforms(
                     inherited_scale: owner_for[i]
                         .and_then(|_| links.parent[i])
                         .and_then(|p| inherit_node[p])
+                        .and_then(|p| helper_for[p])
+                        .and_then(|h| eval_slot[h]),
+                    is_scale_helper: owner_for[i].is_some(),
+                    own_helper: helper_for[i].and_then(|h| eval_slot[h]),
+                    inherit_helper: inherit_node[i]
                         .and_then(|p| helper_for[p])
                         .and_then(|h| eval_slot[h]),
                 };
@@ -1998,9 +2150,14 @@ fn project_globals(
     };
     let mut global_props = Vec::new();
     if let Some(g) = find_top(b"GlobalSettings") {
-        global_props =
-            scene_property::authored(doc, g, limits.max_properties, limits.max_allocation)
-                .map_err(crate::api::property_error)?;
+        global_props = scene_property::authored_indexed(
+            doc,
+            &scene.props,
+            g,
+            limits.max_properties,
+            limits.max_allocation,
+        )
+        .map_err(crate::api::property_error)?;
         if !scene.lean {
             scene.settings.try_set(
                 "props",
@@ -2105,7 +2262,11 @@ fn project_globals(
         source_axes
     };
     // Target axes/units after import profile conversion (right-handed Y-up,
-    // metres) when the source coordinate system is known.
+    // metres) when the source coordinate system is known. ufbx itself leaves the
+    // file's axes in `settings.axes` after converting (`ufbxi_transform_to_axes`
+    // never writes the target back, ufbx.c line 24954); `SceneSettings::axes` is
+    // documented as the axes of the loaded scene, so the two differ on any file
+    // that is converted, and `compare_large.py` names that difference.
     scene.settings.try_set(
         "axes",
         V::Obj(
@@ -2171,9 +2332,14 @@ fn project_globals(
         if let Some(si) = (h + 1..doc.nodes.len())
             .find(|&i| doc.nodes[i].parent == Some(h) && doc.nodes[i].name == b"SceneInfo")
         {
-            scene_props =
-                scene_property::authored(doc, si, limits.max_properties, limits.max_allocation)
-                    .map_err(crate::api::property_error)?;
+            scene_props = scene_property::authored_indexed(
+                doc,
+                &scene.props,
+                si,
+                limits.max_properties,
+                limits.max_allocation,
+            )
+            .map_err(crate::api::property_error)?;
         }
     }
     // `ufbxi_finalize_scene`: `ufbx_find_string`/`ufbx_find_blob` on
@@ -2395,7 +2561,24 @@ fn write_all<W: Write>(
         ..Default::default()
     };
     crate::canonical_writer::write_source_triangles(&mut em.w, &draft.index, &draft.meshes, &tl)?;
-    crate::animation_canon::write(em, scene)
+    crate::animation_canon::write(em, scene)?;
+    // Every section above is keyed by identity; this one records the sequence
+    // of each typed list, as `reference/canon.c` does.
+    let order = scene
+        .typed_order(limits)
+        .map_err(|e| io::Error::other(format!("order: {e:?}")))?;
+    em.begin("order")?;
+    for (ty, list) in &order {
+        let m = em.push_index(*ty as usize);
+        em.count("length", list.len())?;
+        for (j, &i) in list.iter().enumerate() {
+            let m = em.push_index(j);
+            em.leaf_here(crate::canon::K::Ref, Some(&V::Ref(Some(i))))?;
+            em.restore(m);
+        }
+        em.restore(m);
+    }
+    em.end()
 }
 
 /// canon.c `duplicate_source_ids`: duplicated signed IDs under Objects.

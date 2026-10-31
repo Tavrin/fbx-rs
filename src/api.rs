@@ -21,6 +21,8 @@ pub enum Error {
     Allocation,
     /// A checked aggregate resource budget was exhausted.
     ResourceLimit(&'static str),
+    /// A [`Limits`] field was exceeded; the payload names which one.
+    LimitExceeded(Limit),
     /// The input is larger than [`Limits::max_input_bytes`].
     InputTooLarge {
         /// Input size in bytes.
@@ -45,6 +47,12 @@ impl std::fmt::Display for Error {
             Error::InvalidData(message) => f.write_str(message),
             Error::Allocation => f.write_str("allocation refused"),
             Error::ResourceLimit(stage) => write!(f, "resource limit: {stage}"),
+            Error::LimitExceeded(limit) => write!(
+                f,
+                "{} limit exceeded (Limits::{})",
+                limit.label(),
+                limit.field()
+            ),
             Error::InputTooLarge { size, limit } => {
                 write!(
                     f,
@@ -70,44 +78,174 @@ impl From<&'static str> for Error {
     }
 }
 
+/// The [`Limits`] field that rejected a file; carried by
+/// [`Error::LimitExceeded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Limit {
+    /// [`Limits::max_depth`]
+    Depth,
+    /// [`Limits::max_nodes`]
+    Nodes,
+    /// [`Limits::max_properties`]
+    Properties,
+    /// [`Limits::max_array_elements`]
+    ArrayElements,
+    /// [`Limits::max_decompressed_bytes`]
+    DecompressedBytes,
+    /// [`Limits::max_string_length`]
+    StringLength,
+    /// [`Limits::max_objects`]
+    Objects,
+    /// [`Limits::max_animation_keys`]
+    AnimationKeys,
+    /// [`Limits::max_connections`]
+    Connections,
+    /// [`Limits::max_allocation`]
+    Allocation,
+    /// [`Limits::max_deformer_work`]
+    DeformerWork,
+    /// [`Limits::max_animation_work`]
+    AnimationWork,
+    /// [`Limits::max_meshes`]
+    Meshes,
+    /// [`Limits::max_layers`]
+    Layers,
+    /// [`Limits::max_face_vertices`]
+    FaceVertices,
+    /// [`Limits::max_triangulation_work`]
+    TriangulationWork,
+}
+
+impl Limit {
+    /// The name of the [`Limits`] field this limit corresponds to.
+    pub fn field(self) -> &'static str {
+        match self {
+            Limit::Depth => "max_depth",
+            Limit::Nodes => "max_nodes",
+            Limit::Properties => "max_properties",
+            Limit::ArrayElements => "max_array_elements",
+            Limit::DecompressedBytes => "max_decompressed_bytes",
+            Limit::StringLength => "max_string_length",
+            Limit::Objects => "max_objects",
+            Limit::AnimationKeys => "max_animation_keys",
+            Limit::Connections => "max_connections",
+            Limit::Allocation => "max_allocation",
+            Limit::DeformerWork => "max_deformer_work",
+            Limit::AnimationWork => "max_animation_work",
+            Limit::Meshes => "max_meshes",
+            Limit::Layers => "max_layers",
+            Limit::FaceVertices => "max_face_vertices",
+            Limit::TriangulationWork => "max_triangulation_work",
+        }
+    }
+
+    /// A short human-readable name of the limit.
+    fn label(self) -> &'static str {
+        match self {
+            Limit::Depth => "nesting depth",
+            Limit::Nodes => "syntax node count",
+            Limit::Properties => "property count",
+            Limit::ArrayElements => "array element count",
+            Limit::DecompressedBytes => "decompressed size",
+            Limit::StringLength => "string length",
+            Limit::Objects => "object count",
+            Limit::AnimationKeys => "animation key",
+            Limit::Connections => "connection count",
+            Limit::Allocation => "allocation",
+            Limit::DeformerWork => "deformer work",
+            Limit::AnimationWork => "animation work",
+            Limit::Meshes => "mesh count",
+            Limit::Layers => "layer count",
+            Limit::FaceVertices => "face vertex count",
+            Limit::TriangulationWork => "triangulation work",
+        }
+    }
+
+    /// Map the name a parser or converter stage uses for a limit.
+    pub(crate) fn from_stage(name: &str) -> Option<Self> {
+        Some(match name {
+            "nodes" => Limit::Nodes,
+            "properties" => Limit::Properties,
+            "string length" => Limit::StringLength,
+            "array elements" | "array bytes" => Limit::ArrayElements,
+            "decompressed bytes" => Limit::DecompressedBytes,
+            "allocation" => Limit::Allocation,
+            "objects" => Limit::Objects,
+            "connections" => Limit::Connections,
+            "meshes" => Limit::Meshes,
+            "layers" => Limit::Layers,
+            "face vertices" => Limit::FaceVertices,
+            "triangulation work" => Limit::TriangulationWork,
+            _ => return None,
+        })
+    }
+}
+
 /// Resource limits for one [`load_with_limits`] call. Every count is checked
-/// before the corresponding allocation; the defaults suit files up to a few
-/// hundred MiB.
+/// before the corresponding allocation, so a hostile file is refused with
+/// [`Error::LimitExceeded`] (naming the field) instead of exhausting memory.
+/// Every limit that can reject a file is a field here.
+///
+/// The defaults accept production-size scene exports: a 355 MiB file with 7.5
+/// million DOM nodes loads with them. The parsed document and each conversion
+/// stage are charged against [`Limits::max_allocation`] separately, and the
+/// decompressed array data is further capped by `max_decompressed_bytes`; this
+/// is a per-stage bound, not a cap on process memory. Peak resident size
+/// measured 10.9 to 12.2 times the input size on the production files, so
+/// size `max_input_bytes` and `max_allocation` for the memory you can spend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
-    /// Maximum input size in bytes.
+    /// Maximum input size in bytes (default 1 GiB).
     pub max_input_bytes: usize,
-    /// Maximum DOM nesting depth.
+    /// Maximum DOM nesting depth (default 128).
     pub max_depth: usize,
-    /// Maximum DOM nodes.
+    /// Maximum DOM nodes (default 16,777,216).
     pub max_nodes: usize,
-    /// Maximum DOM property values.
+    /// Maximum DOM property values, summed over the whole document (default
+    /// 33,554,432).
     pub max_properties: usize,
-    /// Maximum elements of one array property.
+    /// Maximum array elements, summed over every array in the document
+    /// (default 134,217,728).
     pub max_array_elements: usize,
-    /// Maximum bytes produced by decompressing arrays, in total.
+    /// Maximum bytes produced by decompressing arrays, in total (default 1
+    /// GiB).
     pub max_decompressed_bytes: usize,
-    /// Maximum length of one string property.
+    /// Maximum length of one string property (default 16 MiB).
     pub max_string_length: usize,
-    /// Maximum FBX objects.
+    /// Maximum FBX objects (default 4,194,304).
     pub max_objects: usize,
-    /// Maximum keys in one animation curve.
+    /// Maximum keys in one animation curve (default 16,777,216).
     pub max_animation_keys: usize,
-    /// Maximum FBX connections.
+    /// Maximum FBX connections (default 8,388,608).
     pub max_connections: usize,
-    /// Maximum bytes requested by one conversion stage.
+    /// Maximum bytes requested by one conversion stage, and by the parser's
+    /// retained DOM (default 4 GiB; the address space on 32-bit targets).
     pub max_allocation: usize,
-    /// Maximum deformer traversal, lookup and sorting work units.
+    /// Maximum deformer traversal, lookup and sorting work units (default
+    /// 268,435,456).
     pub max_deformer_work: usize,
-    /// Maximum animation traversal, lookup and sorting work per stage.
+    /// Maximum animation traversal, lookup and sorting work per stage (default
+    /// 268,435,456).
     pub max_animation_work: usize,
+    /// Maximum mesh geometries (default 4,194,304).
+    pub max_meshes: usize,
+    /// Maximum mesh layer elements: normals, UV sets, colors, materials (default
+    /// 8,388,608).
+    pub max_layers: usize,
+    /// Maximum vertices of one polygon that is triangulated (default 1,048,576).
+    pub max_face_vertices: usize,
+    /// Maximum work units of triangulating one polygon (default 268,435,456).
+    pub max_triangulation_work: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         let d = DumpLimits::default();
+        let m = scene_mesh::Limits::default();
+        let t = TriangulationLimits::default();
         Self {
-            max_input_bytes: 256 << 20,
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
             max_depth: d.syntax.max_depth,
             max_nodes: d.syntax.max_nodes,
             max_properties: d.syntax.max_properties,
@@ -120,9 +258,16 @@ impl Default for Limits {
             max_allocation: d.max_allocation,
             max_deformer_work: d.max_deformer_work,
             max_animation_work: d.max_animation_work,
+            max_meshes: m.max_meshes,
+            max_layers: m.max_layers,
+            max_face_vertices: t.max_face_vertices,
+            max_triangulation_work: t.max_work,
         }
     }
 }
+
+/// Default for [`Limits::max_input_bytes`].
+const DEFAULT_MAX_INPUT_BYTES: usize = 1 << 30;
 
 impl Limits {
     fn dump_limits(&self) -> DumpLimits {
@@ -145,6 +290,20 @@ impl Limits {
         d.max_deformer_work = self.max_deformer_work;
         d.max_animation_work = self.max_animation_work;
         d
+    }
+    fn mesh_limits(&self) -> scene_mesh::Limits {
+        scene_mesh::Limits {
+            max_meshes: self.max_meshes,
+            max_layers: self.max_layers,
+            max_allocation: self.max_allocation,
+        }
+    }
+    fn triangulation_limits(&self) -> TriangulationLimits {
+        TriangulationLimits {
+            max_face_vertices: self.max_face_vertices,
+            max_allocation: self.max_allocation,
+            max_work: self.max_triangulation_work,
+        }
     }
 }
 
@@ -309,7 +468,12 @@ pub fn load_with_limits(
     }
     let dump = limits.dump_limits();
     let canon = canon_scene::project_with(bytes, &dump, true)?;
-    Scene::from_projection(canon, &dump)
+    Scene::from_projection(
+        canon,
+        &dump,
+        &limits.mesh_limits(),
+        &limits.triangulation_limits(),
+    )
 }
 
 /// A 3x4 affine matrix in column-major order: `[m00, m10, m20, m01, m11,
@@ -1102,7 +1266,7 @@ impl Scene {
         crate::bake::bake(&self.animation, stack, options)
     }
 
-    /// Animation stacks in source identity order.
+    /// Animation stacks in file order of their objects (ufbx `anim_stacks`).
     pub fn animation_stacks(&self) -> &[crate::AnimationStack] {
         &self.animation.stacks
     }
@@ -1226,7 +1390,9 @@ impl Scene {
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
-    /// Nodes; index 0 is the root.
+    /// Nodes in ufbx's node order: by depth, then parent file position, scale
+    /// helpers first among siblings, then file position. Index 0 is the root.
+    /// See the crate documentation, "Order of the lists".
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -1234,23 +1400,23 @@ impl Scene {
     pub fn root(&self) -> &Node {
         &self.nodes[0]
     }
-    /// Meshes.
+    /// Meshes in file order of their `Geometry` objects.
     pub fn meshes(&self) -> &[Mesh] {
         &self.meshes
     }
-    /// Materials.
+    /// Materials in file order of their `Material` objects.
     pub fn materials(&self) -> &[Material] {
         &self.materials
     }
-    /// Textures.
+    /// Textures in file order of their `Texture` objects.
     pub fn textures(&self) -> &[Texture] {
         &self.textures
     }
-    /// Cameras.
+    /// Cameras in file order of their objects.
     pub fn cameras(&self) -> &[Camera] {
         &self.cameras
     }
-    /// Lights.
+    /// Lights in file order of their objects.
     pub fn lights(&self) -> &[Light] {
         &self.lights
     }
@@ -1264,15 +1430,22 @@ impl Scene {
         &self.unsupported
     }
 
-    fn from_projection(mut c: CanonScene<'_>, limits: &DumpLimits) -> Result<Self, Error> {
+    fn from_projection(
+        mut c: CanonScene<'_>,
+        limits: &DumpLimits,
+        mesh_limits: &scene_mesh::Limits,
+        triangulation_limits: &TriangulationLimits,
+    ) -> Result<Self, Error> {
         use ElementType as T;
         let budget = crate::api_alloc::Budget::new(limits.max_allocation);
         let n = c.elements.len();
-        // Element index -> index within its kind.
+        // Element index -> index within its kind, in the order ufbx lists the
+        // kind (`CanonScene::typed_order`), which the public slices follow.
         let mut slot = budget.filled(n, usize::MAX)?;
         let mut counts = [0usize; 13];
-        for (i, e) in c.elements.iter().enumerate() {
-            let k = match e.ty {
+        let order = c.typed_order(limits)?;
+        for (ty, list) in &order {
+            let k = match ty {
                 T::Node => 0,
                 T::Mesh => 1,
                 T::Material => 2,
@@ -1288,9 +1461,17 @@ impl Scene {
                 T::Pose => 12,
                 _ => continue,
             };
-            slot[i] = counts[k];
-            counts[k] += 1;
+            for (pos, &i) in list.iter().enumerate() {
+                slot[i] = pos;
+            }
+            counts[k] = list.len();
         }
+        let list_of = |ty: T| -> &[usize] {
+            order
+                .iter()
+                .find(|(t, _)| *t == ty)
+                .map_or(&[][..], |(_, l)| l.as_slice())
+        };
         let r = |k: usize| slot.get(k).copied().filter(|&s| s != usize::MAX);
         let refs = |l: &[usize]| budget.collect(l.iter().filter_map(|&k| r(k)));
         let info = |e: &canon_scene::Element| -> Result<ElementInfo, Error> {
@@ -1300,17 +1481,17 @@ impl Scene {
             })
         };
         let mut t = std::mem::take(&mut c.typed);
-        // Typed results follow ufbx's typed order; slices follow element order.
-        t.materials.sort_unstable_by_key(|(i, _)| *i);
-        t.textures.sort_unstable_by_key(|(i, _)| *i);
+        // Every public slice follows ufbx's list order (`slot`).
+        t.materials.sort_unstable_by_key(|(i, _)| slot[*i]);
+        t.textures.sort_unstable_by_key(|(i, _)| slot[*i]);
+        t.cameras.sort_unstable_by_key(|(i, _)| slot[*i]);
+        t.lights.sort_unstable_by_key(|(i, _)| slot[*i]);
         let ty_of = |k: usize| c.elements[k].ty;
 
         let mut nodes = Vec::new();
         budget.reserve(&mut nodes, counts[0])?;
-        for (i, e) in c.elements.iter().enumerate() {
-            if e.ty != T::Node {
-                continue;
-            }
+        for &i in list_of(T::Node) {
+            let e = &c.elements[i];
             let Some(Some(state)) = c.node_states.get(i) else {
                 return Err(Error::InvalidData("node without transform"));
             };
@@ -1449,11 +1630,10 @@ impl Scene {
         // Meshes: typed conversion results plus ufbx triangulation of the
         // source faces (corner order is shared; reversed winding mirrors it).
         let index = scene::index(&c.doc, &limits.index).map_err(scene_error)?;
-        let sources = scene_mesh::extract(&c.doc, &index, &scene_mesh::Limits::default())
-            .map_err(scene_error)?;
+        let sources = scene_mesh::extract(&c.doc, &index, mesh_limits).map_err(scene_error)?;
         let mut sources_by_node = budget.collect(sources.meshes.iter().map(|s| (s.node, s)))?;
         sources_by_node.sort_unstable_by_key(|s| s.0);
-        let tl = TriangulationLimits::default();
+        let tl = triangulation_limits;
         let mut converted = t.meshes;
         converted.sort_unstable_by_key(|(i, _, _)| *i);
         let mut meshes = Vec::new();
@@ -1468,7 +1648,7 @@ impl Scene {
                     .map(|k| sources_by_node[k].1)
             });
             let triangles = match source {
-                Some(s) => triangulate(s, &m, &tl, &budget)?,
+                Some(s) => triangulate(s, &m, tl, &budget)?,
                 None => Vec::new(),
             };
             let materials = refs(&mesh_materials)?;
@@ -1493,7 +1673,7 @@ impl Scene {
                 meshes.push((i, m));
             }
         }
-        meshes.sort_unstable_by_key(|(i, _)| *i);
+        meshes.sort_unstable_by_key(|(i, _)| slot[*i]);
         let mut meshes = budget.collect(meshes.into_iter().map(|(_, m)| m))?;
 
         let st = &c.settings;
@@ -1510,7 +1690,7 @@ impl Scene {
             let mut stamp = 0usize;
             for (mesh, e) in meshes
                 .iter_mut()
-                .zip(c.elements.iter().filter(|e| e.ty == T::Mesh))
+                .zip(list_of(T::Mesh).iter().map(|&k| &c.elements[k]))
             {
                 let mut fetch = |ty| -> Result<Vec<usize>, Error> {
                     stamp += 1;
@@ -1532,16 +1712,17 @@ impl Scene {
                 mesh.blend_deformers = fetch(T::BlendDeformer)?;
             }
         }
-        let bones = budget.try_collect(c.elements.iter().filter(|e| e.ty == T::Bone).map(|e| {
-            Ok(crate::Bone {
-                name: budget.text(&e.name)?,
-                source_id: e.source_id,
-                instances: refs(&e.instances)?,
-                radius: real(e.obj.get("radius")),
-                relative_length: real(e.obj.get("relative_length")),
-                is_root: matches!(e.obj.get("is_root"), Some(V::Bool(true))),
-            })
-        }))?;
+        let bones =
+            budget.try_collect(list_of(T::Bone).iter().map(|&k| &c.elements[k]).map(|e| {
+                Ok(crate::Bone {
+                    name: budget.text(&e.name)?,
+                    source_id: e.source_id,
+                    instances: refs(&e.instances)?,
+                    radius: real(e.obj.get("radius")),
+                    relative_length: real(e.obj.get("relative_length")),
+                    is_root: matches!(e.obj.get("is_root"), Some(V::Bool(true))),
+                })
+            }))?;
         let mut d = std::mem::take(&mut c.deformers);
         for (_, skin) in &mut d.skins {
             skin.clusters = refs(&skin.clusters)?;
@@ -1563,6 +1744,12 @@ impl Scene {
                 b.bone_node = r(b.bone_node).ok_or(Error::InvalidData("pose node index"))?;
             }
         }
+        d.skins.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.clusters.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.blends.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.channels.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.shapes.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.poses.sort_unstable_by_key(|(i, _)| slot[*i]);
         let skin_deformers = budget.collect(d.skins.into_iter().map(|(_, v)| v))?;
         let skin_clusters = budget.collect(d.clusters.into_iter().map(|(_, v)| v))?;
         let blend_deformers = budget.collect(d.blends.into_iter().map(|(_, v)| v))?;
@@ -1652,7 +1839,13 @@ fn triangulate(
             .ok_or(Error::ResourceLimit("triangulation corners"))?;
         budget.reserve(&mut buf, corners)?;
         buf.resize(corners, 0usize);
-        budget.reserve(&mut out, corners)?;
+        // Grow geometrically: the budget charges a vector's whole old capacity
+        // on every growth, so growing by one face at a time would charge
+        // quadratically and refuse a large mesh well inside the limit.
+        if out.len().saturating_add(corners) > out.capacity() {
+            let grow = corners.max(out.len());
+            budget.reserve(&mut out, grow)?;
+        }
         let written = source
             .triangulate_with_limits(begin, count, &mut buf, limits)
             .map_err(bad)?;
@@ -1682,9 +1875,7 @@ fn projection_string(b: &crate::api_alloc::Budget, v: Option<&V>) -> Result<Stri
 pub(crate) fn property_error(e: crate::scene_property::Error) -> Error {
     match e {
         crate::scene_property::Error::AllocationFailed => Error::Allocation,
-        crate::scene_property::Error::LimitExceeded => {
-            Error::ResourceLimit("property allocation limit")
-        }
+        crate::scene_property::Error::LimitExceeded => Error::LimitExceeded(Limit::Allocation),
         _ => match crate::api_alloc::Budget::new(usize::MAX)
             .format(format_args!("properties: {e:?}"))
         {
@@ -1696,7 +1887,10 @@ pub(crate) fn property_error(e: crate::scene_property::Error) -> Error {
 pub(crate) fn scene_error(e: crate::scene::Error) -> Error {
     match e {
         crate::scene::Error::AllocationFailed => Error::Allocation,
-        crate::scene::Error::LimitExceeded(s) => Error::ResourceLimit(s),
+        crate::scene::Error::LimitExceeded(s) => match Limit::from_stage(s) {
+            Some(limit) => Error::LimitExceeded(limit),
+            None => Error::ResourceLimit(s),
+        },
         _ => match crate::api_alloc::Budget::new(usize::MAX).format(format_args!("{e:?}")) {
             Ok(message) => Error::Convert(message),
             Err(error) => error,
@@ -1820,12 +2014,18 @@ Connections: {
 "#;
     #[test]
     fn each_projection_reservation_refusal_is_typed() {
-        let limits = Limits::default().dump_limits();
+        let public = Limits::default();
+        let limits = public.dump_limits();
         let mut success = None;
         for n in 0..1000 {
             let c = canon_scene::project_with(FIXTURE, &limits, true).unwrap();
             crate::api_alloc::FAIL_AFTER.with(|f| f.set(Some(n)));
-            let result = Scene::from_projection(c, &limits);
+            let result = Scene::from_projection(
+                c,
+                &limits,
+                &public.mesh_limits(),
+                &public.triangulation_limits(),
+            );
             crate::api_alloc::FAIL_AFTER.with(|f| f.set(None));
             match result {
                 Ok(_) => {
