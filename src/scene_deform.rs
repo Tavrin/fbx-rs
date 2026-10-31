@@ -58,9 +58,9 @@ impl Reader<'_, '_> {
             .work
             .get()
             .checked_add(count)
-            .ok_or("deformer: work limit")?;
+            .ok_or(crate::Error::LimitExceeded(crate::Limit::DeformerWork))?;
         if used > self.work_limit {
-            return Err("deformer: work limit".into());
+            return Err(crate::Error::LimitExceeded(crate::Limit::DeformerWork));
         }
         self.work.set(used);
         crate::conversion_budget::record(self.path.get(), count);
@@ -70,16 +70,16 @@ impl Reader<'_, '_> {
         self.work(
             count
                 .checked_mul((usize::BITS - count.leading_zeros()) as usize + 1)
-                .ok_or("deformer: work limit")?,
+                .ok_or(crate::Error::LimitExceeded(crate::Limit::DeformerWork))?,
         )
     }
     fn charge(&self, count: usize, width: usize) -> Result<(), Error> {
         let used = count
             .checked_mul(width)
             .and_then(|n| self.used.get().checked_add(n))
-            .ok_or("deformer: allocation limit")?;
+            .ok_or(crate::Error::LimitExceeded(crate::Limit::Allocation))?;
         if used > self.limit {
-            return Err("deformer: allocation limit".into());
+            return Err(crate::Error::LimitExceeded(crate::Limit::Allocation));
         }
         self.used.set(used);
         Ok(())
@@ -656,7 +656,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                     )
                     .is_none_or(|n| n > limits.max_allocation)
                 {
-                    return Err("skin: allocation limit".into());
+                    return Err(crate::Error::LimitExceeded(crate::Limit::Allocation));
                 }
                 r.charge(
                     count,
@@ -758,8 +758,9 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                         defaults: None,
                     }
                 } else {
-                    crate::scene_property::layers(
+                    crate::scene_property::layers_indexed(
                         &s.doc,
+                        &s.props,
                         n,
                         limits.max_properties,
                         limits.max_allocation,
@@ -768,8 +769,9 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 };
                 let percent = if s.doc.nodes[n].name == b"Shape" {
                     let parent = s.doc.nodes[n].parent.ok_or("shape: missing geometry")?;
-                    let p = crate::scene_property::layers(
+                    let p = crate::scene_property::layers_indexed(
                         &s.doc,
+                        &s.props,
                         parent,
                         limits.max_properties,
                         limits.max_allocation,

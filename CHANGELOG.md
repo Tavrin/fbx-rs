@@ -22,8 +22,50 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Limit` and `Error::LimitExceeded(Limit)`: a refusal caused by a `Limits`
+  field now names that field (`Limit::field()`) instead of a free-text message.
+  `Error::InputTooLarge` still reports `max_input_bytes`.
+- `Limits` gains `max_meshes`, `max_layers`, `max_face_vertices` and
+  `max_triangulation_work`. They were fixed constants on the load path, so every
+  limit that can reject a file is now a `Limits` field.
+
+### Changed
+
+- Raised the `Limits` defaults so production-size exports load: `max_input_bytes`
+  1 GiB (was 256 MiB), `max_nodes` 16,777,216 (was 1,048,576), `max_properties`
+  33,554,432 (was 4,194,304), `max_array_elements` 134,217,728 (was
+  67,108,864), `max_decompressed_bytes` 1 GiB (was 256 MiB), `max_allocation`
+  4 GiB on 64-bit targets (was 512 MiB), `max_objects` 4,194,304,
+  `max_connections` 8,388,608. A 355 MiB scene with 7.5 million DOM nodes loads
+  in 16 s with a peak resident size of 3.8 GiB; the two Bistro interiors (40 and
+  46 MiB) peak at 487 and 553 MiB. Peak resident size on the production files
+  measured 10.9 to 12.2 times the input size, and each conversion stage charges
+  at most `max_allocation`. Lower the fields for untrusted input.
+  `Limits` has new fields, so struct-literal construction without
+  `..Limits::default()` no longer compiles.
+- `Limits::max_array_elements` is documented as the total over every array in
+  the document, which is what the parser has always enforced.
+
 ### Fixed
 
+- A layer element with a mapping mode the reader does not know, such as
+  `ByControlPoint` on a normal layer, no longer fails the whole mesh. ufbx 0.23.1
+  has no `ByControlPoint` alias: `ufbxi_read_vertex_element` accepts only
+  `ByPolygonVertex`, `ByVertex`/`ByVertice`, `ByPolygon` and `AllSame`
+  (ufbx.c:12797 and 12872) and ignores any other mapping with a warning
+  (ufbx.c:12850 and 12903, `ufbxi_warn_polygon_mapping`), so the layer element is
+  dropped and the mesh loads. fbx-rs now does the same for normals, tangents, UV
+  sets, colors, materials and smoothing.
+- Triangulation no longer charges the allocation budget quadratically: a mesh of
+  160,000 quads was refused under a 4 GiB `max_allocation` because every polygon
+  grew the output by exactly its own size and the budget charges the vector's
+  whole old capacity on each growth. The output now grows geometrically.
+- Reading the properties of one object cost time proportional to the whole
+  document (a 7.5 million node file took longer than 20 minutes). A per-document
+  index of children makes it proportional to the object's own nodes; output is
+  unchanged on the corpus.
 - Every `Scene` list now has the order ufbx 0.23.1 exposes, and the order is
   documented as part of the public contract (crate documentation, "Order of the
   lists"). Objects keep file order instead of source-ID order (`materials`,

@@ -74,8 +74,9 @@
 //!   name.
 //!
 //! Every [`load`] call is bounded by [`Limits`]: input size, node counts,
-//! array lengths and decompressed sizes are checked before allocation. The
-//! crate contains no `unsafe` code.
+//! array lengths and decompressed sizes are checked before allocation. Every
+//! limit that can reject a file is a [`Limits`] field, and a refusal reports
+//! which one as [`Error::LimitExceeded`]. The crate contains no `unsafe` code.
 //!
 //! The [`syntax`] module is the lower layer: a bounded binary and ASCII FBX
 //! parser producing a node/property tree.
@@ -197,7 +198,7 @@ pub mod scene_transform;
 
 pub use api::{
     load, load_with_limits, Axis, Camera, ColorSet, CoordinateAxes, Error, Face,
-    GeometryTransformHandling, InheritModeHandling, Light, LightKind, Limits, LoadOptions,
+    GeometryTransformHandling, InheritModeHandling, Light, LightKind, Limit, Limits, LoadOptions,
     Material, MaterialFeature, MaterialMap, MaterialTexture, Matrix, Mesh, MeshPart, Node, Scene,
     SceneSettings, SourceProperty, SpaceConversion, Texture, TextureLayer, Transform, Unsupported,
     UnsupportedKind, UvSet, VertexAttribute,
