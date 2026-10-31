@@ -99,7 +99,7 @@ impl Reader<'_, '_> {
                 _ => 0,
             };
             if count > limit / width {
-                return Err("animation: array limit".into());
+                return Err(crate::Error::LimitExceeded(crate::Limit::Allocation));
             }
         }
         if name == b"KeyTime" {
@@ -194,7 +194,7 @@ impl Reader<'_, '_> {
                 .checked_mul(std::mem::size_of::<Keyframe>())
                 .is_none_or(|b| b > limit)
         {
-            return Err("animation: key limit".into());
+            return Err(crate::Error::LimitExceeded(crate::Limit::AnimationKeys));
         }
         if values.len() != ticks.len()
             || flags.len() != refs.len()
@@ -479,7 +479,7 @@ fn preflight_curves(
             counts[i] = crate::canon_dom::data_len(doc, node)?;
         }
         if counts[0] > limits.max_keys {
-            return Err("animation: key limit".into());
+            return Err(crate::Error::LimitExceeded(crate::Limit::AnimationKeys));
         }
         if counts[0] != counts[1]
             || counts[2] != counts[4]
@@ -574,10 +574,17 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     validate_cycles(&scn.elements, &budget)?;
     let mut a = std::mem::take(&mut scn.animation);
     a.allocation_limit = limits.max_allocation;
+    a.creation = budget.collect((0..scn.elements.len()).map(|i| scn.created(i)))?;
     a.ids = budget.collect(scn.elements.iter().map(|e| e.source_id))?;
     let mut authored = budget.filled(scn.elements.len(), BTreeMap::new())?;
     let mut defaults = budget.filled(scn.elements.len(), BTreeMap::new())?;
     let (helper_for, owner_for) = helper_index(scn.elements.len(), &scn.scale_helpers, &budget)?;
+    // Animation lists follow ufbx's creation order, not the canonical order.
+    let mut by_creation = budget.collect(0..scn.elements.len())?;
+    budget.sort_work(by_creation.len())?;
+    budget.stable_sort(&mut by_creation, |&x, &y| {
+        scn.created(x).cmp(&scn.created(y))
+    })?;
     let r = Reader {
         s: scn,
         children,
@@ -586,13 +593,15 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     let alloc = &r.budget;
     let channel_index: BTreeMap<_, _> =
         BTreeMap::try_from_iter(scn.deformers.channels.iter().map(|(k, c)| (*k, c)), alloc)?;
-    for (i, e) in scn.elements.iter().enumerate() {
+    for &i in &by_creation {
+        let e = &scn.elements[i];
         let Some(n) = e.node else {
             continue;
         };
         if scn.doc.nodes[n].name != b"Shape" {
             let layers = node_layers(
                 &scn.doc,
+                &scn.props,
                 n,
                 owner_for[i].is_some(),
                 helper_for[i].is_some(),
@@ -611,8 +620,9 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             let weight = channel_index.get(&i).map_or(0.0, |c| c.weight);
             let percent = if scn.doc.nodes[n].name == b"Shape" {
                 let owner = scn.doc.nodes[n].parent.ok_or("animation: shape owner")?;
-                let l = scene_property::layers(
+                let l = scene_property::layers_indexed(
                     &scn.doc,
+                    &scn.props,
                     owner,
                     limits.max_properties,
                     limits.max_allocation,
@@ -661,7 +671,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     for (k, c) in a.curves.iter().enumerate() {
         curve_index[c.element] = Some(k);
     }
-    for (i, e) in scn.elements.iter().enumerate() {
+    for &i in &by_creation {
+        let e = &scn.elements[i];
         if e.ty != T::AnimValue {
             continue;
         }
@@ -740,7 +751,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             p.flags |= 0x2000;
         }
     }
-    for (i, e) in scn.elements.iter().enumerate() {
+    for &i in &by_creation {
+        let e = &scn.elements[i];
         if e.ty != T::AnimLayer {
             continue;
         }
@@ -804,7 +816,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     for (k, l) in a.layers.iter().enumerate() {
         layer_index[l.element] = Some(k);
     }
-    for (i, e) in scn.elements.iter().enumerate() {
+    for &i in &by_creation {
+        let e = &scn.elements[i];
         if e.ty != T::AnimStack {
             continue;
         }
@@ -880,8 +893,17 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             }
         }
     }
+    // Evaluated weights and skin matrices follow the public deformer lists,
+    // which are in ufbx creation order.
     a.channels = alloc.collect(scn.deformers.channels.iter().map(|(i, _)| *i))?;
-    a.clusters = alloc.collect(scn.deformers.clusters.iter().map(|(_, c)| {
+    alloc.stable_sort(&mut a.channels, |&x, &y| {
+        scn.created(x).cmp(&scn.created(y))
+    })?;
+    let mut clusters = alloc.collect(scn.deformers.clusters.iter())?;
+    alloc.stable_sort(&mut clusters, |x, y| {
+        scn.created(x.0).cmp(&scn.created(y.0))
+    })?;
+    a.clusters = alloc.collect(clusters.into_iter().map(|(_, c)| {
         (
             c.bone_node.and_then(|e| node_slot[e]),
             if c.bone_node.is_some() {
@@ -1025,6 +1047,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
 /// ufbxi_pre_finalize_scene / ufbxi_setup_scale_helper under COMPENSATE.
 pub(crate) fn scale_helpers(
     doc: &crate::syntax::Document<'_>,
+    props: &scene_property::PropertyIndex,
     elements: &mut Vec<crate::canon_scene::Element>,
     connections: &mut Vec<(usize, usize, Vec<u8>)>,
     ascii: bool,
@@ -1052,8 +1075,14 @@ pub(crate) fn scale_helpers(
         let Some(node) = e.node else {
             continue;
         };
-        let l = scene_property::layers(doc, node, limits.max_properties, limits.max_allocation)
-            .map_err(crate::api::property_error)?;
+        let l = scene_property::layers_indexed(
+            doc,
+            props,
+            node,
+            limits.max_properties,
+            limits.max_allocation,
+        )
+        .map_err(crate::api::property_error)?;
         original[i] = match l.find(b"InheritType").map_or(-1, |p| p.value_int) {
             0 => 2,
             2 => 1,
@@ -1068,9 +1097,14 @@ pub(crate) fn scale_helpers(
     for (i, e) in elements.iter().enumerate() {
         if e.ty == T::AnimValue {
             if let Some(node) = e.node {
-                let l =
-                    scene_property::layers(doc, node, limits.max_properties, limits.max_allocation)
-                        .map_err(crate::api::property_error)?;
+                let l = scene_property::layers_indexed(
+                    doc,
+                    props,
+                    node,
+                    limits.max_properties,
+                    limits.max_allocation,
+                )
+                .map_err(crate::api::property_error)?;
                 for (c, (plain, prefixed)) in [
                     (b"X".as_slice(), b"d|X".as_slice()),
                     (b"Y", b"d|Y"),
@@ -1193,7 +1227,7 @@ pub(crate) fn scale_helpers(
     for i in 1..n {
         if required[i] {
             if elements.len() >= limits.index.max_objects {
-                return Err("animation: helper object limit".into());
+                return Err(crate::Error::LimitExceeded(crate::Limit::Objects));
             }
             budget.charge(1, 1024)?;
             let e = &elements[i];
@@ -1242,13 +1276,15 @@ pub(crate) fn scale_helpers(
 }
 pub(crate) fn node_layers<'a>(
     doc: &'a crate::syntax::Document<'a>,
+    props: &scene_property::PropertyIndex,
     n: usize,
     helper: bool,
     owner: bool,
     limits: &DumpLimits,
 ) -> Result<scene_property::PropertyLayers<'a>, Error> {
-    let mut l = scene_property::layers(doc, n, limits.max_properties, limits.max_allocation)
-        .map_err(crate::api::property_error)?;
+    let mut l =
+        scene_property::layers_indexed(doc, props, n, limits.max_properties, limits.max_allocation)
+            .map_err(crate::api::property_error)?;
     let moved = |name: &[u8]| {
         matches!(
             name,
@@ -1321,8 +1357,15 @@ Connections: {
                 bytes: Vec::new().into(),
             };
             let mut connections = Vec::new();
-            let error = scale_helpers(&s.doc, &mut s.elements, &mut connections, false, &limits)
-                .unwrap_err();
+            let error = scale_helpers(
+                &s.doc,
+                &s.props,
+                &mut s.elements,
+                &mut connections,
+                false,
+                &limits,
+            )
+            .unwrap_err();
             assert!(
                 error.to_string().contains("key limit")
                     || error.to_string().contains("mismatched")

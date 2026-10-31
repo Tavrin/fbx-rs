@@ -397,6 +397,12 @@ pub(crate) struct NodeEval {
     pub use_rotation_space: bool,
     pub translation_scale: Option<usize>,
     pub inherited_scale: Option<usize>,
+    /// `ufbx_node.is_scale_helper`.
+    pub is_scale_helper: bool,
+    /// Slot of `ufbx_node.scale_helper`.
+    pub own_helper: Option<usize>,
+    /// Slot of `ufbx_node.inherit_scale_node->scale_helper`.
+    pub inherit_helper: Option<usize>,
 }
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Animation {
@@ -409,6 +415,9 @@ pub(crate) struct Animation {
     pub properties: BTreeMap<(usize, Vec<u8>), EvaluatedProperty>,
     pub nodes: Vec<NodeEval>,
     pub node_order: Vec<usize>,
+    /// ufbx creation index (`element_id`) of each element, to order baked
+    /// properties as ufbx does.
+    pub creation: Vec<usize>,
     pub ids: Vec<Option<i64>>,
     pub channels: Vec<usize>,
     pub clusters: Vec<(Option<usize>, sn::Mat)>,
@@ -458,6 +467,9 @@ pub(crate) struct BakeSample<'a> {
     pub layers: &'a [usize],
     pub time: f64,
     pub work: &'a dyn Fn(usize) -> Result<(), Error>,
+    /// `UFBX_TRANSFORM_FLAG_IGNORE_SCALE_HELPER`: the caller applies the
+    /// scale helper's baked keys itself.
+    pub ignore_scale_helper: bool,
 }
 struct PropertyContext<'a> {
     layers: &'a [usize],
@@ -823,6 +835,7 @@ impl Animation {
         if i == 0 {
             return Ok(sn::IDENTITY_TRANSFORM);
         }
+        let ctx_ignore = ctx.ignore_scale_helper;
         let ctx = PropertyContext {
             layers: ctx.layers,
             time: ctx.time,
@@ -833,7 +846,7 @@ impl Animation {
         (ctx.work)(1)?;
         let node = &self.nodes[i];
         let (props, order, use_rs) = self.evaluated_props(i, &inputs[i], channel.mask(), &ctx)?;
-        let translation_scale = if matches!(channel, TransformChannel::Translation) {
+        let translation_scale = if matches!(channel, TransformChannel::Translation) && !ctx_ignore {
             node.translation_scale
                 .map(|k| self.evaluated_scale(inputs, k, &ctx))
                 .transpose()?
@@ -841,7 +854,7 @@ impl Animation {
             None
         };
         let mut local = sn::get_transform(&props, order, use_rs, &node.adjust, translation_scale);
-        if matches!(channel, TransformChannel::Scale) {
+        if matches!(channel, TransformChannel::Scale) && !ctx_ignore {
             if let Some(k) = node.inherited_scale {
                 let scale = self.evaluated_scale(inputs, k, &ctx)?;
                 for (value, scale) in local.scale.iter_mut().zip(scale) {

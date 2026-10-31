@@ -28,12 +28,12 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_depth: 128,
-            max_nodes: 1 << 20,
-            max_properties: 1 << 22,
-            max_array_elements: 1 << 26,
-            max_decompressed_bytes: 256 << 20,
+            max_nodes: 1 << 24,
+            max_properties: 1 << 25,
+            max_array_elements: 1 << 27,
+            max_decompressed_bytes: 1 << 30,
             max_string_length: 16 << 20,
-            max_allocation: 512 << 20,
+            max_allocation: crate::allocation::DEFAULT_MAX_ALLOCATION,
         }
     }
 }

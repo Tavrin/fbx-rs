@@ -1,8 +1,111 @@
 #![no_main]
 //! Public API robustness: `fbx_rs::load_with_limits` under small limits, then
 //! every cross-reference the returned `Scene` exposes must be in range.
-use fbx_rs::{load_with_limits, Limits, LoadOptions, MaterialMap, Scene};
+use fbx_rs::{load_with_limits, BakeOptions, Limits, LoadOptions, MaterialMap, Scene};
 use libfuzzer_sys::fuzz_target;
+
+/// Documented list order: a parent precedes its children and the hierarchy
+/// depth never decreases along `Scene::nodes`.
+fn check_order(scene: &Scene) {
+    let nodes = scene.nodes();
+    let mut depth = vec![0usize; nodes.len()];
+    let mut last = 0usize;
+    for (i, node) in nodes.iter().enumerate() {
+        if let Some(p) = node.parent() {
+            assert!(p < i, "parent {p} does not precede child {i}");
+            depth[i] = depth[p] + 1;
+        }
+        assert!(depth[i] >= last, "depth decreases at node {i}");
+        last = depth[i];
+    }
+}
+
+/// Material and texture API: every index in range, lookups agree with the
+/// ordered iterators.
+fn check_materials(scene: &Scene) {
+    let textures = scene.textures().len();
+    for material in scene.materials() {
+        for (name, feature) in material.features() {
+            assert_eq!(material.feature(name), Some(feature));
+        }
+        for window in material.source_properties().windows(2) {
+            assert!(window[0].name < window[1].name);
+        }
+        for p in material.source_properties().iter().take(32) {
+            assert_eq!(material.source_property(&p.name).map(|q| &q.name), Some(&p.name));
+        }
+        assert!(material.textures().iter().all(|t| t.texture < textures));
+        for (name, map) in material.fbx_maps() {
+            // Pointer identity: values may hold NaN, which never compares equal.
+            assert!(material.fbx_map(name).is_some_and(|m| std::ptr::eq(m, map)));
+        }
+        for (name, map) in material.pbr_maps() {
+            assert!(material.pbr_map(name).is_some_and(|m| std::ptr::eq(m, map)));
+        }
+        std::hint::black_box((material.name(), material.source_id(), material.shading_model()));
+    }
+    for texture in scene.textures() {
+        assert!(texture.layers().iter().all(|l| l.texture < textures));
+        assert!(texture.file_textures().iter().all(|&t| t < textures));
+        if !texture.is_layered() {
+            assert!(texture.layers().is_empty());
+        }
+        std::hint::black_box((texture.filename(), texture.name(), texture.source_id()));
+    }
+}
+
+/// Bake every stack under fixed option sets plus one derived from the input.
+fn check_bake(scene: &Scene, data: &[u8]) {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &b in data {
+        hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    let pick = |shift: u32, count: u64| usize::try_from((hash >> shift) % count).unwrap_or(0);
+    let mut sets = vec![BakeOptions::default()];
+    let mut raw = BakeOptions::default();
+    raw.trim_start_time = true;
+    raw.key_reduction_enabled = false;
+    sets.push(raw);
+    let mut rot = BakeOptions::default();
+    rot.trim_start_time = true;
+    rot.key_reduction_rotation = true;
+    rot.bake_transform_properties = true;
+    sets.push(rot);
+    let mut random = BakeOptions::default();
+    random.trim_start_time = hash & 1 == 1;
+    random.resample_rate = [1.0, 7.5, 30.0, 240.0, 1.0e4][pick(1, 5)];
+    random.minimum_sample_rate = [0.0, 1.0, 19.5, 1.0e3][pick(4, 4)];
+    random.max_keyframe_segments = [0, 1, 2, 32, 4096][pick(6, 5)];
+    random.key_reduction_enabled = hash & (1 << 9) != 0;
+    random.key_reduction_rotation = hash & (1 << 10) != 0;
+    random.key_reduction_threshold = [-1.0, 0.0, 1e-6, 0.5, 1e9][pick(11, 5)];
+    random.key_reduction_passes = [0, 1, 4, 64][pick(14, 4)];
+    random.bake_transform_properties = hash & (1 << 16) != 0;
+    random.max_keys = [0, 1, 17, 4096, 1 << 20][pick(17, 5)];
+    random.max_allocation = [0, 4096, 1 << 20, 1 << 24][pick(20, 4)];
+    random.max_evaluation_work = [0, 100, 10_000, 1 << 22][pick(22, 4)];
+    sets.push(random);
+    let nodes = scene.nodes().len();
+    let stacks = scene.animation_stacks().len();
+    let mut targets: Vec<Option<usize>> = vec![None];
+    targets.extend((0..stacks.min(3)).map(Some));
+    for options in &sets {
+        for &stack in &targets {
+            if let Ok(baked) = scene.bake_animation(stack, options) {
+                let mut previous = None;
+                for node in &baked.nodes {
+                    assert!(node.node < nodes);
+                    assert!(previous.is_none_or(|p| p < node.node));
+                    previous = Some(node.node);
+                }
+                std::hint::black_box(&baked);
+            }
+        }
+    }
+    assert!(scene
+        .bake_animation(Some(stacks), &BakeOptions::default())
+        .is_err());
+}
 
 fn check_map(scene: &Scene, map: &MaterialMap) {
     if let Some(t) = map.texture {
@@ -213,8 +316,18 @@ fuzz_target!(|data: &[u8]| {
         max_allocation: 1 << 20,
         max_deformer_work: 1 << 20,
         max_animation_work: 1 << 20,
+        // Just above what the corpus needs (measured: every supported file loads
+        // at 8 meshes, 16 layers, 16 face vertices and 256 work units), so that a
+        // seed of a few hundred bytes reaches each of these four limits.
+        max_meshes: 16,
+        max_layers: 32,
+        max_face_vertices: 128,
+        max_triangulation_work: 256,
     };
     if let Ok(scene) = load_with_limits(data, &LoadOptions::default(), &limits) {
         walk(&scene);
+        check_order(&scene);
+        check_materials(&scene);
+        check_bake(&scene, data);
     }
 });

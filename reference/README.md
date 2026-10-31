@@ -69,6 +69,27 @@ it still validates each profile's pins/options and reports scene differences.
 same format under the `engine-converted` profile, and
 `fbx-parity compare-scene ORACLE RUST` compares it with the oracle's.
 
+The stream ends with an `order` section (see [SCHEMA.md](SCHEMA.md)) holding the
+sequence of every typed list, which no other section records.
+`compare_order.py PATHS ORACLE PARITY` dumps each listed input with both
+programs and requires the `order` sections to be identical. `compare_bake.py
+PATHS BAKE_ORACLE BAKE_DUMP` bakes each input under four option sets with
+`bake_probe.c` and `examples/bake_dump.rs` and requires the sequence of baked
+nodes and properties, and every key, to be identical. Both exit 0 only when
+every file matches.
+
+A whole stream of a production-size file is tens of GiB (the canonical dumper's
+own 8 GiB output cap stops it on the Bistro interiors), so `dump-scene
+--max-output 0 input.fbx` lifts the cap and `compare_large.py ORACLE PARITY
+WORKDIR INPUT...` compares such files without holding either stream. It pipes
+each dump into `fbx-parity sections --save DIR`, which validates the stream in
+one pass (framing, checksums, identities), prints `name count sha256` per
+section and writes every section to `DIR/NAME.jsonl`. Sections with equal count
+and hash are deleted, a differing section is kept and its first differing records
+are printed. It stops a dump that runs past `--timeout` or when the disk has less
+than `--min-free-gb` free, and exits 0 only when every section of every file is
+equal.
+
 Qualification: `qualify.py prepare` builds the public corpus manifest from a
 corpus manifest and the pinned ufbx Git tree listing (it also adds five pinned
 media fixtures and the self-authored ordering/colour regression). `qualify.py

@@ -99,7 +99,9 @@ fn graph_work_grows_with_input_and_index_sorting() {
                 2 => assert_eq!(s.animation.curves.len(), n),
                 3 => {
                     assert_eq!(s.animation.layers.len(), n + 1);
-                    assert_eq!(s.animation.layers.last().unwrap().values.len(), n);
+                    // Layers follow file order, so find the large one.
+                    let widest = s.animation.layers.iter().map(|l| l.values.len()).max();
+                    assert_eq!(widest, Some(n));
                 }
                 4 => {
                     // Componentwise inheritance propagates helpers to both

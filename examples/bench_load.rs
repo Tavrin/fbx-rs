@@ -21,7 +21,10 @@ fn main() -> ExitCode {
     for _ in 0..repeats {
         match fbx_rs::load(black_box(&input), &options) {
             Ok(s) => nodes = black_box(s.nodes().len()),
-            Err(_) => return ExitCode::from(1),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(1);
+            }
         }
     }
     println!("{{\"repeats\":{repeats},\"nodes\":{nodes}}}");

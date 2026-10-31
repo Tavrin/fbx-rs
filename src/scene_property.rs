@@ -76,8 +76,21 @@ impl<'a> PropertyLayers<'a> {
 }
 
 /// Build both retained lists within a shared vector-capacity budget.
+#[cfg(feature = "parity")]
 pub fn layers<'a>(
     doc: &'a Document<'a>,
+    owner: usize,
+    max_properties: usize,
+    max_allocation: usize,
+) -> Result<PropertyLayers<'a>, Error> {
+    let index = PropertyIndex::build(doc, max_allocation)?;
+    layers_indexed(doc, &index, owner, max_properties, max_allocation)
+}
+
+/// [`layers`] with a prebuilt [`PropertyIndex`] of `doc`.
+pub fn layers_indexed<'a>(
+    doc: &'a Document<'a>,
+    index: &PropertyIndex,
     owner: usize,
     max_properties: usize,
     max_allocation: usize,
@@ -88,8 +101,8 @@ pub fn layers<'a>(
         .get(node.properties.clone())
         .ok_or(Error::InvalidDom)?;
     let subtype = p.get(2).and_then(string).ok_or(Error::InvalidDom)?;
-    let template = template_owner(doc, node.name, subtype)?;
-    let direct = authored(doc, owner, max_properties, max_allocation)?;
+    let template = template_owner_indexed(doc, index, node.name, subtype)?;
+    let direct = authored_indexed(doc, index, owner, max_properties, max_allocation)?;
     let used = direct
         .capacity()
         .checked_mul(size_of::<AuthoredProperty<'_>>())
@@ -102,7 +115,7 @@ pub fn layers<'a>(
         .ok_or(Error::LimitExceeded)?;
     let defaults = match template {
         Some(t) => {
-            let value = authored(doc, t, count_left, remaining)?;
+            let value = authored_indexed(doc, index, t, count_left, remaining)?;
             if value.is_empty() {
                 None
             } else {
@@ -117,25 +130,116 @@ pub fn layers<'a>(
     })
 }
 
+/// Lookup tables of one document, so that reading the properties of an object
+/// costs time proportional to that object's own nodes rather than to the whole
+/// document. Built once per document by [`PropertyIndex::build`].
+#[derive(Debug, Default)]
+pub struct PropertyIndex {
+    /// `children[child_start[p]..child_start[p + 1]]` are the children of node
+    /// `p` in document order.
+    child_start: Vec<u32>,
+    children: Vec<u32>,
+    /// Top-level `Definitions` > `ObjectType` nodes in document order.
+    object_types: Vec<u32>,
+}
+
+impl PropertyIndex {
+    /// Index `doc`; the tables are charged against `max_allocation`.
+    pub fn build(doc: &Document<'_>, max_allocation: usize) -> Result<Self, Error> {
+        let n = doc.nodes.len();
+        u32::try_from(n).map_err(|_| Error::LimitExceeded)?;
+        let mut used = 0;
+        let allocation_error = |e| match e {
+            crate::allocation::Error::Limit => Error::LimitExceeded,
+            crate::allocation::Error::Failed => Error::AllocationFailed,
+        };
+        let mut child_start = Vec::new();
+        let slots = n.checked_add(1).ok_or(Error::LimitExceeded)?;
+        crate::allocation::reserve(&mut child_start, slots, &mut used, max_allocation)
+            .map_err(allocation_error)?;
+        child_start.resize(slots, 0u32);
+        let mut total = 0usize;
+        for node in &doc.nodes {
+            if let Some(p) = node.parent.filter(|&p| p < n) {
+                child_start[p] += 1;
+                total += 1;
+            }
+        }
+        // Prefix sums turn the counts into start offsets (`n` fits u32).
+        let mut sum = 0u32;
+        for slot in &mut child_start {
+            let count = *slot;
+            *slot = sum;
+            sum += count;
+        }
+        let mut cursor = Vec::new();
+        crate::allocation::reserve(&mut cursor, n, &mut used, max_allocation)
+            .map_err(allocation_error)?;
+        cursor.extend_from_slice(&child_start[..n]);
+        let mut children = Vec::new();
+        crate::allocation::reserve(&mut children, total, &mut used, max_allocation)
+            .map_err(allocation_error)?;
+        children.resize(total, 0u32);
+        let mut object_types = Vec::new();
+        for (i, node) in doc.nodes.iter().enumerate() {
+            let i32_index = u32::try_from(i).map_err(|_| Error::LimitExceeded)?;
+            if let Some(p) = node.parent.filter(|&p| p < n) {
+                children[cursor[p] as usize] = i32_index;
+                cursor[p] += 1;
+                if node.name == b"ObjectType" {
+                    let parent = &doc.nodes[p];
+                    if parent.name == b"Definitions" && parent.parent.is_none() {
+                        crate::allocation::reserve(&mut object_types, 1, &mut used, max_allocation)
+                            .map_err(allocation_error)?;
+                        object_types.push(i32_index);
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            child_start,
+            children,
+            object_types,
+        })
+    }
+    /// The children of node `p` in document order.
+    fn children(&self, p: usize) -> impl Iterator<Item = usize> + '_ {
+        let range = match (self.child_start.get(p), p.checked_add(1)) {
+            (Some(&a), Some(next)) => self.child_start.get(next).map(|&b| a as usize..b as usize),
+            _ => None,
+        };
+        range
+            .and_then(|r| self.children.get(r))
+            .unwrap_or_default()
+            .iter()
+            .map(|&c| c as usize)
+    }
+}
+
 /// Locate the source template owner selected for an object. This only selects
 /// the source list; callers must retain it as a separate defaults chain rather
 /// than merging it into the authored list. As in ufbx, the first ObjectType
 /// with the given name decides the result even if its subtype does not match.
+#[cfg(feature = "parity")]
 pub fn template_owner(
     doc: &Document<'_>,
     object_type: &[u8],
     subtype: &[u8],
 ) -> Result<Option<usize>, Error> {
-    for (i, n) in doc.nodes.iter().enumerate() {
-        if n.name != b"ObjectType" {
-            continue;
-        }
-        let Some(parent) = n.parent.and_then(|p| doc.nodes.get(p)) else {
-            continue;
-        };
-        if parent.name != b"Definitions" || parent.parent.is_some() {
-            continue;
-        }
+    let index = PropertyIndex::build(doc, usize::MAX)?;
+    template_owner_indexed(doc, &index, object_type, subtype)
+}
+
+/// [`template_owner`] with a prebuilt [`PropertyIndex`] of `doc`.
+pub fn template_owner_indexed(
+    doc: &Document<'_>,
+    index: &PropertyIndex,
+    object_type: &[u8],
+    subtype: &[u8],
+) -> Result<Option<usize>, Error> {
+    for &i in &index.object_types {
+        let i = i as usize;
+        let n = doc.nodes.get(i).ok_or(Error::InvalidDom)?;
         let p = doc
             .properties
             .get(n.properties.clone())
@@ -144,14 +248,15 @@ pub fn template_owner(
         if name != object_type {
             continue;
         }
-        let template = doc
-            .nodes
-            .iter()
-            .enumerate()
-            .find(|(_, t)| t.parent == Some(i) && t.name == b"PropertyTemplate");
-        let Some((ti, t)) = template else {
+        let template = index.children(i).find(|&t| {
+            doc.nodes
+                .get(t)
+                .is_some_and(|t| t.name == b"PropertyTemplate")
+        });
+        let Some(ti) = template else {
             return Ok(None);
         };
+        let t = doc.nodes.get(ti).ok_or(Error::InvalidDom)?;
         let p = doc
             .properties
             .get(t.properties.clone())
@@ -170,18 +275,13 @@ pub fn template_owner(
         {
             return Ok(None);
         }
-        let property_list = doc
-            .nodes
-            .iter()
-            .enumerate()
-            .find(|(_, n)| n.parent == Some(ti) && n.name == b"Properties70")
-            .or_else(|| {
-                doc.nodes
-                    .iter()
-                    .enumerate()
-                    .find(|(_, n)| n.parent == Some(ti) && n.name == b"Properties60")
-            });
-        if !property_list.is_some_and(|(li, _)| doc.nodes.iter().any(|n| n.parent == Some(li))) {
+        let named = |name: &[u8]| {
+            index
+                .children(ti)
+                .find(|&c| doc.nodes.get(c).is_some_and(|n| n.name == name))
+        };
+        let property_list = named(b"Properties70").or_else(|| named(b"Properties60"));
+        if !property_list.is_some_and(|li| index.children(li).next().is_some()) {
             return Ok(None);
         }
         return Ok(Some(ti));
@@ -296,8 +396,21 @@ thread_local! { static PROPERTY_WORK: std::cell::Cell<usize> = const { std::cell
 /// Read the first Properties70 (or Properties60) child of `owner`. The list
 /// sorts by name and retains the last occurrence of each duplicate. This
 /// restricted function rejects non-ASCII strings and nested binary values.
+#[cfg(any(test, feature = "parity"))]
 pub fn authored<'a>(
     doc: &'a Document<'a>,
+    owner: usize,
+    max_properties: usize,
+    max_allocation: usize,
+) -> Result<Vec<AuthoredProperty<'a>>, Error> {
+    let index = PropertyIndex::build(doc, max_allocation)?;
+    authored_indexed(doc, &index, owner, max_properties, max_allocation)
+}
+
+/// [`authored`] with a prebuilt [`PropertyIndex`] of `doc`.
+pub fn authored_indexed<'a>(
+    doc: &'a Document<'a>,
+    index: &PropertyIndex,
     owner: usize,
     max_properties: usize,
     max_allocation: usize,
@@ -306,11 +419,9 @@ pub fn authored<'a>(
         return Err(Error::InvalidDom);
     }
     let find = |name: &[u8]| {
-        doc.nodes
-            .iter()
-            .enumerate()
-            .find(|(_, n)| n.parent == Some(owner) && n.name == name)
-            .map(|(i, _)| i)
+        index
+            .children(owner)
+            .find(|&c| doc.nodes.get(c).is_some_and(|n| n.name == name))
     };
     let (container, value_offset) = if let Some(i) = find(b"Properties70") {
         (i, 4)
@@ -319,16 +430,11 @@ pub fn authored<'a>(
     } else {
         return Ok(Vec::new());
     };
-    let count = doc
-        .nodes
-        .iter()
-        .filter(|n| n.parent == Some(container))
-        .count();
+    let count = index.children(container).count();
     if count == 0 {
         return Ok(Vec::new());
     }
     let mut work = Work::default();
-    work.add(doc.nodes.len().checked_mul(5).ok_or(Error::LimitExceeded)?)?;
     if count > max_properties
         || count
             .checked_mul(size_of::<AuthoredProperty<'_>>())
@@ -340,17 +446,11 @@ pub fn authored<'a>(
     // its index preserves validation order (and errors before it), without a
     // document scan per property or any additional allocation. This also works
     // for caller-constructed DOMs whose sibling subtrees are interleaved.
-    let blob_property = doc
-        .nodes
-        .iter()
-        .filter(|n| n.name == b"BinaryData")
-        .filter_map(|n| n.parent)
-        .filter(|&p| {
-            doc.nodes
-                .get(p)
-                .is_some_and(|n| n.parent == Some(container))
-        })
-        .min();
+    let blob_property = index.children(container).find(|&p| {
+        index
+            .children(p)
+            .any(|c| doc.nodes.get(c).is_some_and(|n| n.name == b"BinaryData"))
+    });
     let mut used = 0;
     let allocation_error = |e| match e {
         crate::allocation::Error::Limit => Error::LimitExceeded,
@@ -359,37 +459,20 @@ pub fn authored<'a>(
     let mut out = Vec::new();
     crate::allocation::reserve(&mut out, count, &mut used, max_allocation)
         .map_err(allocation_error)?;
-    // Prefix counts index every stored value once, including overlapping and
-    // shared caller-constructed ranges. Queries retain per-node error order.
-    work.add(doc.properties.len())?;
-    let mut unsupported = Vec::<usize>::new();
-    let prefix_len = doc
-        .properties
-        .len()
-        .checked_add(1)
-        .ok_or(Error::LimitExceeded)?;
-    crate::allocation::reserve(&mut unsupported, prefix_len, &mut used, max_allocation)
-        .map_err(allocation_error)?;
-    unsupported.push(0);
-    for p in &doc.properties {
-        let bad = matches!(
-            p,
-            Property::AsciiArray(_) | Property::Array { .. } | Property::Raw(_)
-        );
-        unsupported.push(unsupported.last().unwrap() + usize::from(bad));
-    }
-    for (i, node) in doc
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| n.parent == Some(container))
-    {
+    for i in index.children(container) {
+        let node = doc.nodes.get(i).ok_or(Error::InvalidDom)?;
         let p = doc
             .properties
             .get(node.properties.clone())
             .ok_or(Error::InvalidDom)?;
         work.range(p.len())?;
-        if unsupported[node.properties.end] != unsupported[node.properties.start] {
+        // Overlapping ranges are bounded by the aggregate range work above.
+        if p.iter().any(|v| {
+            matches!(
+                v,
+                Property::AsciiArray(_) | Property::Array { .. } | Property::Raw(_)
+            )
+        }) {
             return Err(Error::UnsupportedValue);
         }
         let name = work.string(p.first().and_then(string).ok_or(Error::InvalidDom)?)?;
@@ -600,10 +683,10 @@ mod hardening_tests {
         assert_eq!(authored(&doc, 0, 10, 4096), Err(Error::InvalidDom));
     }
     #[test]
-    fn index_and_output_share_the_allocation_budget() {
+    fn output_is_charged_against_the_allocation_budget() {
         let doc = shared(5, b"shared");
         let output = 5 * size_of::<AuthoredProperty<'_>>();
-        assert_eq!(authored(&doc, 0, 5, output), Err(Error::LimitExceeded));
-        assert!(authored(&doc, 0, 5, output + 6 * size_of::<usize>()).is_ok());
+        assert_eq!(authored(&doc, 0, 5, output - 1), Err(Error::LimitExceeded));
+        assert!(authored(&doc, 0, 5, output).is_ok());
     }
 }

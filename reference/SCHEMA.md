@@ -12,7 +12,7 @@ scratch `build-receipt.json`. Neither load durations nor addresses are emitted.
 
 Sections, in order, are `options`, `globals`, `dom`, `elements`, `connections`,
 `graph`, `meshes`, `skins`, `blend_shapes`, `materials`, `cameras_lights`,
-`curves`, `advanced`, `triangles`, `curve_samples`, `evaluated`. Each starts with
+`curves`, `advanced`, `triangles`, `curve_samples`, `evaluated`, `order`. Each starts with
 `begin`, contains `field` records with a path and value, and ends with `section`
 containing its field count and SHA-256 over the exact field lines. The footer
 counts all fields and hashes every preceding byte, including the receipt and
@@ -29,6 +29,11 @@ slots, faces/corners, layers, influences and keys retain their sequence order.
 Raw connection kinds, endpoint properties and source order remain in the DOM;
 the resolved connection table is a canonical lookup. The element table is ordered
 by signed source ID then source ordinal, or by legacy type/name bytes/ordinal.
+Every section except `order` is therefore keyed by identity and cannot show
+the sequence of a public list. `order` records it: `/order/<type id>/length`
+and `/order/<type id>/<n>` (a reference to the element key) give each non-empty
+`ufbx_scene.elements_by_type` list in the order ufbx exposes it, which is the
+order of `nodes`, `materials`, `anim_stacks` and the other typed lists.
 
 Leaves use `i64`/`u64` decimal strings, boolean literals, f32 eight-digit hex and
 f64 sixteen-digit hex. Strings have byte length and `bytes_hex`; absent pointers
