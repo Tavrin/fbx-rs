@@ -97,8 +97,14 @@ for (node, evaluated) in scene.nodes().iter().zip(&pose.nodes) {
 object property's numeric and retained nonnumeric values; `evaluate_binding`
 also addresses generated scaling helpers. Evaluation leaves loaded data unchanged.
 
-`fbx_rs::load_with_limits` takes explicit `Limits` for untrusted input. The
-lower-level `fbx_rs::syntax::parse` returns the raw node/property tree.
+`fbx_rs::load_with_limits` takes explicit `Limits` for untrusted input. Every
+limit that can reject a file is a field of `Limits`, documented with its
+default, and a refusal returns `Error::LimitExceeded(Limit)` naming the field
+(`Limit::field()`), or `Error::InputTooLarge` for `max_input_bytes`. The
+defaults accept production-size exports (a 355 MiB scene with 7.5 million DOM
+nodes loads with them, at a peak of about 11 times the file size); lower them
+for untrusted input. The lower-level
+`fbx_rs::syntax::parse` returns the raw node/property tree.
 
 ## Status and limits
 

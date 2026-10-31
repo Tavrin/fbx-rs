@@ -46,7 +46,7 @@ impl Default for DumpLimits {
             draft: crate::scene_draft::Limits::default(),
             max_keys: 1 << 24,
             max_properties: 1 << 20,
-            max_allocation: 512 << 20,
+            max_allocation: crate::allocation::DEFAULT_MAX_ALLOCATION,
             max_deformer_work: 1 << 28,
             max_animation_work: 1 << 28,
             max_line: 64 << 20,
@@ -358,6 +358,8 @@ fn percent_props(layers: &scene_property::PropertyLayers<'_>, percent: f64, conn
 /// The projected scene: elements in canonical order plus scene-level records.
 pub struct CanonScene<'a> {
     pub doc: Document<'a>,
+    /// Lookup tables of `doc` for reading object properties.
+    pub(crate) props: scene_property::PropertyIndex,
     pub elements: Vec<Element>,
     pub connections: Vec<V>,
     pub settings: Obj,
@@ -416,9 +418,14 @@ fn project_takes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), 
         let (ElementType::AnimStack, Some(d)) = (e.ty, e.node) else {
             continue;
         };
-        let props =
-            scene_property::layers(&scene.doc, d, limits.max_properties, limits.max_allocation)
-                .map_err(crate::api::property_error)?;
+        let props = scene_property::layers_indexed(
+            &scene.doc,
+            &scene.props,
+            d,
+            limits.max_properties,
+            limits.max_allocation,
+        )
+        .map_err(crate::api::property_error)?;
         let (mut begin, mut end) = (props.find(b"LocalStart"), props.find(b"LocalStop"));
         if begin.is_none() || end.is_none() {
             begin = props.find(b"ReferenceStart");
@@ -500,8 +507,9 @@ fn project_anim_structure(
             }
             (AnimLayer, Some(node)) => {
                 let values = sources_of(scene, i, AnimValue)?;
-                let props = scene_property::layers(
+                let props = scene_property::layers_indexed(
                     &scene.doc,
+                    &scene.props,
                     node,
                     limits.max_properties,
                     limits.max_allocation,
@@ -560,6 +568,13 @@ fn project_anim_structure(
     Ok(())
 }
 
+fn parse_message(allocation: &crate::api_alloc::Budget, e: &syntax::Error) -> crate::Error {
+    match allocation.format(format_args!("syntax: {e:?}")) {
+        Ok(s) => crate::Error::Parse(s),
+        Err(e) => e,
+    }
+}
+
 /// Build the canonical projection of `input`.
 pub fn project<'a>(input: &'a [u8], limits: &DumpLimits) -> Result<CanonScene<'a>, String> {
     project_with(input, limits, false).map_err(|e| e.to_string())
@@ -575,10 +590,12 @@ pub(crate) fn project_with<'a>(
     let allocation = crate::api_alloc::Budget::new(limits.max_allocation);
     let doc = syntax::parse(input, &limits.syntax).map_err(|e| match e {
         syntax::Error::AllocationFailed => crate::Error::Allocation,
-        _ => match allocation.format(format_args!("syntax: {e:?}")) {
-            Ok(s) => crate::Error::Parse(s),
-            Err(e) => e,
+        syntax::Error::TooDeep => crate::Error::LimitExceeded(crate::Limit::Depth),
+        syntax::Error::LimitExceeded { what } => match crate::Limit::from_stage(what) {
+            Some(limit) => crate::Error::LimitExceeded(limit),
+            None => parse_message(&allocation, &e),
         },
+        _ => parse_message(&allocation, &e),
     })?;
     if !syntax::supported_version(doc.version) {
         return Err(crate::Error::Parse(allocation.format(format_args!(
@@ -586,6 +603,8 @@ pub(crate) fn project_with<'a>(
             doc.version
         ))?));
     }
+    let props = scene_property::PropertyIndex::build(&doc, limits.max_allocation)
+        .map_err(crate::api::property_error)?;
     let ascii = !input.starts_with(b"Kaydara FBX Binary  \x00\x1a");
     let (mut elements, mut connections, unsupported) = {
         let index = scene::index(&doc, &limits.index).map_err(crate::api::scene_error)?;
@@ -756,9 +775,14 @@ pub(crate) fn project_with<'a>(
                     },
                 )?;
             }
-            let owner_props =
-                scene_property::layers(&doc, node, limits.max_properties, limits.max_allocation)
-                    .map_err(crate::api::property_error)?;
+            let owner_props = scene_property::layers_indexed(
+                &doc,
+                &props,
+                node,
+                limits.max_properties,
+                limits.max_allocation,
+            )
+            .map_err(crate::api::property_error)?;
             if owner_props.find(&name).is_some_and(|p| {
                 matches!(
                     p.kind,
@@ -776,6 +800,7 @@ pub(crate) fn project_with<'a>(
     }
     let scale_helpers = crate::scene_animation::scale_helpers(
         &doc,
+        &props,
         &mut elements,
         &mut connections,
         ascii,
@@ -783,6 +808,7 @@ pub(crate) fn project_with<'a>(
     )?;
     let mut scene = CanonScene {
         doc,
+        props,
         elements,
         connections: Vec::new(),
         settings: Obj::new(),
@@ -906,6 +932,7 @@ pub(crate) fn project_with<'a>(
             } else {
                 crate::scene_animation::node_layers(
                     &scene.doc,
+                    &scene.props,
                     n,
                     owner_for[i].is_some(),
                     helper_for[i].is_some(),
@@ -914,8 +941,9 @@ pub(crate) fn project_with<'a>(
             };
             if scene.doc.nodes[n].name == b"Shape" && e.ty == ElementType::BlendChannel {
                 let owner = scene.doc.nodes[n].parent.ok_or("shape: missing geometry")?;
-                let parent_props = scene_property::layers(
+                let parent_props = scene_property::layers_indexed(
                     &scene.doc,
+                    &scene.props,
                     owner,
                     limits.max_properties,
                     limits.max_allocation,
@@ -1103,8 +1131,9 @@ fn project_attributes(
         else {
             continue;
         };
-        let props = scene_property::layers(
+        let props = scene_property::layers_indexed(
             &scene.doc,
+            &scene.props,
             node,
             limits.max_properties,
             limits.max_allocation,
@@ -1169,8 +1198,9 @@ fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<
         let (Material | Texture | Video, Some(node)) = (e.ty, e.node) else {
             continue;
         };
-        let props = scene_property::layers(
+        let props = scene_property::layers_indexed(
             &scene.doc,
+            &scene.props,
             node,
             limits.max_properties,
             limits.max_allocation,
@@ -1445,6 +1475,7 @@ fn project_transforms(
             match (e.ty, e.node) {
                 (Node, Some(d)) => Some(crate::scene_animation::node_layers(
                     &scene.doc,
+                    &scene.props,
                     d,
                     owner_for[slot].is_some(),
                     helper_for[slot].is_some(),
@@ -1468,8 +1499,14 @@ fn project_transforms(
         .iter()
         .position(|x| x.parent.is_none() && x.name == b"GlobalSettings")
     {
-        global = scene_property::authored(doc, g, limits.max_properties, limits.max_allocation)
-            .map_err(crate::api::property_error)?;
+        global = scene_property::authored_indexed(
+            doc,
+            &scene.props,
+            g,
+            limits.max_properties,
+            limits.max_allocation,
+        )
+        .map_err(crate::api::property_error)?;
     }
     let gfind = |name: &[u8]| global.iter().find(|p| p.name == name);
     let gint = |name: &[u8], d: i64| gfind(name).map_or(d, |p| p.value_int);
@@ -2092,9 +2129,14 @@ fn project_globals(
     };
     let mut global_props = Vec::new();
     if let Some(g) = find_top(b"GlobalSettings") {
-        global_props =
-            scene_property::authored(doc, g, limits.max_properties, limits.max_allocation)
-                .map_err(crate::api::property_error)?;
+        global_props = scene_property::authored_indexed(
+            doc,
+            &scene.props,
+            g,
+            limits.max_properties,
+            limits.max_allocation,
+        )
+        .map_err(crate::api::property_error)?;
         if !scene.lean {
             scene.settings.try_set(
                 "props",
@@ -2265,9 +2307,14 @@ fn project_globals(
         if let Some(si) = (h + 1..doc.nodes.len())
             .find(|&i| doc.nodes[i].parent == Some(h) && doc.nodes[i].name == b"SceneInfo")
         {
-            scene_props =
-                scene_property::authored(doc, si, limits.max_properties, limits.max_allocation)
-                    .map_err(crate::api::property_error)?;
+            scene_props = scene_property::authored_indexed(
+                doc,
+                &scene.props,
+                si,
+                limits.max_properties,
+                limits.max_allocation,
+            )
+            .map_err(crate::api::property_error)?;
         }
     }
     // `ufbxi_finalize_scene`: `ufbx_find_string`/`ufbx_find_blob` on

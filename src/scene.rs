@@ -13,9 +13,9 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_objects: 1 << 20,
-            max_connections: 1 << 22,
-            max_allocation: 512 << 20,
+            max_objects: 1 << 22,
+            max_connections: 1 << 23,
+            max_allocation: crate::allocation::DEFAULT_MAX_ALLOCATION,
         }
     }
 }

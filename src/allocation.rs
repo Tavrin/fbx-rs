@@ -2,6 +2,13 @@
 //! Rust-visible capacities, not allocator metadata or process RSS.
 use std::mem::size_of;
 
+/// Default per-stage allocation budget (4 GiB), saturated to the address space
+/// on targets with a narrower `usize` (wasm32).
+#[cfg(target_pointer_width = "64")]
+pub(crate) const DEFAULT_MAX_ALLOCATION: usize = 4 << 30;
+#[cfg(not(target_pointer_width = "64"))]
+pub(crate) const DEFAULT_MAX_ALLOCATION: usize = usize::MAX;
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Error {
     Limit,
