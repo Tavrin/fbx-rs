@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.1.2 (unreleased)
+All notable changes to this crate are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate uses
+[Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [0.1.2] - 2026-10-31
+
+### Added
 
 - Make every allocation on the default loading and evaluation paths fallible,
   including converter graphs, geometry, materials, deformers and ordered
@@ -12,18 +20,8 @@
   file-texture links.
 - `Scene::bake_animation()` adds bounded, independently reduced transform and
   property channels, tick-based start trimming and original stack durations.
-  Compatibility with the complete ufbx bake is not claimed; see the verification
-  notes for the tested option subset and remaining differences.
-
-
-All notable changes to this crate are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate uses
-[Semantic Versioning](https://semver.org/).
-
-## [Unreleased]
-
-### Added
-
+  Baked streams match ufbx on the tested inputs and option sets; see the
+  verification notes.
 - `Limit` and `Error::LimitExceeded(Limit)`: a refusal caused by a `Limits`
   field now names that field (`Limit::field()`) instead of a free-text message.
   `Error::InputTooLarge` still reports `max_input_bytes`.
@@ -135,5 +133,6 @@ All notable changes to this crate are documented here. The format follows
   preserving each weight's association with its vertex.
 - Reject animation-connection cycles, including disconnected cycles and self-links.
 
-[Unreleased]: https://github.com/Tavrin/fbx-rs/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Tavrin/fbx-rs/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Tavrin/fbx-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Tavrin/fbx-rs/compare/v0.1.0...v0.1.1
