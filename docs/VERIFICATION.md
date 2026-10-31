@@ -178,6 +178,36 @@ process ran at a tenth of its usual speed on a loaded machine. It is not a
 defect and the run was resumed. No crash, out-of-memory or memory-limit
 failure occurred in any target.
 
+Pre-release run for 0.1.2 (fallible load, material and texture API, linear
+bake, list ordering, scale-helper bakes). The `load` target now also checks the
+documented node order (a parent precedes its children, depth never decreases),
+the material and texture API (index ranges, lookups against the ordered
+iterators, sorted source properties) and bakes every stack (default and the
+first three) under four option sets (defaults; raw and trimmed; rotation-aware
+reduction with transform properties; one set derived from a hash of the input
+that varies rates, segment counts, thresholds, passes and the key, allocation
+and work caps), checking that baked node indices are in range and increasing.
+Reach, measured with `cargo fuzz coverage` on the 343 seeds alone (the 340
+corpus files plus the three files in `tests/fixtures`): `bake.rs` 89.2 % of
+lines, `scene_material.rs` 76.8 %, `api.rs` 68.2 %, `scene_animation.rs`
+76.8 %. Same rule and flags as above (`-rss_limit_mb=512`, `-malloc_limit_mb=512`,
+5 s timeout), four libFuzzer processes in parallel:
+
+| Target | CPU-minutes | Executions | Edge coverage, initial to final | Crashes | Stop | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `binary` | 40.0 | 123.2 M | 438 to 891 | 0 | chunk 4 added no coverage | 52 MiB |
+| `ascii` | 79.4 | 261.2 M | 438 to 902 | 0 | chunk 8 added no coverage | 52 MiB |
+| `scene_dom` | 121.0 | 4.9 M | 8,512 to 13,420 | 0 | chunk 13 added no coverage, at the cap | 140 MiB |
+| `load` | 120.5 | 27.0 M | 7,749 to 12,335 | 0 | chunk 14 added no coverage, at the cap | 151 MiB |
+
+A first `load` run stopped after 50 CPU-seconds on an assertion in the new
+harness code: it compared two `SourceProperty` values that hold a NaN with
+`assert_eq!`. That is a harness error (NaN never equals itself), not a library
+defect; the harness now compares names and map identity, the input was kept
+aside as a harness false positive, and `load` was restarted from the same
+corpus and run in full. No library crash, timeout, out-of-memory or
+memory-limit failure occurred in any target.
+
 Malformed-curve regressions
 require errors for unsorted and nonfinite times, invalid attribute counts and
 excessive key counts; duplicate times and finite repeat limits are also tested.
