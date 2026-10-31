@@ -183,10 +183,16 @@ impl Layer<'_> {
             Mapping::AllSame => 0,
             Mapping::None => return Err(Error::InvalidMesh { node: self.node }),
         };
-        match self
-            .reference
-            .ok_or(Error::InvalidMesh { node: self.node })?
-        {
+        // ufbx never reads the label (the string "ReferenceInformationType"
+        // does not occur in ufbx.c): a layer is indexed exactly when it has an
+        // index array (`ufbxi_read_vertex_element`, ufbx.c line 12743). A missing
+        // or unrecognised label resolves the same way.
+        let reference = self.reference.unwrap_or(if self.indices.is_some() {
+            Reference::IndexToDirect
+        } else {
+            Reference::Direct
+        });
+        match reference {
             Reference::Direct => Ok(mapped),
             Reference::IndexToDirect => {
                 let v = self
@@ -266,6 +272,9 @@ fn mapping(s: &[u8]) -> Mapping {
         _ => Mapping::None,
     }
 }
+/// The authored reference label. `None` for a label that is not `Direct`,
+/// `Index` or `IndexToDirect`: ufbx (which does not read the label at all, see
+/// [`Layer::direct_index`]) keeps the mesh, so that label must not fail it.
 fn reference(s: &[u8]) -> Option<Reference> {
     match s {
         b"Direct" => Some(Reference::Direct),
@@ -379,10 +388,9 @@ pub fn extract<'a>(
                     ))
                 }
                 b"ReferenceInformationType" => {
-                    l.reference = Some(
+                    // An unrecognised label is not an error: see `reference`.
+                    l.reference =
                         reference(first_bytes(doc, i).ok_or(Error::InvalidMesh { node: i })?)
-                            .ok_or(Error::InvalidMesh { node: i })?,
-                    )
                 }
                 b"Normals" | b"Tangents" | b"Binormals" | b"UV" | b"Colors" | b"Materials"
                 | b"Smoothing" => {

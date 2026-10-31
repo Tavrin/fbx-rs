@@ -58,6 +58,12 @@ All notable changes to this crate are documented here. The format follows
   (ufbx.c:12850 and 12903, `ufbxi_warn_polygon_mapping`), so the layer element is
   dropped and the mesh loads. fbx-rs now does the same for normals, tangents, UV
   sets, colors, materials and smoothing.
+- A layer element whose `ReferenceInformationType` is not `Direct`, `Index` or
+  `IndexToDirect` no longer fails the whole mesh, and a missing label no longer
+  does either. ufbx 0.23.1 never reads the label (the string does not occur in
+  ufbx.c): `ufbxi_read_vertex_element` indexes a layer exactly when the layer
+  has an index array (ufbx.c:12743). fbx-rs does the same for a missing or
+  unrecognised label; a recognised label keeps its existing meaning.
 - Triangulation no longer charges the allocation budget quadratically: a mesh of
   160,000 quads was refused under a 4 GiB `max_allocation` because every polygon
   grew the output by exactly its own size and the budget charges the vector's
@@ -80,8 +86,20 @@ All notable changes to this crate are documented here. The format follows
   helper's baked keys and evaluated from them, nodes are baked in node order and
   baked properties are ordered by object.
 
+- A node with no parent connection is a child of the root, as in ufbx
+  (`ufbxi_finalize_scene`, ufbx.c:18938): its descendants were one level too
+  shallow, so `Scene::nodes()` could list them before shallower nodes. Found by
+  the `load` fuzz target.
+
 ### Verification
 
+- `fbx-parity dump-scene --max-output 0`, `fbx-parity sections` and
+  `reference/compare_large.py` compare whole canonical streams of production-size
+  files section by section (the 8 GiB output cap no longer stops the Bistro
+  interiors); see `docs/VERIFICATION.md`. They exposed that the canonical dump
+  walked animation curves, evaluated nodes, skins and morph channels in the
+  public list order instead of the canonical element order of `reference/canon.c`;
+  the public lists were already correct, so only the parity dump changes.
 - The canonical stream ends with an `order` section recording each typed list,
   and `reference/compare_order.py` and `reference/compare_bake.py` compare list
   and bake order. The earlier "316/316 bit-exact" claim compared values by

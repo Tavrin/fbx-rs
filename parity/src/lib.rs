@@ -133,6 +133,8 @@ pub struct Receipt {
     pub header: Value,
     pub records: u64,
     pub sections: Vec<(String, u64)>,
+    /// Hex SHA-256 of each section's field lines, parallel to `sections`.
+    pub hashes: Vec<String>,
 }
 
 fn validate_receipt(v: &Value) -> Result<()> {
@@ -357,6 +359,16 @@ fn collect_references(value: &Value, references: &mut HashSet<String>) -> Result
 
 /// Validate the whole stream before trusting any equality result or difference.
 pub fn validate(reader: &mut impl BufRead) -> Result<Receipt> {
+    validate_with(reader, &mut |_, _| Ok(()))
+}
+
+/// [`validate`], passing every field line (with its trailing LF) and the
+/// section it belongs to to `sink` as the stream is read, so a caller can keep
+/// chosen sections of a stream too large to hold in memory.
+pub fn validate_with(
+    reader: &mut impl BufRead,
+    sink: &mut dyn FnMut(&str, &[u8]) -> Result<()>,
+) -> Result<Receipt> {
     let mut buffer = Vec::new();
     let first = read_record(reader, &mut buffer)?.ok_or("missing receipt")?;
     if string(&first, "kind")? != "receipt" {
@@ -368,6 +380,7 @@ pub fn validate(reader: &mut impl BufRead) -> Result<Receipt> {
     let mut section_hash = Sha256::new();
     let mut active: Option<String> = None;
     let mut sections = Vec::new();
+    let mut hashes = Vec::new();
     let mut records = 0u64;
     let mut section_count = 0u64;
     let mut elements = HashSet::new();
@@ -405,6 +418,7 @@ pub fn validate(reader: &mut impl BufRead) -> Result<Receipt> {
                     }
                 }
                 section_hash.update(&buffer);
+                sink(name, &buffer)?;
                 section_count += 1;
                 records += 1;
             }
@@ -426,6 +440,7 @@ pub fn validate(reader: &mut impl BufRead) -> Result<Receipt> {
                     }
                 }
                 sections.push((name.to_owned(), section_count));
+                hashes.push(hash_string(section_hash.clone()));
                 active = None;
             }
             "footer" => {
@@ -454,6 +469,7 @@ pub fn validate(reader: &mut impl BufRead) -> Result<Receipt> {
                     header: first,
                     records,
                     sections,
+                    hashes,
                 });
             }
             other => return Err(format!("unknown record kind: {other}")),

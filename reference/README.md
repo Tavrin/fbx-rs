@@ -78,6 +78,18 @@ PATHS BAKE_ORACLE BAKE_DUMP` bakes each input under four option sets with
 nodes and properties, and every key, to be identical. Both exit 0 only when
 every file matches.
 
+A whole stream of a production-size file is tens of GiB (the canonical dumper's
+own 8 GiB output cap stops it on the Bistro interiors), so `dump-scene
+--max-output 0 input.fbx` lifts the cap and `compare_large.py ORACLE PARITY
+WORKDIR INPUT...` compares such files without holding either stream. It pipes
+each dump into `fbx-parity sections --save DIR`, which validates the stream in
+one pass (framing, checksums, identities), prints `name count sha256` per
+section and writes every section to `DIR/NAME.jsonl`. Sections with equal count
+and hash are deleted, a differing section is kept and its first differing records
+are printed. It stops a dump that runs past `--timeout` or when the disk has less
+than `--min-free-gb` free, and exits 0 only when every section of every file is
+equal.
+
 Qualification: `qualify.py prepare` builds the public corpus manifest from a
 corpus manifest and the pinned ufbx Git tree listing (it also adds five pinned
 media fixtures and the self-authored ordering/colour regression). `qualify.py

@@ -135,6 +135,100 @@ On ufbx 0.23.1 with the options above:
 | Unsupported-object report against oracle counts | 316 files, 0 mismatches |
 | wasm32 | canonical dump, public scene and evaluated poses identical to native on one animated morph fixture (Wasmtime); default-feature library build passes |
 
+## Production-size files, whole streams
+
+The corpus files are small. Three production-size inputs were compared against
+the oracle over the whole canonical stream, every section, including `evaluated`
+(a full scene evaluation at every sample time) and `order`: the generated
+`grid400` benchmark (15 MiB) and the two Bistro interiors (40 and 46 MiB), plus
+a small file with a `ByControlPoint` layer. `Surveyor.fbx` (355 MiB, 7.5 million
+DOM nodes) could not be, see below. The streams are 1.3 to 40 million records, tens of GiB as
+text, so `fbx-parity dump-scene --max-output 0` lifts the dumper's 8 GiB output
+cap and `reference/compare_large.py` pipes each dump through `fbx-parity sections
+--save`, which validates the stream in one pass (framing, checksums, identities)
+and keeps one file per section. Two sections are equal exactly when their
+record count and SHA-256 agree, which compares them record for record, in order,
+bit for bit, with no tolerance. Equal sections are deleted, a differing section
+is classified or printed.
+
+| File | Records (oracle, Rust) | Oracle, Rust (s) | Sections equal | Differing sections |
+| --- | ---: | ---: | --- | --- |
+| `grid2-bycontrolpoint.fbx` | 2,177 and 2,173 | 0.0 | 15 of 17 | `globals`, `dom` |
+| `grid400.fbx` | 1,279,040 and 1,279,036 | 15.1, 15.1 | 15 of 17 | `globals`, `dom` |
+| `BistroInterior.fbx` | 32,755,827 and 32,755,827 | 104.7, 114.3 | 16 of 17 | `dom` |
+| `BistroInterior_Wine.fbx` | 40,539,927 and 40,539,923 | 144.5, 159.5 | 15 of 17 | `globals`, `dom` |
+| `Surveyor.fbx` | not compared | oracle refuses after about 8,000 | none | see below |
+
+`Surveyor.fbx` could not be compared in full. The pinned oracle takes 2 h 14 min
+of CPU on it (no output for the first 1 h 50 min), writes 5.5 GB of the `dom`
+section and then stops with `canonical oracle: serialization/evaluation work
+limit`: `reference/canon.c:31` caps the serialization work at 50,000,000 units
+and the file has 7.5 million DOM nodes and 14.8 million values. The silent first
+phase is consistent with the quadratic primary-element search in
+`index_elements` (canon.c:216 to 223), which was not profiled further. A full
+comparison needs a scratch build of the oracle with that cap raised
+(`reference/build.py` on a copy of `canon.c`) and a run of
+`compare_large.py --sequential`; the Rust side needs no change (its dump is
+streamed and uncapped). Until then the 355 MiB file has no stream comparison;
+its load is measured (time and memory) and nothing more.
+
+The differing sections are the two classes the script names, never an
+unexplained value:
+
+- `dom`: ufbx modifies retained DOM arrays in place while loading, and the
+  oracle dumps the modified array; fbx-rs keeps the file's content. Every
+  differing record is a numeric array block of identical path and length: 3,029
+  `Normals` arrays (Bistro), 3,223 `Normals` and one `UVIndex` (Wine, the
+  array whose 1,188 out-of-range indices ufbx clamps), 118 `Vertices` (grid400).
+  The corpus has the same class (271 of its 316 files, 0 other).
+  The per-array proof (the oracle's array equals the oracle's own converted mesh
+  data) is not repeated here; the `meshes` section is equal in every file.
+- `globals`: ufbx records warnings (`Clamped index` x 1,188 on one mesh of the
+  Wine file, `Ignoring geometry 'Normals' with bad mapping mode
+  'ByControlPoint'` on the grid files) and fbx-rs does not reproduce the warning
+  list; and `settings.axes` of the grid files, which are Z-up: ufbx leaves the
+  file's axes there after converting to Y-up, fbx-rs records the axes of the
+  loaded scene (`SceneSettings::axes`, documented as the target axes).
+
+The comparison first failed on an ordering difference in the canonical dump, not
+in the public lists (those were already ufbx's, 316 of 316 in `order`):
+`curve_samples` listed curves in the public (creation) order, and `evaluated`
+listed nodes, skin clusters and morph channels in it too. `reference/canon.c`
+walks every element kind in canonical element order (`ordered_elements`, sorted
+by `element_order`, canon.c:184 and :301; used at :677 and :633 to :685). The
+Rust dump now does the same (`src/animation_canon.rs`). The 316 corpus files did
+not show it: re-run over them with the section comparison, 45 are equal in every
+section and 271 differ only in `dom`.
+
+Memory of `load` on `Surveyor.fbx`, measured with a counting global allocator that
+attributes every allocation of 1 MiB or more to its call stack (a scratch probe,
+not in the repository): peak live heap 3,991 MiB, resident high-water mark 3.83
+GiB (4,020,096 kB), 10.8 times the 355 MiB input, in 15.6 s. At the peak:
+
+| Holder (phase that creates it) | MiB |
+| --- | ---: |
+| Input bytes, held by the caller | 355 |
+| `syntax::Property` vector, 14.8 M values (parse) | 640 |
+| `syntax::Node` vector, 7.5 M nodes (parse) | 384 |
+| `Vec<Option<NodeState>>`, one slot per element (projection) | 568 |
+| Element table (projection) | 192 |
+| `Vec<Option<Element>>` (projection) | 162 |
+| Allocations under 1 MiB: names, keys, per-element vectors | 598 |
+| Large allocations made through the allocation budget helper, not attributed to a named frame: decompressed arrays (about 65), the public scene lists and matrices, curves, `Adjust` and property-layer tables | about 1,090 |
+
+The DOM is not kept alive after the scene is built: the projection is dropped when
+`Scene::from_projection` returns (live heap 805 MiB afterwards, the scene and
+the caller's input). It cannot be dropped earlier, because that function
+re-reads the DOM arrays to extract the meshes. The one clearly avoidable item is
+the per-element `NodeState` table (568 MiB, 14 % of the peak): only nodes hold a
+state, and a table indexed by node would remove most of it. It touches the node
+transform, animation and deformer stages, which share the table, so it is left as
+follow-up work rather than folded into this change; the output does not change
+either way. `BistroInterior.fbx` peaks at 534 MiB of heap (13 times its 40 MiB).
+
+Reproduce: `cargo build --release -p fbx-parity`, then
+`python3 reference/compare_large.py ORACLE target/release/fbx-parity WORKDIR FILE...`.
+
 ## Robustness
 
 Four libFuzzer targets run on malformed input with small limits:
@@ -207,6 +301,36 @@ defect; the harness now compares names and map identity, the input was kept
 aside as a harness false positive, and `load` was restarted from the same
 corpus and run in full. No library crash, timeout, out-of-memory or
 memory-limit failure occurred in any target.
+
+Delta run for the four limits added after that run (`max_meshes`,
+`max_layers`, `max_face_vertices`, `max_triangulation_work`), `load` target only.
+The harness limits for the four are 16 meshes, 32 layers, 128 face vertices and
+256 work units: every supported corpus file loads under them (measured: all load
+with 8 meshes, 16 layers, 16 face vertices and 256 work units; 21 files are
+refused at 8 layers, 8 at 8 face vertices and 2 at 64 work units), and a seed of a few
+hundred bytes reaches each, one per limit (`limit-meshes.fbx`, `limit-layers.fbx`,
+`limit-face-vertices.fbx`, `limit-triangulation-work.fbx`, each refused with
+its own named `Limit`). Start: the 343 corpus seeds, the 4 limit seeds, the
+earlier `load` corpus. Same flags as above (`-rss_limit_mb=512`,
+`-malloc_limit_mb=512`, 5 s timeout, `-max_len=262144`), 600-second chunks, stop
+at a chunk that adds no edge, with a 3,600 CPU-second cap:
+
+| Target | CPU-minutes | Executions | Edge coverage, seeds to final | Crashes | Stop | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `load` | 60.0 | 17.8 M | 7,814 to 12,517 | 1 found and fixed, 0 after | cap reached; the last chunk still added 24 edges | 157 MiB |
+
+The one crash, at 2,090 CPU-seconds, was a library defect, not a harness error:
+the `load` harness asserts the documented node order (a parent precedes its
+children, depth never decreases), and a node with no parent connection was not
+treated as a child of the root. ufbx attaches such a node to the root
+(`ufbxi_finalize_scene`, ufbx.c lines 18938 to 18943), so its children are one
+level deeper than the node; fbx-rs gave them the node's own depth and
+`Scene::nodes()` could list a child before a shallower node. The oracle confirms
+it on a five-node file (`/graph/<child>/node_depth` 2, and the orphan listed in
+`root.children`, against 1 and absent). Fixed in `project_graph`; regression
+test `a_node_without_a_parent_connection_is_a_child_of_the_root`; the input is
+kept as a seed and the run was resumed from the same corpus on the rebuilt
+target (chunk 4 above ended in the crash, the other six chunks are clean).
 
 Malformed-curve regressions
 require errors for unsorted and nonfinite times, invalid attribute counts and

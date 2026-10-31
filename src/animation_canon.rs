@@ -198,7 +198,16 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
     });
     em.begin("curve_samples")?;
     em.count("length", a.curves.len())?;
-    for c in &a.curves {
+    // `a.curves` follows ufbx's creation order (the public list); the canonical
+    // dump walks elements in canonical order, as reference/canon.c does through
+    // `ordered_elements` (canon.c, section "curve_samples").
+    let mut ordered: Vec<&AnimationCurve> = Vec::new();
+    ordered
+        .try_reserve_exact(a.curves.len())
+        .map_err(io::Error::other)?;
+    ordered.extend(a.curves.iter());
+    ordered.sort_by_key(|c| c.element);
+    for c in ordered {
         let base = em.push(&scene.elements[c.element].key);
         let mut samples = Vec::new();
         curve_samples(&mut samples, c)?;
@@ -215,6 +224,18 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
     em.end()?;
     em.begin("evaluated")?;
     em.count("length", a.stacks.len().max(1))?;
+    // The public lists (`a.nodes`, `a.clusters`, `a.channels`) follow ufbx's
+    // creation order. The canonical dump walks elements in canonical order, as
+    // reference/canon.c does through `ordered_elements` in `dump_animation`.
+    let mut node_order: Vec<usize> = (0..a.nodes.len()).collect();
+    node_order.sort_by_key(|&i| a.nodes[i].element);
+    // `a.clusters` follows the public cluster order (creation index).
+    let mut clusters: Vec<_> = scene.deformers.clusters.iter().collect();
+    clusters.sort_by_key(|(element, _)| scene.created(*element));
+    let mut cluster_order: Vec<usize> = (0..clusters.len().min(a.clusters.len())).collect();
+    cluster_order.sort_by_key(|&j| clusters[j].0);
+    let mut channel_order: Vec<usize> = (0..a.channels.len()).collect();
+    channel_order.sort_by_key(|&j| a.channels[j]);
     for (key, begin, end) in &scene.takes {
         let stack = a
             .stacks
@@ -280,7 +301,8 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
             let states = a.states(layers, s.time).map_err(io::Error::other)?;
             let nm = em.push("nodes");
             em.count("length", states.len())?;
-            for (i, st) in states.iter().enumerate() {
+            for &i in &node_order {
+                let Some(st) = states.get(i) else { continue };
                 let k = em.push(&scene.elements[a.nodes[i].element].key);
                 for (part, t) in [("local", &st.local), ("geometry", &st.geometry)] {
                     let p = em.push(part);
@@ -302,10 +324,8 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
             em.restore(nm);
             let sk = em.push("skins");
             em.count("length", a.clusters.len())?;
-            // `a.clusters` follows the public cluster order (creation index).
-            let mut clusters: Vec<_> = scene.deformers.clusters.iter().collect();
-            clusters.sort_by_key(|(element, _)| scene.created(*element));
-            for (&(element, ref c), (bone, bind)) in clusters.into_iter().zip(&a.clusters) {
+            for &j in &cluster_order {
+                let (&(element, ref c), (bone, bind)) = (clusters[j], &a.clusters[j]);
                 let k = em.push(&scene.elements[element].key);
                 let mat = bone.map_or(c.geometry_to_world.0, |i| {
                     crate::scene_node::matrix_mul(&states[i].node_to_world, bind)
@@ -316,7 +336,8 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
             em.restore(sk);
             let mo = em.push("morphs");
             em.count("length", a.channels.len())?;
-            for &element in &a.channels {
+            for &j in &channel_order {
+                let element = a.channels[j];
                 let k = em.push(&scene.elements[element].key);
                 eval(
                     em,
