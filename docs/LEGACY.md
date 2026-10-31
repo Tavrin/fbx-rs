@@ -11,12 +11,23 @@ model. It applies the same import options as the 7.x path.
   The Rust index uses bounded, sorted borrowed-name lookups rather than exposing
   generated numeric identifiers as authored IDs. Optional public source IDs
   are `None`; integer-only animation and unsupported-record ID fields use zero
-  when the source format has no numeric ID.
+  when the source format has no numeric ID. `Scene::evaluate_binding` evaluates
+  a legacy animation target through its retained binding;
+  `Scene::evaluate_property` requires an authored numeric source ID.
 - **Model attributes.** `ufbxi_read_synthetic_attribute` creates the embedded
   mesh, camera, light, bone or empty before reading its model. Properties in
   `ufbxi_node_prop_names`, and user properties, stay on the model; the others
   belong to the attribute. Property connections and skin connections are
-  redirected to the attribute as in `ufbxi_resolve_connections`.
+  redirected to the attribute as in `ufbxi_resolve_connections`. A
+  `CameraSwitcher` model creates a camera-switcher attribute, rather than an
+  unknown element, as in `ufbxi_read_synthetic_attribute`. Sibling nodes,
+  including explicit root children, follow creation order after helper priority
+  (`ufbxi_cmp_node_less`).
+- **ASCII tokens and retained strings.** `ufbxi_ascii_next_token` skips
+  whitespace before values, so a `Key:` array may start on the following line;
+  a following name token still starts a new node when the value list is empty.
+  `ufbxi_is_raw_string` retains the raw `SceneInfo` name under
+  `SceneGenericPersistence` without creating a UTF-8 string view.
 - **Takes.** `ufbxi_read_take` generates a stack and `BaseLayer` per take and
   synthesizes local/reference time properties. `ufbxi_read_take_prop_channel`
   flattens `Transform/T`, `/R`, `/S` to local translation, rotation and scaling.
@@ -27,7 +38,9 @@ model. It applies the same import options as the 7.x path.
   from version 6000, matching the reference fallback.
   It carries incoming slopes/weights to the next key, calculates automatic
   slopes with the same rules as the reference, and retains single-precision
-  tangent handles. Legacy canonical sampling uses seconds neighbours and
+  tangent handles. Curve bounds use `ufbxi_min_real`/`ufbxi_max_real` operand
+  order: minimum keeps the second operand on equality, maximum the first,
+  including their signed-zero bits. Legacy canonical sampling uses seconds neighbours and
   segment fractions; tick neighbours require an authored integer `KeyTime`
   array, as in `reference/canon.c:add_curve_samples`.
 - **Properties and defaults.** `ufbxi_read_properties` prefers `Properties70`,
@@ -43,7 +56,14 @@ model. It applies the same import options as the 7.x path.
 - **Texture layers.** `ufbxi_read_mesh` records legacy texture-slot layers.
   `ufbxi_finalize_scene` resolves those slots through mesh/instance texture
   connections and patches otherwise untextured materials in material/property/slot
-  order. The authored connection records remain intact.
+  order. `ufbxi_cmp_connection_less` stably groups connections by endpoint and
+  property; `ufbxi_fetch_dst_elements` keeps the resulting source sequence.
+  Texture slot numbers index that connection order, which can differ from
+  texture object creation order. The authored connection records remain intact.
+- **Reported axes.** `ufbxi_update_scene_settings` reconstructs source axes
+  from `CoordAxis`, `UpAxis`, `FrontAxis` and their signs. Public scene settings
+  report the converted target axes instead; the comparator requires an exact
+  property-based proof for this documented distinction.
 - **Versions.** `ufbxi_read_header_extension` reconciles old binary container
   versions with the declared pre-6000 document version. A physical 3000
   container declaring 5800 is supported; a logical document older than 5800

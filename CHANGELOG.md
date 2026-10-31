@@ -16,6 +16,20 @@ All notable changes to this crate are documented here. The format follows
   receipts and proved retained-DOM mutation checks, plus authored legacy
   regression fixtures and reproducible fuzz seeds.
 
+### Fixed
+
+- Finish legacy loading with multiline key arrays, raw persistence names,
+  camera switcher attributes, creation-ordered children, connection-ordered
+  texture slots and exact signed-zero animation bounds. All 24 legacy corpus
+  files and seven authored fixtures pass the full comparison, including order;
+  the 316 modern files and 48 baked streams remain equal.
+- Triangulate converted mesh positions and corner winding, preserving ufbx's
+  diagonal rounding, ear selection and triangle order after axis/unit conversion.
+- Resolve Arnold and OSL standard surface shader bindings into public PBR maps,
+  including semantic texture attachments, values and material features.
+- Preserve Arnold procedural-texture input file links, baked geometric-property
+  resets and display-layer records in the canonical comparison.
+
 ## [0.1.2] - 2026-10-31
 
 ### Added

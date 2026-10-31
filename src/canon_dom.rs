@@ -29,6 +29,7 @@ enum St {
     Root,
     HeaderExt,
     SceneInfo,
+    LegacyPersistence,
     Thumbnail,
     Objects,
     Connections,
@@ -80,6 +81,7 @@ fn child_state(parent: St, name: &[u8]) -> St {
             b"Connections" => Connections,
             b"Relations" => Relations,
             b"Takes" => Takes,
+            b"SceneGenericPersistence" => LegacyPersistence,
             _ => Unknown,
         },
         HeaderExt if name == b"SceneInfo" => SceneInfo,
@@ -188,7 +190,7 @@ fn raw_string(parent: St, name: &[u8], version: u32) -> bool {
     use St::*;
     match parent {
         Root => name == b"Model" || name == b"FileId",
-        HeaderExt => name == b"SceneInfo",
+        HeaderExt | LegacyPersistence => name == b"SceneInfo",
         Objects => true,
         Connections | Relations => version < 7000,
         Take => name == b"Model",
@@ -1112,6 +1114,21 @@ pub(crate) fn animation_array(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_persistence_scene_info_retains_raw_name_without_utf8_view() {
+        let doc = crate::syntax::parse(
+            b"; FBX 5.8.0 project file\nSceneGenericPersistence: { SceneInfo: \"SceneInfo::GlobalInfo\" { } }",
+            &crate::syntax::Limits::default(),
+        ).unwrap();
+        let name = doc
+            .nodes
+            .iter()
+            .position(|n| n.name == b"SceneInfo")
+            .unwrap();
+        let data = node_string(&doc, name, true, &Budget::new(1 << 20)).unwrap();
+        assert_eq!(data, Some((None, b"SceneInfo::GlobalInfo".to_vec())));
+    }
 
     #[test]
     fn direct_ascii_arrays_match_retained_projection_bits() {

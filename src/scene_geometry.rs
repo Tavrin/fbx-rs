@@ -1573,9 +1573,14 @@ impl Mesh {
     pub(crate) fn face(&self, i: usize) -> Option<(u32, u32)> {
         self.faces.get(i).copied()
     }
-    /// `ufbx_mesh.reversed_winding`.
-    pub(crate) fn reversed_winding(&self) -> bool {
-        self.reversed_winding
+    pub(crate) fn corner_position(&self, corner: usize) -> Option<[f64; 3]> {
+        let vertex = usize::try_from(*self.position.indices.get(corner)?).ok()?;
+        let i = vertex.checked_mul(3)?;
+        self.position
+            .values
+            .get(i..i.checked_add(3)?)?
+            .try_into()
+            .ok()
     }
 }
 

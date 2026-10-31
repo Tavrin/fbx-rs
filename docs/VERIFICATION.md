@@ -46,6 +46,9 @@ triangles, authored curves and evaluated animation samples.
   - Animation is compared without an exemption: curve keys, tangent handles,
     layer bindings, property samples, node transforms, morph weights and
     skin matrices must all match bit for bit.
+  - Reported axes: ufbx retains the source axes in `settings.axes`, while the
+    public scene reports the converted target axes. The corpus comparator
+    requires an exact source-property proof and the fixed target enums.
   - Unexplained: anything else. The target is zero.
 - `fbx-parity check-public` then compares every value the public `Scene`
   exposes (nodes, transforms, meshes, bones, skins, poses, blend shapes,
@@ -119,8 +122,9 @@ mark files with skins, blend shapes or animation; the static files have none.
 
 ## Last completed FBX 7.x results
 
-These results precede the legacy construction changes below. Requalification
-of both version groups is required before treating this candidate as verified.
+These detailed modern results are retained from the earlier qualification.
+The final 347-input comparison below rechecks all 316 modern files, including
+order and the public scene, and the 48 baked streams also pass again.
 
 On ufbx 0.23.1 with the options above:
 
@@ -134,7 +138,7 @@ On ufbx 0.23.1 with the options above:
 | Baked animation (`reference/compare_bake.py`) | 12 inputs (the 8 animated corpus files and 4 generated fixtures), 4 option sets each (reduced, reduced and trimmed, reduced with rotation-aware reduction and trimmed, raw and trimmed): 48 of 48 streams identical, with baked node and property order and every key compared bit for bit; the scale-inheritance file `maya_scale_no_inherit_7700_ascii.fbx` included |
 | Additional animation fixtures | 39 complete streams bit-exact: interpolation, weighted tangents, extrapolation, all rotation orders, layers, animated layer weights and recursive scale helpers |
 | Unexplained differences | 0 files |
-| Legacy FBX 5.8/6.x | 24 inputs; new qualification pending |
+| Legacy FBX 5.8/6.x | 24 of 24 equal, including order; final per-file results below |
 | Public `Scene` against canonical records, paired in ufbx list order | 316 of 316 files equal, 4,134,768 values, including authored animation and evaluated poses |
 | Syntax layer against ufbx's retained DOM | 315 equal, 1 explained (ufbx sorts blend-shape offsets in place), 0 failing |
 | Unsupported-object report against oracle counts | 316 files, 0 mismatches |
@@ -142,66 +146,67 @@ On ufbx 0.23.1 with the options above:
 
 ## Legacy qualification
 
+The final comparison processes 347 distinct inputs: all 340 corpus files and
+seven self-authored legacy fixtures. All 347 match ufbx 0.23.1 in every section
+apart from the documented retained-DOM and reported-axes classes. There are
+zero import errors and zero unexplained differences. Every typed-list order is
+identical, and all 347 public scene checks and both producers' stream validation
+checks pass. The modern corpus remains 316 of 316 equal, including order;
+baked animation remains 48 of 48 exact streams across 12 inputs and four option
+sets. Both additional Curtains files retain the results below.
+
 The corpus contains 24 distinct legacy files. The additional requested list
 contains 21 of those exact paths; inputs are read in place and bound to SHA-256.
-The current candidate is **not qualified**: its complete 347-input rerun is
-queued under an external, non-expiring CPU admission hold.
+The table reports each final full-stream comparison. **Equal** includes only
+proved retained-DOM mutations and the documented source-axes versus target-axes
+distinction. DOM counts are differing array fields, not individual scalars.
+For the two Z-up Max 6.1 files, the two reported axis fields are accepted only
+when the oracle enums reconstruct exactly from identical authored axis/sign
+properties and the Rust enums equal the fixed import target. Corrupt, missing
+or mismatched evidence fails; no graph, geometry, animation or order field is
+exempted. Seven comparator fault tests cover the retained-array and axes proofs,
+input binding, validation framing and strict animation/order checks.
 
-The first complete comparison processed 340 corpus files and five authored
-fixtures: 319 equal, 12 import errors and 14 unexplained differences. In that
-run, 315 of 316 modern files were equal; the remaining modern result was a
-retained shape-index proof that compared signed DOM storage with unsigned
-loaded indices. The corrected proof compares integer values only within that
-oracle-side proof; six fault tests pass and full scene comparisons remain exact.
+| Legacy input | Final result | Proved DOM fields | Reported axes fields |
+| --- | --- | ---: | ---: |
+| `blender_279_default_6100_ascii.fbx` | Equal; order exact | 1 | 0 |
+| `blender_279_sausage_6100_ascii.fbx` | Equal; order exact | 2 | 0 |
+| `blender_279_uv_sets_6100_ascii.fbx` | Equal; order exact | 1 | 0 |
+| `max2009_cube_anim_5800_ascii.fbx` | Equal; order exact | 2 | 0 |
+| `max2009_cube_anim_5800_binary.fbx` | Equal; order exact | 2 | 0 |
+| `max2009_cube_anim_6100_ascii.fbx` | Equal; order exact | 2 | 2 |
+| `max2009_cube_anim_6100_binary.fbx` | Equal; order exact | 2 | 2 |
+| `maya_blend_shape_cube_6100_ascii.fbx` | Equal; order exact | 4 | 0 |
+| `maya_blend_shape_cube_6100_binary.fbx` | Equal; order exact | 4 | 0 |
+| `maya_camera_light_axes_y_up_6100_ascii.fbx` | Equal; order exact | 0 | 0 |
+| `maya_camera_light_axes_y_up_6100_binary.fbx` | Equal; order exact | 0 | 0 |
+| `maya_cube_6100_ascii.fbx` | Equal; order exact | 1 | 0 |
+| `maya_cube_6100_binary.fbx` | Equal; order exact | 1 | 0 |
+| `maya_cube_big_endian_6100_binary.fbx` | Equal; order exact | 1 | 0 |
+| `maya_interpolation_modes_6100_ascii.fbx` | Equal; order exact | 1 | 0 |
+| `maya_interpolation_modes_6100_binary.fbx` | Equal; order exact | 1 | 0 |
+| `maya_pivots_6100_ascii.fbx` | Equal; order exact | 1 | 0 |
+| `maya_pivots_6100_binary.fbx` | Equal; order exact | 1 | 0 |
+| `maya_scale_no_inherit_6100_ascii.fbx` | Equal; order exact | 0 | 0 |
+| `maya_uv_sets_6100_ascii.fbx` | Equal; order exact | 1 | 0 |
+| `maya_uv_sets_6100_binary.fbx` | Equal; order exact | 1 | 0 |
+| `maya_textured_cube_6100_ascii.fbx` | Equal; order exact | 1 | 0 |
+| `maya_textured_cube_6100_binary.fbx` | Equal; order exact | 1 | 0 |
+| `self_authored_order_material_6100_ascii.fbx` | Equal; order exact | 0 | 0 |
 
-Corrections since that run cover continued ASCII arrays, physical/logical binary
-versions, metadata and unit settings, morph bindings, scale-helper identities,
-deformer ordering, root children and legacy texture layers. They require the
-queued full comparison; source inspection and focused harness tests do not
-establish corpus equivalence. Two additional authored fixtures extend the
-rerun to 347 inputs. Earlier failure receipts remain retained outside the
-repository.
+The authored fixtures cover named takes, model-local meshes, Properties60,
+legacy root geometry/UVs, little- and big-endian mixed keys and compressed
+geometry, named skin/pose references, nested shapes, texture slots and the
+physical-3000/logical-5800 binary container. Regression tests additionally cover
+keys beginning on the following line, empty nodes, connection-ordered texture
+slots, camera switchers, root-child creation order and signed-zero curve bounds.
+[`LEGACY.md`](LEGACY.md) cites the reference functions and construction rules.
 
-The latest executed full Rust gate stopped on a texture-helper slice type
-mismatch. That compile error is corrected in the current files, but clippy,
-tests, doctests, wasm32 and the release build have not passed on this revision.
-Formatting, public-text checks, fixture admissions and comparison fault tests
-have passed independently. The queued batch runs every required gate again.
-
-[`LEGACY.md`](LEGACY.md) describes the reference functions and construction
-rules. `reference/compare_corpus.py` compares complete validated streams,
-including order, and checks the public scene separately. It exits nonzero for
-any import, validation, public projection or unexplained value/order failure.
-
-Every current-candidate result below is pending the admission hold. The earlier
-results describe the first completed comparison, before the listed corrections.
-
-| Legacy input | Earlier result | Current candidate |
-| --- | --- | --- |
-| `blender_279_default_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `blender_279_sausage_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `blender_279_uv_sets_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `max2009_cube_anim_5800_ascii.fbx` | Import error | Not requalified: admission hold |
-| `max2009_cube_anim_5800_binary.fbx` | Import error | Not requalified: admission hold |
-| `max2009_cube_anim_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `max2009_cube_anim_6100_binary.fbx` | Differs: 489 fields | Not requalified: admission hold |
-| `maya_blend_shape_cube_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `maya_blend_shape_cube_6100_binary.fbx` | Differs: 345 fields | Not requalified: admission hold |
-| `maya_camera_light_axes_y_up_6100_ascii.fbx` | Differs: 119 fields | Not requalified: admission hold |
-| `maya_camera_light_axes_y_up_6100_binary.fbx` | Differs: 119 fields | Not requalified: admission hold |
-| `maya_cube_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `maya_cube_6100_binary.fbx` | Differs: 119 fields | Not requalified: admission hold |
-| `maya_cube_big_endian_6100_binary.fbx` | Differs: 119 fields | Not requalified: admission hold |
-| `maya_interpolation_modes_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `maya_interpolation_modes_6100_binary.fbx` | Differs: 119 fields | Not requalified: admission hold |
-| `maya_pivots_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `maya_pivots_6100_binary.fbx` | Differs: 119 fields | Not requalified: admission hold |
-| `maya_scale_no_inherit_6100_ascii.fbx` | Differs: 2497 fields | Not requalified: admission hold |
-| `maya_uv_sets_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `maya_uv_sets_6100_binary.fbx` | Differs: 119 fields | Not requalified: admission hold |
-| `maya_textured_cube_6100_ascii.fbx` | Import error | Not requalified: admission hold |
-| `maya_textured_cube_6100_binary.fbx` | Differs: 158 fields | Not requalified: admission hold |
-| `self_authored_order_material_6100_ascii.fbx` | Equal | Not requalified: admission hold |
+Formatting, clippy with warnings denied, workspace tests, doctests, wasm32,
+release build, full comparison, modern order, bake and the public-text guard
+all exit 0 on the final candidate. Earlier failed receipts remain retained
+outside the repository; focused tests were followed by a complete passing gate.
+Fuzz seeds are reproducible; a new fuzz campaign remains a separate release step.
 
 ## Production-size files, whole streams
 
@@ -296,6 +301,28 @@ either way. `BistroInterior.fbx` peaks at 534 MiB of heap (13 times its 40 MiB).
 
 Reproduce: `cargo build --release -p fbx-parity`, then
 `python3 reference/compare_large.py ORACLE target/release/fbx-parity WORKDIR FILE...`.
+
+### Curtains converted-space regression
+
+Both additional Curtains inputs were compared over all 17 canonical sections,
+including every mesh, texture, triangle, evaluated sample and typed-list order.
+The final candidate streams were validated and compared with retained complete
+oracle section counts and SHA-256s, with the input SHA-256 checked again.
+
+| Input | Records on each side | Exact sections | Remaining documented differences |
+| --- | ---: | ---: | --- |
+| NewSponza Curtains YUp | 8,209,572 | 16 of 17 | Retained DOM array mutation |
+| NewSponza Curtains ZUp | 8,208,059 | 15 of 17 | Retained DOM array mutation and reported file axes |
+
+Every remaining differing section is also identical to the candidate section
+previously classified by the full-stream comparator. No new difference class,
+numeric tolerance or reordered hash was admitted. Material and texture records
+are exact, including procedural shader inputs and file-texture links. Each file
+has 2,001,184 exact triangle records. The original corpus remains 316 of 316
+value comparisons and 316 of 316 order comparisons; bake remains 48 of 48.
+The generated tests cover converted diagonal rounding, reversed winding,
+Arnold/OSL semantic bindings, procedural file links and stored geometric
+properties on an animated node. No asset bytes are embedded in these tests.
 
 ## Robustness
 
@@ -515,10 +542,24 @@ in the converter.
   ported but not exercised.
 - Load options other than the defaults: they are rejected, not converted.
 - Browser WebAssembly: wasm32 was checked under Wasmtime only.
-- Inputs beyond the corpus: equivalence is shown on these 316 files, not
+- Inputs beyond the qualified set: equivalence is shown on the 340 corpus
+  files, seven legacy fixtures and the separately listed regressions, not
   proved in general.
 - Performance is measured separately and is not part of equivalence.
 
+
+## Converted-space triangulation
+
+Public triangle indices and the canonical triangle stream use the loaded mesh's
+converted positions and polygon-corner order. ufbx 0.23.1
+`ufbx_catch_triangulate_face` reads `mesh->vertex_position` (ufbx.c:32416-32488):
+quads choose the shorter diagonal, ties choose the first split, and concavity
+can override that choice. N-gon ear selection uses the same loaded positions.
+Triangulating source positions and then remapping reversed corners can change
+both rounding decisions and triangle order. The generated near-square test
+checks a centimetre-conversion tie and both winding directions; no asset bytes
+are embedded in the test. Canonical emission borrows source topology without
+rebuilding a second whole-scene draft; its temporary allocations remain bounded.
 
 ## Public material and bake additions
 
@@ -534,8 +575,21 @@ PBR mappings cover FBX Lambert/Phong and the unknown-shader Phong fallback,
 plus class-ID-identified 3ds Max Physical, PBR Metal/Rough, PBR Spec/Gloss,
 glTF and OpenPBR materials. These include property prefixes, texture suffixes,
 texture enable switches, default/explicit features and roughness/glossiness
-remapping. Shader-element bindings (Arnold, OSL, ShaderFX/Stingray), shader
-textures and Blender-specific Phong mapping remain unported.
+remapping. Arnold and OSL standard surface shaders resolve semantic bindings:
+`RenderAPI` selects the mapping table, the first binding table containing a
+semantic supplies all its entries in stable order, and an absent semantic uses
+its own property name. Values and textures are fetched independently, so a
+reference-only texture property does not erase a preceding numeric value.
+These rules follow ufbx 0.23.1 `ufbxi_read_binding_table` (ufbx.c:14701-14742),
+`ufbxi_fetch_mapping_maps` (19968-20129), `ufbxi_finalize_scene`
+(22303-22330, 22523-22542), and `ufbx_find_shader_prop_bindings_len`
+(31442-31470). Arnold procedural shader textures retain their inputs and recursively flattened
+file-texture links (`ufbxi_finalize_shader_texture`, ufbx.c:20560-20684).
+OSL/select-output texture nodes, ShaderFX/Stingray bindings and Blender-specific
+Phong mapping remain unported. Display-layer visibility, frozen state, colour
+and node links follow `ufbxi_update_display_layer` (23393-23398). Stored geometric
+transform properties are reset after baking, as in `ufbxi_modify_geometry`
+(21313-21329).
 
 `MaterialMap` remains exhaustive for 0.1.x compatibility. Making it
 non-exhaustive is planned for 0.2.0; callers can currently construct and

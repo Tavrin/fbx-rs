@@ -128,6 +128,7 @@ pub(crate) fn elements(
         let ty = match sub {
             b"Mesh" => T::Mesh,
             b"Camera" => T::Camera,
+            b"CameraSwitcher" => T::CameraSwitcher,
             b"Light" => T::Light,
             b"LimbNode" | b"Limb" | b"Root" => T::Bone,
             b"Null" | b"Marker" => T::Empty,
@@ -666,14 +667,15 @@ pub(crate) fn material_textures(
         };
         let groups = [Some(mesh), e.instances.first().copied()];
         let fetch = |owner: usize, ty: T| -> Result<Vec<usize>, Error> {
-            let mut list = a.collect(
+            // `ufbxi_fetch_dst_elements` preserves connection order for the
+            // same destination/property, even when source creation differs.
+            let list = a.collect(
                 scene.elements[owner]
                     .dst_conns
                     .iter()
                     .filter(|(s, p)| p.is_empty() && scene.elements[*s].ty == ty)
                     .map(|(s, _)| *s),
             )?;
-            list.sort_unstable_by_key(|&i| scene.created(i));
             Ok(list)
         };
         let mut materials = Vec::new();

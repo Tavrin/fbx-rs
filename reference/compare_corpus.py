@@ -2,8 +2,10 @@
 """Compare complete scenes, animation, deformers and typed list order.
 
 Inputs are read in place. Receipts and streams go to a new external directory.
-Only retained numeric DOM arrays proved identical to the oracle's own loaded
-mesh/shape values may differ. No animation or list-order exemptions apply.
+Retained numeric DOM arrays may differ only with exact oracle-side loaded-array
+proofs. The documented file-axes versus target-axes distinction requires a
+source-property proof and the fixed import target. No animation or list-order
+exemptions apply.
 """
 import argparse
 import collections
@@ -84,15 +86,57 @@ def mutation_proofs(oracle):
     return proofs
 
 
+def axes_proof(oracle, rust):
+    """ufbxi_update_scene_settings retains source axes; the public scene reports Y-up.
+
+    Admit only the three axis enums, with oracle values reconstructed from
+    identical authored settings properties and Rust values equal to the pinned
+    right-handed Y-up target. Missing/invalid/duplicate evidence fails closed.
+    """
+    props = {}
+    prefix = '/globals/settings/props/props/'
+    for path, value in oracle.items():
+        if not re.fullmatch(re.escape(prefix) + r'\d+/name', path):
+            continue
+        name = value.get('bytes_hex') if isinstance(value, dict) else None
+        if name is None or path not in rust or rust[path] != value:
+            return None
+        val_path = path[:-4] + 'value_int'
+        val = oracle.get(val_path)
+        if not isinstance(val, dict) or rust.get(val_path) != val:
+            return None
+        if name in props:
+            return None
+        props[name] = val.get('i64')
+    source = {}
+    for axis, prop, target in [('right', 'CoordAxis', 0), ('up', 'UpAxis', 2), ('front', 'FrontAxis', 4)]:
+        dim = props.get(prop.encode().hex())
+        sign = props.get((prop + 'Sign').encode().hex())
+        if dim not in ('0', '1', '2') or sign not in ('-1', '1'):
+            return None
+        source[axis] = int(dim) * 2 + int(sign == '-1')
+        path = '/globals/settings/axes/' + axis
+        if oracle.get(path) != {'enum': 'ufbx_coordinate_axis', 'i64': str(source[axis])}:
+            return None
+        if rust.get(path) != {'enum': 'ufbx_coordinate_axis', 'i64': str(target)}:
+            return None
+    if len({v // 2 for v in source.values()}) != 3:
+        return None
+    return {'source': source, 'target': {'right': 0, 'up': 2, 'front': 4}}
+
+
 def compare(oracle, rust):
     differences = sorted(p for p in oracle.keys() | rust.keys() if oracle.get(p) != rust.get(p))
     proofs = mutation_proofs(oracle) if any(p.startswith('/dom/') for p in differences) else {}
-    explained, unexplained = [], []
+    axes = axes_proof(oracle, rust) if any(p.startswith('/globals/settings/axes/') for p in differences) else None
+    explained, explained_axes, unexplained = [], [], []
     for path in differences:
         match = re.fullmatch(r'(.*)/values/0/array/\d+', path)
         node = match.group(1) if match else None
         if node in proofs and path in oracle and path in rust:
             explained.append(path)
+        elif axes and path in ('/globals/settings/axes/right', '/globals/settings/axes/up', '/globals/settings/axes/front'):
+            explained_axes.append(path)
         else:
             unexplained.append(path)
     return {
@@ -100,6 +144,8 @@ def compare(oracle, rust):
         'order_equal': all(oracle.get(p) == rust.get(p) for p in oracle.keys() | rust.keys() if p.startswith('/order/')),
         'explained_dom_fields': len(explained),
         'mutation_proofs': proofs,
+        'explained_axes_fields': len(explained_axes),
+        'axes_proof': axes,
         'unexplained_fields': len(unexplained),
         'first_differences': [{'path': p, 'oracle': oracle.get(p), 'rust': rust.get(p)} for p in unexplained[:20]],
     }

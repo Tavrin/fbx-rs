@@ -225,6 +225,25 @@ pub(super) fn parse<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>
         }
         let prop_start = doc.properties.len();
         c.horizontal();
+        // `ufbxi_ascii_next_token` skips newlines before the first value,
+        // including old `Key:` arrays. An identifier followed by a colon is
+        // the next node, so an empty property list must stop before it.
+        if matches!(c.peek(), Some(b'\n' | b';')) {
+            let saved = c.pos;
+            c.whitespace();
+            let value = c.pos;
+            if c.peek()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            {
+                while c.peek().is_some_and(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'(' | b')')
+                }) {
+                    c.pos += 1;
+                }
+                c.whitespace();
+                c.pos = if c.peek() == Some(b':') { saved } else { value };
+            }
+        }
         if c.peek() == Some(b',') {
             c.pos += 1;
             c.whitespace();

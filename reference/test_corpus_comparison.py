@@ -56,6 +56,35 @@ class CorpusComparison(unittest.TestCase):
     def test_unknown_dom_change_is_not_explained(self):
         self.assertEqual(compare({'/dom/children/0/name': {'bytes_hex': '41'}}, {'/dom/children/0/name': {'bytes_hex': '42'}})['status'], 'differs')
 
+    def test_axes_difference_needs_source_properties_and_exact_target(self):
+        oracle = {}
+        for i, (prop, value) in enumerate([('CoordAxis', 0), ('CoordAxisSign', 1), ('UpAxis', 2), ('UpAxisSign', 1), ('FrontAxis', 1), ('FrontAxisSign', -1)]):
+            prefix = f'/globals/settings/props/props/{i}/'
+            oracle[prefix + 'name'] = {'bytes_hex': prop.encode().hex()}
+            oracle[prefix + 'value_int'] = {'i64': str(value)}
+        for axis, value in [('right', 0), ('up', 4), ('front', 3)]:
+            oracle['/globals/settings/axes/' + axis] = {'enum': 'ufbx_coordinate_axis', 'i64': str(value)}
+        rust = copy.deepcopy(oracle)
+        rust['/globals/settings/axes/up']['i64'] = '2'
+        rust['/globals/settings/axes/front']['i64'] = '4'
+        result = compare(oracle, rust)
+        self.assertEqual(result['status'], 'equal')
+        self.assertEqual(result['explained_axes_fields'], 2)
+        for changed in ['/globals/settings/axes/up', '/globals/settings/axes/right', '/globals/settings/props/props/2/value_int']:
+            broken = copy.deepcopy(rust)
+            broken[changed]['i64'] = '5'
+            self.assertEqual(compare(oracle, broken)['status'], 'differs')
+        for missing in ['/globals/settings/props/props/2/value_int', '/globals/settings/axes/up']:
+            broken = copy.deepcopy(oracle)
+            del broken[missing]
+            self.assertEqual(compare(broken, rust)['status'], 'differs')
+        broken = copy.deepcopy(rust)
+        broken['/globals/settings/axes/up']['enum'] = 'other_enum'
+        self.assertEqual(compare(oracle, broken)['status'], 'differs')
+        broken = copy.deepcopy(rust)
+        broken['/globals/settings/unit_meters'] = {'f64': '0000000000000000'}
+        self.assertEqual(compare(oracle, broken)['unexplained_fields'], 1)
+
     def test_missing_order_and_duplicate_paths_are_refused(self):
         with self.assertRaises(ValueError):
             fields(b'{"kind":"field","path":"/graph/a","value":null}\n')

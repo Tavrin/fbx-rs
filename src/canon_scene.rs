@@ -306,7 +306,7 @@ fn object_name(raw: &[u8]) -> &[u8] {
     raw
 }
 
-fn prop_obj(p: &AuthoredProperty<'_>) -> V {
+pub(crate) fn prop_obj(p: &AuthoredProperty<'_>) -> V {
     V::Obj(
         Obj::new()
             .with("name", s(p.name))
@@ -1157,6 +1157,9 @@ fn project_rest<'a>(
     project_materials(&mut scene, limits)?;
     project_attributes(&mut scene, &links, limits)?;
     crate::scene_animation::project(&mut scene, limits)?;
+    // Animation annotates stored property lists from the source; finalize the
+    // baked geometry values after that annotation has rebuilt animated lists.
+    reset_baked_properties(&mut scene);
     Ok(scene)
 }
 
@@ -1275,7 +1278,9 @@ fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<
     let types: Vec<ElementType> = a.collect(scene.elements.iter().map(|e| e.ty))?;
     let mut items = Vec::new();
     for (i, e) in scene.elements.iter().enumerate() {
-        let (Material | Texture | Video, Some(node)) = (e.ty, e.node) else {
+        let (Material | Texture | Video | Shader | ShaderBinding | DisplayLayer, Some(node)) =
+            (e.ty, e.node)
+        else {
             continue;
         };
         let props = scene_property::layers_indexed(
@@ -1320,6 +1325,9 @@ fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<
     drop(items);
     a.reserve(&mut scene.warnings, out.warnings.len())?;
     scene.warnings.extend(out.warnings);
+    scene
+        .metadata
+        .try_set("num_shader_textures", V::U(out.num_shader_textures), &a)?;
     scene.typed.materials = out.materials;
     scene.typed.textures = out.textures;
     for (i, record) in out.records {
@@ -1411,7 +1419,18 @@ fn project_graph(
     for list in &mut children {
         budget.sort_work(list.len())?;
         allocation.stable_sort(list, |a, b| {
-            owner_for[*a].is_none().cmp(&owner_for[*b].is_none())
+            owner_for[*a]
+                .is_none()
+                .cmp(&owner_for[*b].is_none())
+                .then_with(|| {
+                    if scene.doc.version < 7000 {
+                        // ufbxi_cmp_node_less: siblings use creation order,
+                        // including explicit root connections in legacy files.
+                        scene.created(*a).cmp(&scene.created(*b))
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
         })?;
     }
     let mut depth = allocation.filled(n, 0u64)?;
@@ -2006,6 +2025,45 @@ fn project_transforms(
     }
     scene.geometry_modify = geometry_modify;
     Ok(())
+}
+
+fn reset_baked_properties(scene: &mut CanonScene<'_>) {
+    // ufbxi_modify_geometry, ufbx.c:21313-21329: reset stored own
+    // geometric properties after preserving the matrix used to bake geometry.
+    if !scene.lean {
+        for node in scene
+            .elements
+            .iter_mut()
+            .filter(|e| e.ty == ElementType::Node)
+        {
+            let Some(V::Obj(element)) = node.obj.get_mut("element") else {
+                continue;
+            };
+            let Some(V::Obj(props)) = element.get_mut("props") else {
+                continue;
+            };
+            let Some(V::Obj(props)) = props.get_mut("props") else {
+                continue;
+            };
+            let Some(V::List(props)) = props.get_mut("data") else {
+                continue;
+            };
+            for prop in props {
+                let V::Obj(prop) = prop else { continue };
+                let value = match prop.get("name") {
+                    Some(V::Bytes(name))
+                        if name == b"GeometricTranslation" || name == b"GeometricRotation" =>
+                    {
+                        0.0
+                    }
+                    Some(V::Bytes(name)) if name == b"GeometricScaling" => 1.0,
+                    _ => continue,
+                };
+                prop.set("value_int", V::I(if value == 0.0 { 0 } else { 1 }));
+                prop.set("value_real_arr", V::Vec(vec![value, value, value, 0.0]));
+            }
+        }
+    }
 }
 
 /// `connections_dst` of an element in ufbx order (stable by `dst_prop`).
@@ -2758,40 +2816,101 @@ fn write_all<W: Write>(
         em.end()?;
     }
     let dl = limits.draft.clone();
-    let draft = crate::scene_draft::build(&scene.doc, &dl)
-        .map_err(|e| io::Error::other(format!("draft: {e:?}")))?;
+    // Triangle emission needs borrowed topology only. Rebuilding a whole
+    // scene draft would charge the already bounded DOM again against a second,
+    // smaller scene budget and needlessly rebuild authored transforms.
+    let mut retained = 0usize;
+    let mut charge = |count: usize, width: usize| -> io::Result<()> {
+        retained = count
+            .checked_mul(width)
+            .and_then(|n| retained.checked_add(n))
+            .filter(|&n| n <= dl.max_allocation)
+            .ok_or_else(|| io::Error::other("triangle allocation limit"))?;
+        Ok(())
+    };
+    let mut il = dl.index.clone();
+    il.max_allocation = il.max_allocation.min(dl.max_allocation);
+    let index = crate::scene::index(&scene.doc, &il)
+        .map_err(|e| io::Error::other(format!("triangle index: {e:?}")))?;
+    charge(
+        index.objects.capacity(),
+        std::mem::size_of::<crate::scene::Object>(),
+    )?;
+    charge(
+        index.connections.capacity(),
+        std::mem::size_of::<crate::scene::Connection<'_>>(),
+    )?;
+    charge(
+        index.unsupported.capacity(),
+        std::mem::size_of::<crate::scene::Unsupported>(),
+    )?;
+    let meshes = crate::scene_mesh::extract(&scene.doc, &index, &dl.mesh)
+        .map_err(|e| io::Error::other(format!("triangle meshes: {e:?}")))?;
+    charge(
+        meshes.meshes.capacity(),
+        std::mem::size_of::<crate::scene_mesh::Mesh<'_>>(),
+    )?;
+    charge(
+        meshes.layers.capacity(),
+        std::mem::size_of::<crate::scene_mesh::Layer<'_>>(),
+    )?;
+    // Legacy meshes need generated element keys; all versions triangulate
+    // the final converted positions/winding as ufbx_triangulate_face does.
+    let a = crate::api_alloc::Budget::new(dl.max_allocation);
+    let mut triangle_meshes = a
+        .collect(
+            scene
+                .elements
+                .iter()
+                .filter(|e| e.ty == ElementType::Mesh)
+                .filter_map(|e| e.node.map(|node| (node, &e.obj))),
+        )
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    triangle_meshes.sort_unstable_by_key(|(node, _)| *node);
+    let mut keys = a
+        .collect(
+            scene
+                .elements
+                .iter()
+                .filter(|e| e.ty == ElementType::Mesh)
+                .filter_map(|e| e.node.map(|node| (node, e.key.as_str()))),
+        )
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    keys.sort_unstable_by_key(|p| p.0);
+    charge(
+        triangle_meshes.capacity(),
+        std::mem::size_of::<(usize, &Obj)>(),
+    )?;
+    charge(keys.capacity(), std::mem::size_of::<(usize, &str)>())?;
     let tl = crate::canonical_writer::TriangleDumpLimits {
-        max_allocation: dl.max_allocation.saturating_sub(draft.retained_bytes),
+        max_allocation: dl
+            .max_allocation
+            .checked_sub(retained)
+            .ok_or_else(|| io::Error::other("triangle allocation limit"))?,
         ..Default::default()
     };
-    if scene.doc.version < 7000 {
-        let a = crate::api_alloc::Budget::new(limits.max_allocation);
-        let mut keys = a
-            .try_collect(
-                scene
-                    .elements
-                    .iter()
-                    .filter(|e| e.ty == ElementType::Mesh)
-                    .filter_map(|e| e.node.map(|n| (n, &e.key)))
-                    .map(|(n, k)| Ok((n, a.text(k.as_bytes())?))),
-            )
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        keys.sort_unstable_by_key(|p| p.0);
-        crate::canonical_writer::write_source_triangles_keyed(
-            &mut em.w,
-            &draft.index,
-            &draft.meshes,
-            &tl,
-            Some(&keys),
-        )?;
-    } else {
-        crate::canonical_writer::write_source_triangles(
-            &mut em.w,
-            &draft.index,
-            &draft.meshes,
-            &tl,
-        )?;
-    }
+    crate::canonical_writer::write_triangles_positions(
+        &mut em.w,
+        &index,
+        &meshes,
+        &tl,
+        (scene.doc.version < 7000).then_some(keys.as_slice()),
+        |node, corner| {
+            let i = triangle_meshes
+                .binary_search_by_key(&node, |(n, _)| *n)
+                .ok()?;
+            let obj = triangle_meshes[i].1;
+            let V::U32s(indices) = obj.get("vertex_indices")? else {
+                return None;
+            };
+            let V::Vec3s(values) = obj.get("vertices")? else {
+                return None;
+            };
+            values
+                .get(usize::try_from(*indices.get(corner)?).ok()?)
+                .copied()
+        },
+    )?;
     crate::animation_canon::write(em, scene)?;
     // Every section above is keyed by identity; this one records the sequence
     // of each typed list, as `reference/canon.c` does.

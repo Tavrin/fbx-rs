@@ -24,13 +24,22 @@ fn named_connections_model_mesh_and_take() {
         scene.animation_curves()[0].keys[0].interpolation,
         Interpolation::Linear
     );
+    // Legacy objects have names rather than numeric source IDs. The binding
+    // retains the target identity without exposing synthetic IDs as authored.
+    let binding = &scene.animation_layers()[0].bindings[0];
+    assert_eq!(binding.source_id, 0);
+    assert_eq!(binding.property, b"Lcl Translation");
     assert_eq!(
         scene
-            .evaluate_property(Some(0), 2, b"Lcl Translation", 0.25)
+            .evaluate_binding(Some(0), binding, 0.25)
             .unwrap()
             .components,
         [2.5, 2.0, 3.0, 0.0]
     );
+    assert!(matches!(
+        scene.evaluate_property(Some(0), 2, b"Lcl Translation", 0.25),
+        Err(Error::InvalidData("animation: source ID not found"))
+    ));
 }
 
 #[test]
@@ -216,4 +225,45 @@ fn nonpositive_legacy_key_version_uses_format_default() {
             10.0
         );
     }
+}
+
+#[test]
+fn legacy_keys_start_on_next_line_without_consuming_empty_nodes() {
+    let text = std::str::from_utf8(TAKE).unwrap().replace(
+        "Key: 0,0,L,46186158000,10,L",
+        "Empty: \n ; comment before the next node\n Key: \n  0,0,L,46186158000,10,L",
+    );
+    let scene = load(text.as_bytes(), &LoadOptions::default()).unwrap();
+    assert_eq!(scene.animation_curves().len(), 1);
+    assert_eq!(scene.animation_curves()[0].keys.len(), 2);
+    assert_eq!(
+        scene.animation_curves()[0].evaluate(0.25, 0.0).unwrap(),
+        2.5
+    );
+}
+
+#[test]
+fn legacy_texture_slots_follow_connections_instead_of_object_order() {
+    let text = std::str::from_utf8(include_bytes!("fixtures/legacy-texture.fbx"))
+        .unwrap()
+        .replace(
+            " Material:",
+            r#" Texture: "Texture::Other", "TextureVideoClip" { FileName: "other.png" }
+ Material:"#,
+        )
+        .replace(
+            r#" Connect: "OO", "Texture::Color", "Model::Child""#,
+            r#" Connect: "OO", "Texture::Other", "Model::Child"
+ Connect: "OO", "Texture::Color", "Model::Child""#,
+        );
+    let scene = load(text.as_bytes(), &LoadOptions::default()).unwrap();
+    assert_eq!(scene.textures()[0].name(), "Color");
+    assert_eq!(scene.textures()[1].name(), "Other");
+    assert_eq!(
+        scene.materials()[0]
+            .fbx_map("diffuse_color")
+            .unwrap()
+            .texture,
+        Some(1)
+    );
 }

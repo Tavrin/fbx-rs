@@ -471,7 +471,8 @@ pub fn write_source_global_properties<W: Write>(
         let mut bytes = Vec::new();
         crate::allocation::reserve(&mut bytes, 256, &mut 0, max_path_allocation)
             .map_err(|_| io::Error::other("canonical path allocation limit or failure"))?;
-        let mut path = String::from_utf8(bytes).unwrap();
+        let mut path =
+            String::from_utf8(bytes).map_err(|_| io::Error::other("canonical path encoding"))?;
         let base = "/globals/settings/props";
         writer.field(
             "/globals/settings/props/props/length",
@@ -525,14 +526,22 @@ pub fn write_source_triangles<W: Write>(
     meshes: &crate::scene_mesh::Meshes<'_>,
     limits: &TriangleDumpLimits,
 ) -> io::Result<()> {
-    write_source_triangles_keyed(writer, index, meshes, limits, None)
+    write_triangles_positions(writer, index, meshes, limits, None, |node, corner| {
+        meshes
+            .meshes
+            .iter()
+            .find(|m| m.node == node)?
+            .corner_position(corner)
+    })
 }
-pub(crate) fn write_source_triangles_keyed<W: Write>(
+
+pub(crate) fn write_triangles_positions<W: Write>(
     writer: &mut CanonicalWriter<W>,
     index: &crate::scene::SceneIndex<'_>,
     meshes: &crate::scene_mesh::Meshes<'_>,
     limits: &TriangleDumpLimits,
-    keys: Option<&[(usize, String)]>,
+    keys: Option<&[(usize, &str)]>,
+    position: impl Fn(usize, usize) -> Option<[f64; 3]>,
 ) -> io::Result<()> {
     use std::fmt::Write as _;
     let result = (|| -> io::Result<()> {
@@ -564,7 +573,7 @@ pub(crate) fn write_source_triangles_keyed<W: Write>(
                 let key = |node| {
                     keys.binary_search_by_key(&node, |p| p.0)
                         .ok()
-                        .map(|k| keys[k].1.as_str())
+                        .map(|k| keys[k].1)
                 };
                 key(a.1).cmp(&key(b.1))
             });
@@ -574,7 +583,7 @@ pub(crate) fn write_source_triangles_keyed<W: Write>(
         let mut bytes = Vec::new();
         crate::allocation::reserve(&mut bytes, 160, &mut retained, limits.max_allocation)
             .map_err(|_| fail())?;
-        let mut path = String::from_utf8(bytes).unwrap();
+        let mut path = String::from_utf8(bytes).map_err(|_| fail())?;
         writer.begin("triangles")?;
         writer.field("/triangles/length", &Count(order.len()))?;
         let mut work_left = limits.max_work;
@@ -641,8 +650,14 @@ pub(crate) fn write_source_triangles_keyed<W: Write>(
                     max_allocation: available,
                     max_work: cost,
                 };
-                mesh.triangulate_with_limits(range.start, n, &mut triangles, &tri_limits)
-                    .map_err(|_| fail())?;
+                mesh.triangulate_with_limits_positions(
+                    range.start,
+                    n,
+                    &mut triangles,
+                    &tri_limits,
+                    |c| position(node, c),
+                )
+                .map_err(|_| fail())?;
                 path.clear();
                 write!(&mut path, "/triangles/{key}/{face}/length").map_err(|_| fail())?;
                 writer.field(&path, &Count(needed))?;

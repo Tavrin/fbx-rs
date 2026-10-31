@@ -1233,7 +1233,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                     c.keys
                         .iter()
                         .map(|k| k.value)
-                        .reduce(|a, b| if a > b { a } else { b })
+                        .reduce(|a, b| if a < b { b } else { a })
                         .unwrap_or(0.0),
                 ),
             ] {
@@ -1394,7 +1394,10 @@ pub(crate) fn scale_helpers(
                 keys.iter()
                     .fold(None::<(f64, f64)>, |acc, k| {
                         Some(acc.map_or((k.value, k.value), |(lo, hi)| {
-                            (lo.min(k.value), hi.max(k.value))
+                            (
+                                if lo < k.value { lo } else { k.value },
+                                if hi < k.value { k.value } else { hi },
+                            )
                         }))
                     })
                     .unwrap_or((0.0, 0.0)),
