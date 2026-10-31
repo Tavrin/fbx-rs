@@ -24,6 +24,7 @@ pub const SECTIONS: &[&str] = &[
     "triangles",
     "curve_samples",
     "evaluated",
+    "order",
 ];
 
 struct HexDigest([u8; 32]);

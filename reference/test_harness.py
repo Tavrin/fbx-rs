@@ -22,7 +22,7 @@ def env_dir(name):
 
 TARGET = env_dir("CARGO_TARGET_DIR")
 SCRATCH = env_dir("SCRATCH_DIR")
-SECTIONS = ["options", "globals", "dom", "elements", "connections", "graph", "meshes", "skins", "blend_shapes", "materials", "cameras_lights", "curves", "advanced", "triangles", "curve_samples", "evaluated"]
+SECTIONS = ["options", "globals", "dom", "elements", "connections", "graph", "meshes", "skins", "blend_shapes", "materials", "cameras_lights", "curves", "advanced", "triangles", "curve_samples", "evaluated", "order"]
 
 
 def encode(v):

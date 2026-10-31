@@ -102,6 +102,8 @@ pub enum ElementType {
     MetadataObject = 41,
 }
 impl ElementType {
+    /// Largest `ufbx_element_type` discriminant.
+    pub(crate) const MAX_ID: usize = ElementType::MetadataObject as usize;
     fn schema(self) -> &'static str {
         use ElementType::*;
         match self {
@@ -387,6 +389,12 @@ pub struct CanonScene<'a> {
     pub anim: Obj,
     pub(crate) animation: crate::animation::Animation,
     pub(crate) scale_helpers: Vec<(usize, usize)>,
+    /// Creation index (ufbx `element_id`) of each element, by canonical
+    /// element index: root first, then objects in file order, then synthetic
+    /// elements. Canonical order is by source ID; ufbx's lists follow this.
+    pub(crate) creation: Vec<usize>,
+    /// Node element indices in `ufbx_scene.nodes` order, set by the graph stage.
+    pub(crate) node_order: Vec<usize>,
     /// Lean projection (public `load`): no per-element canonical records are
     /// built; the converted values are kept typed in [`CanonScene::typed`].
     pub(crate) lean: bool,
@@ -790,6 +798,8 @@ pub(crate) fn project_with<'a>(
         anim: Obj::new(),
         animation: Default::default(),
         scale_helpers,
+        creation: Vec::new(),
+        node_order: Vec::new(),
         lean,
         typed: Lean::default(),
         deformers: Default::default(),
@@ -818,6 +828,7 @@ pub(crate) fn project_with<'a>(
             .iter()
             .map(|&(o, h)| (remap[o], remap[h])),
     )?;
+    scene.creation = order;
     let conn = |src: usize, dst: usize, prop: &[u8]| {
         V::Obj(
             Obj::new()
@@ -948,6 +959,79 @@ pub(crate) fn project_with<'a>(
     project_rest(scene, input, limits, &oo)
 }
 
+/// `ufbx_scene.nodes` order (`ufbxi_cmp_node_less`): by depth, then the
+/// parent's creation index, then scale helpers before ordinary siblings, then
+/// creation index. Geometry-transform helpers do not exist under the import
+/// profile's `ModifyGeometry` handling.
+fn node_list_order(
+    scene: &CanonScene<'_>,
+    links: &Links,
+    limits: &DumpLimits,
+) -> Result<Vec<usize>, crate::Error> {
+    let allocation = crate::api_alloc::Budget::new(limits.max_allocation);
+    let n = scene.elements.len();
+    let budget = crate::conversion_budget::Budget::new(
+        limits.max_allocation,
+        limits.max_animation_work,
+        crate::conversion_budget::Path::Helpers,
+    );
+    let (_, owner_for) =
+        crate::scene_animation::helper_index(n, &scene.scale_helpers, &allocation)?;
+    let mut nodes =
+        allocation.collect((0..n).filter(|&i| scene.elements[i].ty == ElementType::Node))?;
+    budget.sort_work(nodes.len())?;
+    let key = |i: usize| {
+        (
+            links.depth[i],
+            links.parent[i].map_or(0, |p| scene.created(p)),
+            owner_for[i].is_none(),
+            scene.created(i),
+        )
+    };
+    allocation.stable_sort(&mut nodes, |&a, &b| key(a).cmp(&key(b)))?;
+    Ok(nodes)
+}
+
+impl CanonScene<'_> {
+    /// Creation index of an element: its position before canonical sorting.
+    /// Scenes assembled without projection (unit tests) have none, and then
+    /// the element index itself is the creation order.
+    pub(crate) fn created(&self, element: usize) -> usize {
+        self.creation.get(element).copied().unwrap_or(element)
+    }
+
+    /// Element indices of each element type in the order ufbx exposes them
+    /// (`ufbx_scene.elements_by_type`): nodes by hierarchy sort, every other
+    /// type by creation index. Types without elements are omitted.
+    pub fn typed_order(
+        &self,
+        limits: &DumpLimits,
+    ) -> Result<Vec<(ElementType, Vec<usize>)>, crate::Error> {
+        let allocation = crate::api_alloc::Budget::new(limits.max_allocation);
+        let mut by_type: Vec<(Option<ElementType>, Vec<usize>)> =
+            allocation.filled(ElementType::MAX_ID + 1, (None, Vec::new()))?;
+        for (i, e) in self.elements.iter().enumerate() {
+            let slot = &mut by_type[e.ty as usize];
+            slot.0 = Some(e.ty);
+            if e.ty != ElementType::Node {
+                allocation.push(&mut slot.1, i)?;
+            }
+        }
+        by_type[ElementType::Node as usize].1 =
+            allocation.collect(self.node_order.iter().copied())?;
+        for (ty, list) in by_type.iter_mut() {
+            if *ty != Some(ElementType::Node) {
+                allocation.stable_sort(list, |&a, &b| self.created(a).cmp(&self.created(b)))?;
+            }
+        }
+        allocation.collect(
+            by_type
+                .into_iter()
+                .filter_map(|(ty, list)| ty.map(|ty| (ty, list))),
+        )
+    }
+}
+
 /// The projection stages after the element headers.
 fn project_rest<'a>(
     mut scene: CanonScene<'a>,
@@ -956,6 +1040,7 @@ fn project_rest<'a>(
     oo: &[(usize, usize)],
 ) -> Result<CanonScene<'a>, crate::Error> {
     let links = project_graph(&mut scene, oo, limits)?;
+    scene.node_order = node_list_order(&scene, &links, limits)?;
     project_globals(&mut scene, input, limits)?;
     project_transforms(&mut scene, &links, oo, limits)?;
     if !scene.lean {
@@ -1531,7 +1616,8 @@ fn project_transforms(
     let mut states: Vec<Option<sn::NodeState>> = a.filled(n, None)?;
     let mut eval_nodes = Vec::new();
     let mut eval_slot = a.filled(n, None)?;
-    for i in 0..n {
+    // Public node order (`ufbx_scene.nodes`), not canonical element order.
+    for &i in &scene.node_order {
         if is_node[i] {
             eval_slot[i] = Some(eval_nodes.len());
             a.push(
@@ -1545,6 +1631,9 @@ fn project_transforms(
                     use_rotation_space: false,
                     translation_scale: None,
                     inherited_scale: None,
+                    is_scale_helper: false,
+                    own_helper: None,
+                    inherit_helper: None,
                 },
             )?;
         }
@@ -1594,6 +1683,11 @@ fn project_transforms(
                     inherited_scale: owner_for[i]
                         .and_then(|_| links.parent[i])
                         .and_then(|p| inherit_node[p])
+                        .and_then(|p| helper_for[p])
+                        .and_then(|h| eval_slot[h]),
+                    is_scale_helper: owner_for[i].is_some(),
+                    own_helper: helper_for[i].and_then(|h| eval_slot[h]),
+                    inherit_helper: inherit_node[i]
                         .and_then(|p| helper_for[p])
                         .and_then(|h| eval_slot[h]),
                 };
@@ -2395,7 +2489,24 @@ fn write_all<W: Write>(
         ..Default::default()
     };
     crate::canonical_writer::write_source_triangles(&mut em.w, &draft.index, &draft.meshes, &tl)?;
-    crate::animation_canon::write(em, scene)
+    crate::animation_canon::write(em, scene)?;
+    // Every section above is keyed by identity; this one records the sequence
+    // of each typed list, as `reference/canon.c` does.
+    let order = scene
+        .typed_order(limits)
+        .map_err(|e| io::Error::other(format!("order: {e:?}")))?;
+    em.begin("order")?;
+    for (ty, list) in &order {
+        let m = em.push_index(*ty as usize);
+        em.count("length", list.len())?;
+        for (j, &i) in list.iter().enumerate() {
+            let m = em.push_index(j);
+            em.leaf_here(crate::canon::K::Ref, Some(&V::Ref(Some(i))))?;
+            em.restore(m);
+        }
+        em.restore(m);
+    }
+    em.end()
 }
 
 /// canon.c `duplicate_source_ids`: duplicated signed IDs under Objects.

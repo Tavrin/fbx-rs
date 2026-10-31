@@ -1,6 +1,6 @@
 //! Bounded animation baking. Key time generation and reduction follow ufbx
 //! 0.23.1. See `docs/VERIFICATION.md` for remaining compatibility boundaries.
-use crate::animation::{Animation, BakeSample, TransformChannel, KTIME};
+use crate::animation::{Animation, BakeSample, NodeInputs, TransformChannel, KTIME};
 use crate::api_alloc::Budget;
 use crate::{AnimationBinding, Error, Interpolation};
 use std::cell::Cell;
@@ -425,6 +425,254 @@ fn transform_prop(p: &[u8]) -> bool {
     )
 }
 
+/// A baked scale helper: later nodes read its keys, as ufbx reads
+/// `baked_nodes[helper]`.
+#[derive(Clone)]
+struct HelperKeys {
+    keys: Vec<BakedKey<3>>,
+    constant: bool,
+}
+// `ufbx_evaluate_baked_vec3`.
+fn evaluate_baked(keys: &[BakedKey<3>], time: f64) -> [f64; 3] {
+    let at = keys.partition_point(|k| k.time <= time);
+    let Some(next) = keys.get(at) else {
+        return keys.last().map_or([1.0; 3], |k| k.value);
+    };
+    if at == 0 {
+        return next.value;
+    }
+    let mut prev = at - 1;
+    if prev > 0 && keys[prev].flags & 2 != 0 && keys[prev - 1].time == time {
+        prev -= 1;
+    }
+    let prev = &keys[prev];
+    if time == prev.time {
+        return prev.value;
+    }
+    let mut t = (time - prev.time) / (next.time - prev.time);
+    if prev.flags & 1 != 0 {
+        t = 0.0;
+    }
+    if next.flags & 2 != 0 {
+        t = 1.0;
+    }
+    let u = 1.0 - t;
+    std::array::from_fn(|i| prev.value[i] * u + next.value[i] * t)
+}
+/// `ufbxi_bake_node` state: nodes are baked in public node order, and baking a
+/// scale helper also bakes its siblings (`ufbxi_bake_node_imp`).
+struct NodeBaker<'a> {
+    c: &'a Context<'a>,
+    inputs: &'a [NodeInputs],
+    weights: &'a [Time],
+    /// Child slots of each node slot, in public node order.
+    children: Vec<Vec<usize>>,
+    baked: Vec<Option<HelperKeys>>,
+    to_bake: Vec<bool>,
+    stack: Vec<usize>,
+    nodes: Vec<BakedNode>,
+}
+impl NodeBaker<'_> {
+    // `ufbxi_push_resampled_times`.
+    fn push_resampled(&self, out: &mut Vec<Time>, keys: &[BakedKey<3>]) -> Result<(), Error> {
+        for (i, k) in keys.iter().enumerate() {
+            let mut time = k.time;
+            if k.flags & 1 != 0 && keys.get(i + 1).is_some_and(|n| n.flags & 4 != 0) {
+                time = keys[i + 1].time;
+            } else if k.flags & 2 != 0 && i > 0 && keys[i - 1].flags & 4 != 0 {
+                time = keys[i - 1].time;
+            }
+            self.c.push_time(out, time, k.flags & 7)?;
+        }
+        Ok(())
+    }
+    fn bake(&mut self, node: usize, group: &[&AnimationBinding]) -> Result<(), Error> {
+        let c = self.c;
+        let a = c.a;
+        let cfg = &a.nodes[node];
+        let mut channels: [Vec<Time>; 3] = std::array::from_fn(|_| Vec::new());
+        // The parent's scale helper scales this node's translation; a helper
+        // node is never scaled by another helper.
+        let t_helper = if cfg.is_scale_helper {
+            None
+        } else {
+            cfg.translation_scale
+        }
+        .and_then(|h| self.baked[h].as_ref());
+        let mut resample_translation = false;
+        if let Some(h) = t_helper {
+            resample_translation = !h.constant;
+            self.push_resampled(&mut channels[0], &h.keys)?;
+        }
+        let s_helper = if cfg.is_scale_helper {
+            cfg.inherited_scale
+        } else {
+            None
+        }
+        .and_then(|h| self.baked[h].as_ref());
+        let mut resample_scale = false;
+        if let Some(h) = s_helper {
+            resample_scale = !h.constant;
+            self.push_resampled(&mut channels[2], &h.keys)?;
+        }
+        let p = &cfg.props;
+        let complex = p.scaling_pivot != [0.0; 3]
+            || p.rotation_pivot != [0.0; 3]
+            || p.rotation_offset != [0.0; 3]
+            || p.scaling_offset != [0.0; 3]
+            || group.iter().any(|b| {
+                matches!(
+                    b.property.as_slice(),
+                    b"ScalingPivot" | b"RotationPivot" | b"RotationOffset" | b"ScalingOffset"
+                )
+            });
+        for b in group {
+            let name = b.property.as_slice();
+            if name == b"Lcl Translation" || complex && transform_prop(name) {
+                c.curve_times(
+                    &mut channels[0],
+                    b,
+                    name != b"Lcl Translation" || resample_translation,
+                    if name == b"Lcl Translation" { 8 } else { 0 },
+                )?;
+            }
+            if matches!(
+                name,
+                b"Lcl Rotation" | b"PreRotation" | b"PostRotation" | b"RotationOrder"
+            ) {
+                c.curve_times(
+                    &mut channels[1],
+                    b,
+                    true,
+                    if name == b"Lcl Rotation" { 8 } else { 0 },
+                )?;
+            }
+            if name == b"Lcl Scaling" {
+                c.curve_times(&mut channels[2], b, resample_scale, 8)?;
+            }
+        }
+        let [t, r, s] = channels;
+        let (t, r, s) = (
+            c.finalize(t, self.weights)?,
+            c.finalize(r, self.weights)?,
+            c.finalize(s, self.weights)?,
+        );
+        let work = |n: usize| c.work(n);
+        let sample = |time: f64, ignore: bool| BakeSample {
+            layers: c.layers,
+            time,
+            work: &work,
+            ignore_scale_helper: ignore,
+        };
+        let mut tk = Vec::new();
+        let mut rk = Vec::new();
+        let mut sk = Vec::new();
+        c.budget.reserve(&mut tk, t.len())?;
+        c.budget.reserve(&mut rk, r.len())?;
+        c.budget.reserve(&mut sk, s.len())?;
+        for time in t {
+            let at = c.sample(time);
+            let mut transform = a.bake_transform(
+                self.inputs,
+                node,
+                TransformChannel::Translation,
+                // A helper node's own translation is never scaled by a helper.
+                &sample(at, t_helper.is_some() || cfg.is_scale_helper),
+            )?;
+            if let Some(h) = t_helper {
+                let scale = evaluate_baked(&h.keys, at);
+                for (v, s) in transform.translation.iter_mut().zip(scale) {
+                    *v *= s;
+                }
+            }
+            tk.push(BakedKey {
+                time: time.time,
+                flags: time.flags,
+                value: transform.translation,
+            });
+        }
+        for time in r {
+            let transform = a.bake_transform(
+                self.inputs,
+                node,
+                TransformChannel::Rotation,
+                &sample(c.sample(time), false),
+            )?;
+            rk.push(BakedKey {
+                time: time.time,
+                flags: time.flags,
+                value: transform.rotation,
+            });
+        }
+        for time in s {
+            let at = c.sample(time);
+            let mut transform = a.bake_transform(
+                self.inputs,
+                node,
+                TransformChannel::Scale,
+                &sample(at, s_helper.is_some()),
+            )?;
+            if let Some(h) = s_helper {
+                let scale = evaluate_baked(&h.keys, at);
+                for (v, s) in transform.scale.iter_mut().zip(scale) {
+                    *v *= s;
+                }
+            }
+            sk.push(BakedKey {
+                time: time.time,
+                flags: time.flags,
+                value: transform.scale,
+            });
+        }
+        let (translation_keys, constant_translation) = c.post(tk);
+        let (rotation_keys, constant_rotation) = c.post(rk);
+        let (scale_keys, constant_scale) = c.post(sk);
+        if cfg.is_scale_helper {
+            let mut keys = Vec::new();
+            c.budget.reserve(&mut keys, scale_keys.len())?;
+            keys.extend_from_slice(&scale_keys);
+            self.baked[node] = Some(HelperKeys {
+                keys,
+                constant: constant_scale,
+            });
+        }
+        c.budget.push(
+            &mut self.nodes,
+            BakedNode {
+                node,
+                translation_keys,
+                rotation_keys,
+                scale_keys,
+                constant_translation,
+                constant_rotation,
+                constant_scale,
+            },
+        )?;
+        if cfg.is_scale_helper {
+            if let Some(parent) = cfg.parent {
+                for i in 0..self.children[parent].len() {
+                    let child = self.children[parent][i];
+                    if child == node {
+                        continue;
+                    }
+                    if !self.to_bake[child] {
+                        self.to_bake[child] = true;
+                        c.budget.push(&mut self.stack, child)?;
+                    }
+                    let cc = &a.nodes[child];
+                    if let (Some(inherit), Some(own)) = (cc.inherit_helper, cc.own_helper) {
+                        if self.to_bake[inherit] && !self.to_bake[own] {
+                            self.to_bake[own] = true;
+                            c.budget.push(&mut self.stack, own)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn bake(
     a: &Animation,
     stack: Option<usize>,
@@ -479,7 +727,30 @@ pub(crate) fn bake(
             c.budget.push(&mut bindings, b)?;
         }
     }
-    bindings.sort_unstable_by(|a, b| (a.element, &a.property).cmp(&(b.element, &b.property)));
+    // ufbx bakes nodes in public node order, then everything else by creation.
+    let mut node_slots = c
+        .budget
+        .collect(a.nodes.iter().enumerate().map(|(i, n)| (n.element, i)))?;
+    node_slots.sort_unstable_by_key(|n| n.0);
+    let slot_of = |element: usize| {
+        node_slots
+            .binary_search_by_key(&element, |n| n.0)
+            .ok()
+            .map(|i| node_slots[i].1)
+    };
+    let rank = |element: usize| a.creation.get(element).copied().unwrap_or(element);
+    bindings.sort_unstable_by(|x, y| {
+        (
+            slot_of(x.element).unwrap_or(usize::MAX),
+            rank(x.element),
+            &x.property,
+        )
+            .cmp(&(
+                slot_of(y.element).unwrap_or(usize::MAX),
+                rank(y.element),
+                &y.property,
+            ))
+    });
     let mut weights = Vec::new();
     let mut layer_elements = c.budget.collect(a.layers.iter().map(|l| l.element))?;
     layer_elements.sort_unstable();
@@ -491,137 +762,43 @@ pub(crate) fn bake(
     if !weights.is_empty() {
         weights = c.finalize(weights, &[])?;
     }
-    let mut nodes = Vec::new();
-    let mut properties = Vec::new();
-    let mut node_slots = c
-        .budget
-        .collect(a.nodes.iter().enumerate().map(|(i, n)| (n.element, i)))?;
-    node_slots.sort_unstable_by_key(|n| n.0);
+    let mut baker = NodeBaker {
+        c: &c,
+        inputs: &inputs,
+        weights: &weights,
+        children: c.budget.filled(a.nodes.len(), Vec::new())?,
+        baked: c.budget.filled(a.nodes.len(), None)?,
+        to_bake: c.budget.filled(a.nodes.len(), false)?,
+        stack: Vec::new(),
+        nodes: Vec::new(),
+    };
+    for (slot, n) in a.nodes.iter().enumerate() {
+        if let Some(parent) = n.parent {
+            c.budget.push(&mut baker.children[parent], slot)?;
+        }
+    }
+    for b in &bindings {
+        if let Some(slot) = slot_of(b.element) {
+            baker.to_bake[slot] = true;
+        }
+    }
+    let mut properties: Vec<(usize, BakedProperty)> = Vec::new();
     let mut at = 0;
     while at < bindings.len() {
         let element = bindings[at].element;
-        let end = bindings.partition_point(|b| b.element <= element);
+        let mut end = at + 1;
+        while end < bindings.len() && bindings[end].element == element {
+            end += 1;
+        }
         let group = &bindings[at..end];
-        let node = node_slots
-            .binary_search_by_key(&element, |n| n.0)
-            .ok()
-            .map(|i| node_slots[i].1);
+        let node = slot_of(element);
         if let Some(node) = node {
-            let mut channels: [Vec<Time>; 3] = std::array::from_fn(|_| Vec::new());
-            let p = &a.nodes[node].props;
-            let complex = p.scaling_pivot != [0.0; 3]
-                || p.rotation_pivot != [0.0; 3]
-                || p.rotation_offset != [0.0; 3]
-                || p.scaling_offset != [0.0; 3]
-                || group.iter().any(|b| {
-                    matches!(
-                        b.property.as_slice(),
-                        b"ScalingPivot" | b"RotationPivot" | b"RotationOffset" | b"ScalingOffset"
-                    )
-                });
-            for b in group {
-                let name = b.property.as_slice();
-                if name == b"Lcl Translation" || complex && transform_prop(name) {
-                    c.curve_times(
-                        &mut channels[0],
-                        b,
-                        name != b"Lcl Translation",
-                        if name == b"Lcl Translation" { 8 } else { 0 },
-                    )?;
-                }
-                if matches!(
-                    name,
-                    b"Lcl Rotation" | b"PreRotation" | b"PostRotation" | b"RotationOrder"
-                ) {
-                    c.curve_times(
-                        &mut channels[1],
-                        b,
-                        true,
-                        if name == b"Lcl Rotation" { 8 } else { 0 },
-                    )?;
-                }
-                if name == b"Lcl Scaling" {
-                    c.curve_times(&mut channels[2], b, false, 8)?;
-                }
+            baker.bake(node, group)?;
+            // Baking a scale helper pulls in its siblings; keep going until
+            // every dependency is baked (`ufbxi_bake_node`).
+            while let Some(next) = baker.stack.pop() {
+                baker.bake(next, &[])?;
             }
-            let [t, r, s] = channels;
-            let (t, r, s) = (
-                c.finalize(t, &weights)?,
-                c.finalize(r, &weights)?,
-                c.finalize(s, &weights)?,
-            );
-            let mut tk = Vec::new();
-            let mut rk = Vec::new();
-            let mut sk = Vec::new();
-            c.budget.reserve(&mut tk, t.len())?;
-            c.budget.reserve(&mut rk, r.len())?;
-            c.budget.reserve(&mut sk, s.len())?;
-            for time in t {
-                let transform = a.bake_transform(
-                    &inputs,
-                    node,
-                    TransformChannel::Translation,
-                    &BakeSample {
-                        layers: c.layers,
-                        time: c.sample(time),
-                        work: &|n| c.work(n),
-                    },
-                )?;
-                tk.push(BakedKey {
-                    time: time.time,
-                    flags: time.flags,
-                    value: transform.translation,
-                });
-            }
-            for time in r {
-                let transform = a.bake_transform(
-                    &inputs,
-                    node,
-                    TransformChannel::Rotation,
-                    &BakeSample {
-                        layers: c.layers,
-                        time: c.sample(time),
-                        work: &|n| c.work(n),
-                    },
-                )?;
-                rk.push(BakedKey {
-                    time: time.time,
-                    flags: time.flags,
-                    value: transform.rotation,
-                });
-            }
-            for time in s {
-                let transform = a.bake_transform(
-                    &inputs,
-                    node,
-                    TransformChannel::Scale,
-                    &BakeSample {
-                        layers: c.layers,
-                        time: c.sample(time),
-                        work: &|n| c.work(n),
-                    },
-                )?;
-                sk.push(BakedKey {
-                    time: time.time,
-                    flags: time.flags,
-                    value: transform.scale,
-                });
-            }
-            let (translation_keys, constant_translation) = c.post(tk);
-            let (rotation_keys, constant_rotation) = c.post(rk);
-            let (scale_keys, constant_scale) = c.post(sk);
-            c.budget.push(
-                &mut nodes,
-                BakedNode {
-                    node,
-                    translation_keys,
-                    rotation_keys,
-                    scale_keys,
-                    constant_translation,
-                    constant_rotation,
-                    constant_scale,
-                },
-            )?;
         }
         let mut p_at = 0;
         while p_at < group.len() {
@@ -651,19 +828,26 @@ pub(crate) fn bake(
                 let name = c.budget.bytes(&first.property)?;
                 c.budget.push(
                     &mut properties,
-                    BakedProperty {
-                        source_id: first.source_id,
-                        name,
-                        keys,
-                        constant_value,
-                    },
+                    (
+                        rank(element),
+                        BakedProperty {
+                            source_id: first.source_id,
+                            name,
+                            keys,
+                            constant_value,
+                        },
+                    ),
                 )?;
             }
             p_at = p_end;
         }
         at = end;
     }
+    let mut nodes = std::mem::take(&mut baker.nodes);
     nodes.sort_unstable_by_key(|n| n.node);
+    // ufbx sorts baked elements by creation index; ties keep property order.
+    properties.sort_by_key(|p| p.0);
+    let properties = c.budget.collect(properties.into_iter().map(|(_, p)| p))?;
     let (key_time_min, key_time_max) = if c.min.get() < c.max.get() {
         (c.min.get(), c.max.get())
     } else {
@@ -716,6 +900,9 @@ mod tests {
                 use_rotation_space: false,
                 translation_scale: None,
                 inherited_scale: None,
+                is_scale_helper: false,
+                own_helper: None,
+                inherit_helper: None,
             });
             if i > 0 {
                 bindings.push(AnimationBinding {

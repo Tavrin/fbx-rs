@@ -22,6 +22,29 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Every `Scene` list now has the order ufbx 0.23.1 exposes, and the order is
+  documented as part of the public contract (crate documentation, "Order of the
+  lists"). Objects keep file order instead of source-ID order (`materials`,
+  `meshes`, `textures`, `cameras`, `lights`, bones, deformers, poses and the
+  animation stacks, layers, values and curves), and `nodes` are sorted by depth,
+  parent position, scale helpers first, then file position. Node indices in
+  `evaluate`, `evaluate_transform` and `BakedNode::node` follow the new order.
+  This changes the indices of existing scenes: stored indices from 0.1.1 do not
+  carry over.
+- `bake_animation` now matches ufbx for scale helpers: baking a helper also
+  bakes its otherwise unanimated sibling nodes, dependants are resampled at the
+  helper's baked keys and evaluated from them, nodes are baked in node order and
+  baked properties are ordered by object.
+
+### Verification
+
+- The canonical stream ends with an `order` section recording each typed list,
+  and `reference/compare_order.py` and `reference/compare_bake.py` compare list
+  and bake order. The earlier "316/316 bit-exact" claim compared values by
+  identity only; see `docs/VERIFICATION.md` for what it did and did not cover.
+
 ## [0.1.1] - 2026-10-30
 
 ### Added

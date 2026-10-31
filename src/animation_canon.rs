@@ -302,8 +302,11 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
             em.restore(nm);
             let sk = em.push("skins");
             em.count("length", a.clusters.len())?;
-            for ((element, c), (bone, bind)) in scene.deformers.clusters.iter().zip(&a.clusters) {
-                let k = em.push(&scene.elements[*element].key);
+            // `a.clusters` follows the public cluster order (creation index).
+            let mut clusters: Vec<_> = scene.deformers.clusters.iter().collect();
+            clusters.sort_by_key(|(element, _)| scene.created(*element));
+            for (&(element, ref c), (bone, bind)) in clusters.into_iter().zip(&a.clusters) {
+                let k = em.push(&scene.elements[element].key);
                 let mat = bone.map_or(c.geometry_to_world.0, |i| {
                     crate::scene_node::matrix_mul(&states[i].node_to_world, bind)
                 });

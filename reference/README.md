@@ -69,6 +69,15 @@ it still validates each profile's pins/options and reports scene differences.
 same format under the `engine-converted` profile, and
 `fbx-parity compare-scene ORACLE RUST` compares it with the oracle's.
 
+The stream ends with an `order` section (see [SCHEMA.md](SCHEMA.md)) holding the
+sequence of every typed list, which no other section records.
+`compare_order.py PATHS ORACLE PARITY` dumps each listed input with both
+programs and requires the `order` sections to be identical. `compare_bake.py
+PATHS BAKE_ORACLE BAKE_DUMP` bakes each input under four option sets with
+`bake_probe.c` and `examples/bake_dump.rs` and requires the sequence of baked
+nodes and properties, and every key, to be identical. Both exit 0 only when
+every file matches.
+
 Qualification: `qualify.py prepare` builds the public corpus manifest from a
 corpus manifest and the pinned ufbx Git tree listing (it also adds five pinned
 media fixtures and the self-authored ordering/colour regression). `qualify.py

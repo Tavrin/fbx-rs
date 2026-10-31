@@ -685,4 +685,15 @@ static void dump_derived(void) {
         for(size_t e=0;e<num_elements;e++) { const ufbx_element *element=ordered_elements[e]->element;if(element->type==UFBX_ELEMENT_ANIM_STACK)dump_animation(element_key(element),((const ufbx_anim_stack*)element)->anim); }
     } else dump_animation("default",scene->anim);
     section_end("evaluated");free(samples);
+    // Public list order: every other section is keyed by identity, so only
+    // this one records the sequence ufbx exposes (`ufbx_scene.elements_by_type`,
+    // which backs `nodes`, `materials`, `anim_stacks` and the other typed lists).
+    section_begin("order");
+    for(size_t type=0;type<UFBX_ELEMENT_TYPE_COUNT;type++) {
+        const ufbx_element_list list=scene->elements_by_type[type];if(!list.count)continue;
+        size_t mark=path_index(type);field_count("length",list.count);
+        for(size_t i=0;i<list.count;i++) { size_t m=path_index(i);leaf_begin();value_ref(list.data[i]);leaf_end();path_restore(m); }
+        path_restore(mark);
+    }
+    section_end("order");
 }

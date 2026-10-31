@@ -47,7 +47,7 @@ fn run() -> Result<(), String> {
         let canon = canon_scene::project(&input, &limits)?;
         let scene =
             fbx_rs::load(&input, &fbx_rs::LoadOptions::default()).map_err(|e| e.to_string())?;
-        let n = check_public::check(&canon, &scene)?;
+        let n = check_public::check(&canon, &scene, &limits)?;
         println!("public-equal: {n} values");
         return Ok(());
     }

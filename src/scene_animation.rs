@@ -574,10 +574,17 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     validate_cycles(&scn.elements, &budget)?;
     let mut a = std::mem::take(&mut scn.animation);
     a.allocation_limit = limits.max_allocation;
+    a.creation = budget.collect((0..scn.elements.len()).map(|i| scn.created(i)))?;
     a.ids = budget.collect(scn.elements.iter().map(|e| e.source_id))?;
     let mut authored = budget.filled(scn.elements.len(), BTreeMap::new())?;
     let mut defaults = budget.filled(scn.elements.len(), BTreeMap::new())?;
     let (helper_for, owner_for) = helper_index(scn.elements.len(), &scn.scale_helpers, &budget)?;
+    // Animation lists follow ufbx's creation order, not the canonical order.
+    let mut by_creation = budget.collect(0..scn.elements.len())?;
+    budget.sort_work(by_creation.len())?;
+    budget.stable_sort(&mut by_creation, |&x, &y| {
+        scn.created(x).cmp(&scn.created(y))
+    })?;
     let r = Reader {
         s: scn,
         children,
@@ -586,7 +593,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     let alloc = &r.budget;
     let channel_index: BTreeMap<_, _> =
         BTreeMap::try_from_iter(scn.deformers.channels.iter().map(|(k, c)| (*k, c)), alloc)?;
-    for (i, e) in scn.elements.iter().enumerate() {
+    for &i in &by_creation {
+        let e = &scn.elements[i];
         let Some(n) = e.node else {
             continue;
         };
@@ -661,7 +669,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     for (k, c) in a.curves.iter().enumerate() {
         curve_index[c.element] = Some(k);
     }
-    for (i, e) in scn.elements.iter().enumerate() {
+    for &i in &by_creation {
+        let e = &scn.elements[i];
         if e.ty != T::AnimValue {
             continue;
         }
@@ -740,7 +749,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             p.flags |= 0x2000;
         }
     }
-    for (i, e) in scn.elements.iter().enumerate() {
+    for &i in &by_creation {
+        let e = &scn.elements[i];
         if e.ty != T::AnimLayer {
             continue;
         }
@@ -804,7 +814,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     for (k, l) in a.layers.iter().enumerate() {
         layer_index[l.element] = Some(k);
     }
-    for (i, e) in scn.elements.iter().enumerate() {
+    for &i in &by_creation {
+        let e = &scn.elements[i];
         if e.ty != T::AnimStack {
             continue;
         }
@@ -880,8 +891,17 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             }
         }
     }
+    // Evaluated weights and skin matrices follow the public deformer lists,
+    // which are in ufbx creation order.
     a.channels = alloc.collect(scn.deformers.channels.iter().map(|(i, _)| *i))?;
-    a.clusters = alloc.collect(scn.deformers.clusters.iter().map(|(_, c)| {
+    alloc.stable_sort(&mut a.channels, |&x, &y| {
+        scn.created(x).cmp(&scn.created(y))
+    })?;
+    let mut clusters = alloc.collect(scn.deformers.clusters.iter())?;
+    alloc.stable_sort(&mut clusters, |x, y| {
+        scn.created(x.0).cmp(&scn.created(y.0))
+    })?;
+    a.clusters = alloc.collect(clusters.into_iter().map(|(_, c)| {
         (
             c.bone_node.and_then(|e| node_slot[e]),
             if c.bone_node.is_some() {

@@ -1,8 +1,8 @@
 # Verification
 
-For the scene content it converts, fbx-rs targets the same values as
-ufbx 0.23.1 loaded with the same import options, with the deliberate edge
-case differences below. This page says how
+For the scene content it converts, fbx-rs targets the same values, in the same
+order of every list, as ufbx 0.23.1 loaded with the same import options, with
+the deliberate edge case differences below. This page says how
 that is checked, on which files, with what result, and what is not covered.
 
 ## How equivalence with ufbx is checked
@@ -26,6 +26,15 @@ triangles, authored curves and evaluated animation samples.
   coverage, options, section order, counts, checksums) and then compares them
   value by value. Its standalone evaluated comparison supports tolerances;
   the per-file gate below compares the raw bit strings directly.
+- The `order` section is the only part of the stream that records sequence.
+  Every other section is keyed by object identity (source ID and DOM ordinal,
+  or an owner-derived key for generated elements), and lists such as children
+  or material slots hold references to those keys. `order` lists, for every
+  element type, the elements in the order ufbx exposes the typed list
+  (`nodes`, `materials`, `anim_stacks`, and the rest of `elements_by_type`).
+  The Rust side writes it from the same ordering that the public `Scene`
+  slices use, and the comparison requires it to be identical, record for
+  record.
 - Each compared path is checked under these rules:
   - DOM mutation: ufbx modifies some retained DOM arrays in place while
     loading (`Geometry/Vertices`, `LayerElementNormal/Normals`, blend-shape
@@ -42,7 +51,10 @@ triangles, authored curves and evaluated animation samples.
   exposes (nodes, transforms, meshes, bones, skins, poses, blend shapes,
   material maps, texture content, cameras, lights, animation records, evaluated
   poses and counts) with the canonical records of the same file, bit for bit,
-  so the public API and the compared stream cannot drift apart.
+  so the public API and the compared stream cannot drift apart. The records
+  are paired with the `Scene` slices in the order written to the `order`
+  section, so the public slices are tied to the order that is compared with
+  ufbx.
 - The syntax layer is checked separately: `reference/dom_equivalence.py`
   projects the parser's node/property tree onto ufbx's retained DOM (the
   rules cite ufbx source lines) and compares every value bit for bit.
@@ -56,6 +68,36 @@ nondeterminism was observed or used to justify a tolerance.
 
 The per-file classification script that applies the rules above
 is not yet part of this repository; the dumpers and comparators it drives are.
+
+## What the per-file comparison did not cover, until order was added
+
+The earlier statement "316/316 bit-exact" was true of the values it compared and
+silent about sequence. Measured with the `order` section against the previous
+public lists, 182 of the 316 files had at least one list in a different order
+from ufbx: materials in 165 files, nodes in 29, meshes in 27, textures and videos
+in 3 each, bones in 3, animation curves and values in 5 each, and single files
+for skin clusters, blend channels, animation layers and animation stacks. Three
+properties of the checks hid it:
+
+- The canonical stream is keyed by identity. Its element table is sorted by
+  source ID and ordinal, every record sits under its own key, and every
+  cross-reference is a key, so permuting a list left the stream unchanged. The
+  stream deliberately never carries ufbx's dense typed indices.
+- `check-public` paired the public `Scene` slices with the canonical records of
+  the same converter by position. Both followed source-ID order, so they agreed
+  with each other and not with ufbx.
+- The bake comparison normalised node and property record order and replaced
+  typed indices by source identities before comparing.
+
+The `order` section, the strict `check-public` pairing and
+`reference/compare_bake.py` (which requires the sequence of baked nodes and
+properties to match line for line) close those gaps. `reference/compare_order.py`
+runs the stream comparison of the `order` section over a list of files.
+
+ufbx's rules, as implemented: typed lists keep creation order, which is file
+order of the objects with generated elements after them; `nodes` are sorted by
+depth, then by the creation order of the parent, then scale helpers before
+ordinary siblings, then creation order.
 
 ## Corpus
 
@@ -81,12 +123,14 @@ On ufbx 0.23.1 with the options above:
 | --- | --- |
 | Original static files (no rig or animation tags) | 306 of 306 equal: 43 with no difference at all, 263 differing only by proved in-place DOM mutation (460 arrays) |
 | Stored skin and blend-shape records | 7 of 7 rig files bit-exact, including both FBX 7.1 nested-shape encodings |
-| Whole-file classification | 316 equal (including proved DOM mutation), 0 deferred, 0 unexplained |
+| Whole-file classification, values matched by object identity | 316 equal (including proved DOM mutation), 0 deferred, 0 unexplained |
+| Order of every typed list (`order` section) | 316 of 316 files identical to ufbx, 3,165 records over every non-empty list (nodes, meshes, materials, textures, cameras, lights, bones, deformers, poses, animation stacks, layers, values, curves) |
 | Authored animation and evaluated samples | 8 animated files, 121 curves, all bit-exact; key/tick neighbours, segment fractions, take bounds and a 30 Hz grid |
+| Baked animation (`reference/compare_bake.py`) | 12 inputs (the 8 animated corpus files and 4 generated fixtures), 4 option sets each (reduced, reduced and trimmed, reduced with rotation-aware reduction and trimmed, raw and trimmed): 48 of 48 streams identical, with baked node and property order and every key compared bit for bit; the scale-inheritance file `maya_scale_no_inherit_7700_ascii.fbx` included |
 | Additional animation fixtures | 39 complete streams bit-exact: interpolation, weighted tangents, extrapolation, all rotation orders, layers, animated layer weights and recursive scale helpers |
 | Unexplained differences | 0 files |
 | Rejected (FBX 6.1 and older) | 24 |
-| Public `Scene` against canonical records | 316 of 316 files equal, 3,664,695 values, including authored animation and evaluated poses |
+| Public `Scene` against canonical records, paired in ufbx list order | 316 of 316 files equal, 4,134,768 values, including authored animation and evaluated poses |
 | Syntax layer against ufbx's retained DOM | 315 equal, 1 explained (ufbx sorts blend-shape offsets in place), 0 failing |
 | Unsupported-object report against oracle counts | 316 files, 0 mismatches |
 | wasm32 | canonical dump, public scene and evaluated poses identical to native on one animated morph fixture (Wasmtime); default-feature library build passes |
@@ -291,8 +335,23 @@ stricter than the former node-visit count.
 
 The bake API implements a subset of ufbx options. Maximum sample-rate culling,
 custom step handling, transform overrides and configurable evaluate flags are
-not exposed. Scale-helper baking does not yet reproduce ufbx's resampled helper
-dependency scheduling and inclusion of otherwise unanimated sibling nodes.
+not exposed.
+
+Scale helpers follow ufbx's rule (`ufbxi_bake_node_imp`). A scale helper node
+carries the animated scale of the node it was generated for, and the nodes that
+do not inherit that scale depend on its baked keys. When such a helper has
+been baked, the dependent channel is resampled at the helper's baked key times
+(a step key moves to its neighbour's time), its own animated keys are resampled
+when the helper's scale is not constant, and its values are multiplied by the
+helper's baked scale evaluated linearly between baked keys, as ufbx does, not by
+the analytic scale. Nodes are baked in node order, so a helper precedes the
+nodes that read it; baking a scale helper also bakes every sibling that has no
+animation of its own, and a sibling's own scale helper when the helper of the
+node whose scale that sibling inherits is scheduled. Such an unanimated sibling
+has translation keys from the helper only and the stack bounds as rotation
+and scale keys. This is the rule that was missing for `joint4` of
+`maya_scale_no_inherit_7700_ascii.fbx`, whose omission also changed the key-time
+extents. Baked properties are ordered by object, then by property name.
 Spherical rotation reduction and floating-point arithmetic require exact oracle
 comparison before claiming interchangeability on a file. The source and reference
 probes are `examples/bake_dump.rs` and `reference/bake_probe.c`; they emit all times,

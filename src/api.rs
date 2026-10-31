@@ -1102,7 +1102,7 @@ impl Scene {
         crate::bake::bake(&self.animation, stack, options)
     }
 
-    /// Animation stacks in source identity order.
+    /// Animation stacks in file order of their objects (ufbx `anim_stacks`).
     pub fn animation_stacks(&self) -> &[crate::AnimationStack] {
         &self.animation.stacks
     }
@@ -1226,7 +1226,9 @@ impl Scene {
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
-    /// Nodes; index 0 is the root.
+    /// Nodes in ufbx's node order: by depth, then parent file position, scale
+    /// helpers first among siblings, then file position. Index 0 is the root.
+    /// See the crate documentation, "Order of the lists".
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -1234,23 +1236,23 @@ impl Scene {
     pub fn root(&self) -> &Node {
         &self.nodes[0]
     }
-    /// Meshes.
+    /// Meshes in file order of their `Geometry` objects.
     pub fn meshes(&self) -> &[Mesh] {
         &self.meshes
     }
-    /// Materials.
+    /// Materials in file order of their `Material` objects.
     pub fn materials(&self) -> &[Material] {
         &self.materials
     }
-    /// Textures.
+    /// Textures in file order of their `Texture` objects.
     pub fn textures(&self) -> &[Texture] {
         &self.textures
     }
-    /// Cameras.
+    /// Cameras in file order of their objects.
     pub fn cameras(&self) -> &[Camera] {
         &self.cameras
     }
-    /// Lights.
+    /// Lights in file order of their objects.
     pub fn lights(&self) -> &[Light] {
         &self.lights
     }
@@ -1268,11 +1270,13 @@ impl Scene {
         use ElementType as T;
         let budget = crate::api_alloc::Budget::new(limits.max_allocation);
         let n = c.elements.len();
-        // Element index -> index within its kind.
+        // Element index -> index within its kind, in the order ufbx lists the
+        // kind (`CanonScene::typed_order`), which the public slices follow.
         let mut slot = budget.filled(n, usize::MAX)?;
         let mut counts = [0usize; 13];
-        for (i, e) in c.elements.iter().enumerate() {
-            let k = match e.ty {
+        let order = c.typed_order(limits)?;
+        for (ty, list) in &order {
+            let k = match ty {
                 T::Node => 0,
                 T::Mesh => 1,
                 T::Material => 2,
@@ -1288,9 +1292,17 @@ impl Scene {
                 T::Pose => 12,
                 _ => continue,
             };
-            slot[i] = counts[k];
-            counts[k] += 1;
+            for (pos, &i) in list.iter().enumerate() {
+                slot[i] = pos;
+            }
+            counts[k] = list.len();
         }
+        let list_of = |ty: T| -> &[usize] {
+            order
+                .iter()
+                .find(|(t, _)| *t == ty)
+                .map_or(&[][..], |(_, l)| l.as_slice())
+        };
         let r = |k: usize| slot.get(k).copied().filter(|&s| s != usize::MAX);
         let refs = |l: &[usize]| budget.collect(l.iter().filter_map(|&k| r(k)));
         let info = |e: &canon_scene::Element| -> Result<ElementInfo, Error> {
@@ -1300,17 +1312,17 @@ impl Scene {
             })
         };
         let mut t = std::mem::take(&mut c.typed);
-        // Typed results follow ufbx's typed order; slices follow element order.
-        t.materials.sort_unstable_by_key(|(i, _)| *i);
-        t.textures.sort_unstable_by_key(|(i, _)| *i);
+        // Every public slice follows ufbx's list order (`slot`).
+        t.materials.sort_unstable_by_key(|(i, _)| slot[*i]);
+        t.textures.sort_unstable_by_key(|(i, _)| slot[*i]);
+        t.cameras.sort_unstable_by_key(|(i, _)| slot[*i]);
+        t.lights.sort_unstable_by_key(|(i, _)| slot[*i]);
         let ty_of = |k: usize| c.elements[k].ty;
 
         let mut nodes = Vec::new();
         budget.reserve(&mut nodes, counts[0])?;
-        for (i, e) in c.elements.iter().enumerate() {
-            if e.ty != T::Node {
-                continue;
-            }
+        for &i in list_of(T::Node) {
+            let e = &c.elements[i];
             let Some(Some(state)) = c.node_states.get(i) else {
                 return Err(Error::InvalidData("node without transform"));
             };
@@ -1493,7 +1505,7 @@ impl Scene {
                 meshes.push((i, m));
             }
         }
-        meshes.sort_unstable_by_key(|(i, _)| *i);
+        meshes.sort_unstable_by_key(|(i, _)| slot[*i]);
         let mut meshes = budget.collect(meshes.into_iter().map(|(_, m)| m))?;
 
         let st = &c.settings;
@@ -1510,7 +1522,7 @@ impl Scene {
             let mut stamp = 0usize;
             for (mesh, e) in meshes
                 .iter_mut()
-                .zip(c.elements.iter().filter(|e| e.ty == T::Mesh))
+                .zip(list_of(T::Mesh).iter().map(|&k| &c.elements[k]))
             {
                 let mut fetch = |ty| -> Result<Vec<usize>, Error> {
                     stamp += 1;
@@ -1532,16 +1544,17 @@ impl Scene {
                 mesh.blend_deformers = fetch(T::BlendDeformer)?;
             }
         }
-        let bones = budget.try_collect(c.elements.iter().filter(|e| e.ty == T::Bone).map(|e| {
-            Ok(crate::Bone {
-                name: budget.text(&e.name)?,
-                source_id: e.source_id,
-                instances: refs(&e.instances)?,
-                radius: real(e.obj.get("radius")),
-                relative_length: real(e.obj.get("relative_length")),
-                is_root: matches!(e.obj.get("is_root"), Some(V::Bool(true))),
-            })
-        }))?;
+        let bones =
+            budget.try_collect(list_of(T::Bone).iter().map(|&k| &c.elements[k]).map(|e| {
+                Ok(crate::Bone {
+                    name: budget.text(&e.name)?,
+                    source_id: e.source_id,
+                    instances: refs(&e.instances)?,
+                    radius: real(e.obj.get("radius")),
+                    relative_length: real(e.obj.get("relative_length")),
+                    is_root: matches!(e.obj.get("is_root"), Some(V::Bool(true))),
+                })
+            }))?;
         let mut d = std::mem::take(&mut c.deformers);
         for (_, skin) in &mut d.skins {
             skin.clusters = refs(&skin.clusters)?;
@@ -1563,6 +1576,12 @@ impl Scene {
                 b.bone_node = r(b.bone_node).ok_or(Error::InvalidData("pose node index"))?;
             }
         }
+        d.skins.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.clusters.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.blends.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.channels.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.shapes.sort_unstable_by_key(|(i, _)| slot[*i]);
+        d.poses.sort_unstable_by_key(|(i, _)| slot[*i]);
         let skin_deformers = budget.collect(d.skins.into_iter().map(|(_, v)| v))?;
         let skin_clusters = budget.collect(d.clusters.into_iter().map(|(_, v)| v))?;
         let blend_deformers = budget.collect(d.blends.into_iter().map(|(_, v)| v))?;
