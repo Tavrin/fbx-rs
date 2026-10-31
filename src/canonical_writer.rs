@@ -525,6 +525,22 @@ pub fn write_source_triangles<W: Write>(
     meshes: &crate::scene_mesh::Meshes<'_>,
     limits: &TriangleDumpLimits,
 ) -> io::Result<()> {
+    write_triangles_positions(writer, index, meshes, limits, |node, corner| {
+        meshes
+            .meshes
+            .iter()
+            .find(|m| m.node == node)?
+            .corner_position(corner)
+    })
+}
+
+pub(crate) fn write_triangles_positions<W: Write>(
+    writer: &mut CanonicalWriter<W>,
+    index: &crate::scene::SceneIndex<'_>,
+    meshes: &crate::scene_mesh::Meshes<'_>,
+    limits: &TriangleDumpLimits,
+    position: impl Fn(usize, usize) -> Option<[f64; 3]>,
+) -> io::Result<()> {
     use std::fmt::Write as _;
     let result = (|| -> io::Result<()> {
         let fail = || io::Error::other("triangle dump limit or malformed scene");
@@ -612,8 +628,14 @@ pub fn write_source_triangles<W: Write>(
                     max_allocation: available,
                     max_work: cost,
                 };
-                mesh.triangulate_with_limits(range.start, n, &mut triangles, &tri_limits)
-                    .map_err(|_| fail())?;
+                mesh.triangulate_with_limits_positions(
+                    range.start,
+                    n,
+                    &mut triangles,
+                    &tri_limits,
+                    |c| position(node, c),
+                )
+                .map_err(|_| fail())?;
                 path.clear();
                 write!(
                     &mut path,

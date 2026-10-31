@@ -6,6 +6,15 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Triangulate converted mesh positions and corner winding, preserving ufbx's
+  diagonal rounding, ear selection and triangle order after axis/unit conversion.
+- Resolve Arnold and OSL standard surface shader bindings into public PBR maps,
+  including semantic texture attachments, values and material features.
+- Preserve Arnold procedural-texture input file links, baked geometric-property
+  resets and display-layer records in the canonical comparison.
+
 ## [0.1.2] - 2026-10-31
 
 ### Added

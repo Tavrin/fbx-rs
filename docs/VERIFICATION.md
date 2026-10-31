@@ -229,6 +229,28 @@ either way. `BistroInterior.fbx` peaks at 534 MiB of heap (13 times its 40 MiB).
 Reproduce: `cargo build --release -p fbx-parity`, then
 `python3 reference/compare_large.py ORACLE target/release/fbx-parity WORKDIR FILE...`.
 
+### Curtains converted-space regression
+
+Both additional Curtains inputs were compared over all 17 canonical sections,
+including every mesh, texture, triangle, evaluated sample and typed-list order.
+The final candidate streams were validated and compared with retained complete
+oracle section counts and SHA-256s, with the input SHA-256 checked again.
+
+| Input | Records on each side | Exact sections | Remaining documented differences |
+| --- | ---: | ---: | --- |
+| NewSponza Curtains YUp | 8,209,572 | 16 of 17 | Retained DOM array mutation |
+| NewSponza Curtains ZUp | 8,208,059 | 15 of 17 | Retained DOM array mutation and reported file axes |
+
+Every remaining differing section is also identical to the candidate section
+previously classified by the full-stream comparator. No new difference class,
+numeric tolerance or reordered hash was admitted. Material and texture records
+are exact, including procedural shader inputs and file-texture links. Each file
+has 2,001,184 exact triangle records. The original corpus remains 316 of 316
+value comparisons and 316 of 316 order comparisons; bake remains 48 of 48.
+The generated tests cover converted diagonal rounding, reversed winding,
+Arnold/OSL semantic bindings, procedural file links and stored geometric
+properties on an animated node. No asset bytes are embedded in these tests.
+
 ## Robustness
 
 Four libFuzzer targets run on malformed input with small limits:
@@ -447,6 +469,19 @@ in the converter.
 - Performance is measured separately and is not part of equivalence.
 
 
+## Converted-space triangulation
+
+Public triangle indices and the canonical triangle stream use the loaded mesh's
+converted positions and polygon-corner order. ufbx 0.23.1
+`ufbx_catch_triangulate_face` reads `mesh->vertex_position` (ufbx.c:32416-32488):
+quads choose the shorter diagonal, ties choose the first split, and concavity
+can override that choice. N-gon ear selection uses the same loaded positions.
+Triangulating source positions and then remapping reversed corners can change
+both rounding decisions and triangle order. The generated near-square test
+checks a centimetre-conversion tie and both winding directions; no asset bytes
+are embedded in the test. Canonical emission borrows source topology without
+rebuilding a second whole-scene draft; its temporary allocations remain bounded.
+
 ## Public material and bake additions
 
 The public material projection retains all 23 computed feature flags with their
@@ -461,8 +496,21 @@ PBR mappings cover FBX Lambert/Phong and the unknown-shader Phong fallback,
 plus class-ID-identified 3ds Max Physical, PBR Metal/Rough, PBR Spec/Gloss,
 glTF and OpenPBR materials. These include property prefixes, texture suffixes,
 texture enable switches, default/explicit features and roughness/glossiness
-remapping. Shader-element bindings (Arnold, OSL, ShaderFX/Stingray), shader
-textures and Blender-specific Phong mapping remain unported.
+remapping. Arnold and OSL standard surface shaders resolve semantic bindings:
+`RenderAPI` selects the mapping table, the first binding table containing a
+semantic supplies all its entries in stable order, and an absent semantic uses
+its own property name. Values and textures are fetched independently, so a
+reference-only texture property does not erase a preceding numeric value.
+These rules follow ufbx 0.23.1 `ufbxi_read_binding_table` (ufbx.c:14701-14742),
+`ufbxi_fetch_mapping_maps` (19968-20129), `ufbxi_finalize_scene`
+(22303-22330, 22523-22542), and `ufbx_find_shader_prop_bindings_len`
+(31442-31470). Arnold procedural shader textures retain their inputs and recursively flattened
+file-texture links (`ufbxi_finalize_shader_texture`, ufbx.c:20560-20684).
+OSL/select-output texture nodes, ShaderFX/Stingray bindings and Blender-specific
+Phong mapping remain unported. Display-layer visibility, frozen state, colour
+and node links follow `ufbxi_update_display_layer` (23393-23398). Stored geometric
+transform properties are reset after baking, as in `ufbxi_modify_geometry`
+(21313-21329).
 
 `MaterialMap` remains exhaustive for 0.1.x compatibility. Making it
 non-exhaustive is planned for 0.2.0; callers can currently construct and

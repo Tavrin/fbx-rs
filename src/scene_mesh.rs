@@ -528,7 +528,7 @@ fn normalized(a: [f64; 3]) -> [f64; 3] {
     }
 }
 impl Mesh<'_> {
-    fn corner_position(&self, corner: usize) -> Option<[f64; 3]> {
+    pub(crate) fn corner_position(&self, corner: usize) -> Option<[f64; 3]> {
         let v = self.polygon_indices?.i64(corner)?;
         let index = usize::try_from(if v < 0 { !v } else { v })
             .ok()?
@@ -550,6 +550,16 @@ impl Mesh<'_> {
         count: usize,
         output: &mut [usize],
     ) -> Result<usize, Error> {
+        self.triangulate_face_into_positions(begin, count, output, |c| self.corner_position(c))
+    }
+
+    pub(crate) fn triangulate_face_into_positions(
+        &self,
+        begin: usize,
+        count: usize,
+        output: &mut [usize],
+        position: impl Fn(usize) -> Option<[f64; 3]>,
+    ) -> Result<usize, Error> {
         let invalid = || Error::InvalidMesh { node: self.node };
         let corners = self.polygon_indices.ok_or_else(invalid)?;
         let end = begin.checked_add(count).ok_or_else(invalid)?;
@@ -568,16 +578,16 @@ impl Mesh<'_> {
         }
         if count == 3 {
             for corner in begin..end {
-                self.corner_position(corner).ok_or_else(invalid)?;
+                position(corner).ok_or_else(invalid)?;
             }
             output[..3].copy_from_slice(&[begin, begin + 1, begin + 2]);
             return Ok(1);
         }
         let [v0, v1, v2, v3] = [
-            self.corner_position(begin).ok_or_else(invalid)?,
-            self.corner_position(begin + 1).ok_or_else(invalid)?,
-            self.corner_position(begin + 2).ok_or_else(invalid)?,
-            self.corner_position(begin + 3).ok_or_else(invalid)?,
+            position(begin).ok_or_else(invalid)?,
+            position(begin + 1).ok_or_else(invalid)?,
+            position(begin + 2).ok_or_else(invalid)?,
+            position(begin + 3).ok_or_else(invalid)?,
         ];
         let a = sub(v2, v0);
         let b = sub(v3, v1);
@@ -651,8 +661,21 @@ impl Mesh<'_> {
         output: &mut [usize],
         limits: &TriangulationLimits,
     ) -> Result<usize, Error> {
+        self.triangulate_with_limits_positions(begin, count, output, limits, |c| {
+            self.corner_position(c)
+        })
+    }
+
+    pub(crate) fn triangulate_with_limits_positions(
+        &self,
+        begin: usize,
+        count: usize,
+        output: &mut [usize],
+        limits: &TriangulationLimits,
+        position: impl Fn(usize) -> Option<[f64; 3]>,
+    ) -> Result<usize, Error> {
         if count <= 4 {
-            return self.triangulate_face_into(begin, count, output);
+            return self.triangulate_face_into_positions(begin, count, output, position);
         }
         let invalid = || Error::InvalidMesh { node: self.node };
         if count > limits.max_face_vertices || count >= (1usize << 31) {
@@ -703,10 +726,8 @@ impl Mesh<'_> {
         let mut normal = [0.0; 3];
         charge(count)?;
         for i in 0..count {
-            let a = self.corner_position(begin + i).ok_or_else(invalid)?;
-            let b = self
-                .corner_position(begin + if i + 1 < count { i + 1 } else { 0 })
-                .ok_or_else(invalid)?;
+            let a = position(begin + i).ok_or_else(invalid)?;
+            let b = position(begin + if i + 1 < count { i + 1 } else { 0 }).ok_or_else(invalid)?;
             if a.iter().chain(b.iter()).any(|v| !v.is_finite()) {
                 return Err(invalid());
             }
@@ -730,7 +751,7 @@ impl Mesh<'_> {
         let y = normalized(cross(normal, x));
         charge(count)?;
         for i in 0..count {
-            let p = self.corner_position(begin + i).ok_or_else(invalid)?;
+            let p = position(begin + i).ok_or_else(invalid)?;
             points.push([dot(x, p), dot(y, p)]);
             edges.push([
                 if i > 0 { i - 1 } else { count - 1 },
