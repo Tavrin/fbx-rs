@@ -17,7 +17,8 @@
 //! leaves the affected record as far as computed): shader elements
 //! (`Implementation`/`BindingTable`), shader textures
 //! (`ufbxi_finalize_shader_texture`), PBR mapping tables requiring shader elements
-//! (Arnold, OSL, ShaderFX), Blender-specific Phong mapping, and the 6x00-style `LayerElement*Texture` patch.
+//! (Arnold, OSL, ShaderFX), Blender-specific Phong mapping. Legacy `LayerElement*Texture` bindings are
+//! patched into the material projection inputs by `legacy::material_textures`.
 use crate::canon::{s, Obj, V};
 use crate::canon_dom::{node_content, node_data, node_string, NodeData};
 use crate::canon_scene::ElementType;

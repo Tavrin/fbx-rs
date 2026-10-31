@@ -525,6 +525,15 @@ pub fn write_source_triangles<W: Write>(
     meshes: &crate::scene_mesh::Meshes<'_>,
     limits: &TriangleDumpLimits,
 ) -> io::Result<()> {
+    write_source_triangles_keyed(writer, index, meshes, limits, None)
+}
+pub(crate) fn write_source_triangles_keyed<W: Write>(
+    writer: &mut CanonicalWriter<W>,
+    index: &crate::scene::SceneIndex<'_>,
+    meshes: &crate::scene_mesh::Meshes<'_>,
+    limits: &TriangleDumpLimits,
+    keys: Option<&[(usize, String)]>,
+) -> io::Result<()> {
     use std::fmt::Write as _;
     let result = (|| -> io::Result<()> {
         let fail = || io::Error::other("triangle dump limit or malformed scene");
@@ -550,7 +559,18 @@ pub fn write_source_triangles<W: Write>(
             let obj = index.objects.get(m.object).ok_or_else(fail)?;
             order.push((obj.id, m.node, i));
         }
-        order.sort_unstable();
+        if let Some(keys) = keys {
+            order.sort_unstable_by(|a, b| {
+                let key = |node| {
+                    keys.binary_search_by_key(&node, |p| p.0)
+                        .ok()
+                        .map(|k| keys[k].1.as_str())
+                };
+                key(a.1).cmp(&key(b.1))
+            });
+        } else {
+            order.sort_unstable();
+        }
         let mut bytes = Vec::new();
         crate::allocation::reserve(&mut bytes, 160, &mut retained, limits.max_allocation)
             .map_err(|_| fail())?;
@@ -558,7 +578,21 @@ pub fn write_source_triangles<W: Write>(
         writer.begin("triangles")?;
         writer.field("/triangles/length", &Count(order.len()))?;
         let mut work_left = limits.max_work;
+        let budget = crate::api_alloc::Budget::new(limits.max_allocation.saturating_sub(retained));
         for (id, node, mi) in order {
+            let key = if let Some(keys) = keys {
+                let k = keys
+                    .binary_search_by_key(&node, |p| p.0)
+                    .map_err(|_| fail())?;
+                budget.text(keys[k].1.as_bytes()).map_err(|_| fail())?
+            } else {
+                budget
+                    .format(format_args!(
+                        "id:{id}:ordinal:{}",
+                        node.checked_add(1).ok_or_else(fail)?
+                    ))
+                    .map_err(|_| fail())?
+            };
             let mesh = meshes.meshes.get(mi).ok_or_else(fail)?;
             let topology_work = mesh
                 .vertices
@@ -569,12 +603,7 @@ pub fn write_source_triangles<W: Write>(
             work_left = work_left.checked_sub(topology_work).ok_or_else(fail)?;
             let topo = mesh.validate_topology().map_err(|_| fail())?;
             path.clear();
-            write!(
-                &mut path,
-                "/triangles/id:{id}:ordinal:{}/faces",
-                node.checked_add(1).ok_or_else(fail)?
-            )
-            .map_err(|_| fail())?;
+            write!(&mut path, "/triangles/{key}/faces").map_err(|_| fail())?;
             writer.field(&path, &Count(topo.faces))?;
             for (face, range) in mesh.faces().map_err(|_| fail())?.enumerate() {
                 let range = range.map_err(|_| fail())?;
@@ -615,22 +644,12 @@ pub fn write_source_triangles<W: Write>(
                 mesh.triangulate_with_limits(range.start, n, &mut triangles, &tri_limits)
                     .map_err(|_| fail())?;
                 path.clear();
-                write!(
-                    &mut path,
-                    "/triangles/id:{id}:ordinal:{}/{face}/length",
-                    node + 1
-                )
-                .map_err(|_| fail())?;
+                write!(&mut path, "/triangles/{key}/{face}/length").map_err(|_| fail())?;
                 writer.field(&path, &Count(needed))?;
                 for (chunk_index, chunk) in triangles.chunks(4096).enumerate() {
                     path.clear();
-                    write!(
-                        &mut path,
-                        "/triangles/id:{id}:ordinal:{}/{face}/{}",
-                        node + 1,
-                        chunk_index * 4096
-                    )
-                    .map_err(|_| fail())?;
+                    write!(&mut path, "/triangles/{key}/{face}/{}", chunk_index * 4096)
+                        .map_err(|_| fail())?;
                     writer.field(&path, &TriangleChunk(chunk))?;
                 }
             }

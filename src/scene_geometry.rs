@@ -840,6 +840,64 @@ fn read_mesh(env: &MeshEnv<'_, '_>, node: usize) -> Result<Mesh, Error> {
         indices: index_data,
         unique_per_vertex: true,
     };
+    if env.doc.version < 6000 {
+        if let Some(normals) = env.find_reals(node, b"Normals")? {
+            let count = normals.len() / 3;
+            if count == m.num_vertices || count == m.num_indices {
+                let per_vertex = count == m.num_vertices && count != m.num_indices;
+                let indices = if per_vertex {
+                    env.allocation.collect(m.position.indices.iter().copied())?
+                } else {
+                    env.allocation.collect(
+                        0..u32::try_from(m.num_indices).map_err(|_| err!("normal count"))?,
+                    )?
+                };
+                m.normal = Attrib {
+                    exists: true,
+                    values: normals,
+                    indices,
+                    unique_per_vertex: per_vertex,
+                };
+            }
+        }
+        if let Some(uv) = env.child(node, b"GeometryUVInfo") {
+            let mut attrib = Attrib::default();
+            m.read_vertex_element(
+                env,
+                uv,
+                &mut attrib,
+                b"TextureUV",
+                b"TextureUVVerticeIndex",
+                2,
+            )?;
+            env.allocation.push(
+                &mut m.uv_sets,
+                UvSet {
+                    uv: attrib,
+                    ..Default::default()
+                },
+            )?;
+        }
+        let mapping = env
+            .find_str(node, b"MaterialAssignation")?
+            .unwrap_or_default();
+        if mapping == b"ByPolygon" {
+            m.face_material = env
+                .find_ints(node, b"Materials")?
+                .map(|v| {
+                    env.allocation
+                        .collect(v.into_iter().map(crate::numeric::index_word))
+                })
+                .transpose()?;
+        } else if mapping == b"AllSame" {
+            let material = env
+                .find_ints(node, b"Materials")?
+                .and_then(|v| v.first().copied())
+                .map_or(0, crate::numeric::index_word);
+            m.face_material = Some(env.allocation.filled(m.faces.len(), material)?);
+        }
+    }
+
     let num_faces = m.faces.len();
     let num_edges = m.edges.as_ref().map_or(0, Vec::len);
 
@@ -1507,6 +1565,10 @@ fn emit_mesh(m: &Mesh, links: &MeshLinks, obj: &mut Obj) {
 }
 
 impl Mesh {
+    /// Per-face material slots for legacy texture layers.
+    pub(crate) fn face_materials(&self) -> &[u32] {
+        self.face_material.as_deref().unwrap_or(&[])
+    }
     /// Face `i` as (first corner, corner count).
     pub(crate) fn face(&self, i: usize) -> Option<(u32, u32)> {
         self.faces.get(i).copied()

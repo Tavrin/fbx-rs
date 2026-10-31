@@ -44,25 +44,34 @@ pub enum LayerKind {
     Smoothing,
 }
 #[derive(Debug, Clone, Copy)]
-pub struct NumericArray<'a>(pub &'a Property<'a>);
+pub enum NumericArray<'a> {
+    Property(&'a Property<'a>),
+    Scalars(&'a [Property<'a>]),
+}
 impl NumericArray<'_> {
     pub fn len(&self) -> usize {
-        match self.0 {
-            Property::Array { count, .. } => *count,
-            Property::AsciiArray(v) => v.len(),
-            _ => 0,
+        match self {
+            Self::Scalars(v) => v.len(),
+            Self::Property(p) => match p {
+                Property::Array { count, .. } => *count,
+                Property::AsciiArray(v) => v.len(),
+                _ => 0,
+            },
         }
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
     fn word(&self, index: usize) -> Option<(u8, u64)> {
+        let Self::Property(p) = self else {
+            return None;
+        };
         let Property::Array {
             kind,
             count,
             big_endian,
             bytes,
-        } = self.0
+        } = p
         else {
             return None;
         };
@@ -102,7 +111,21 @@ impl NumericArray<'_> {
         Some((*kind, value))
     }
     pub fn f64(&self, index: usize) -> Option<f64> {
-        match self.0 {
+        let p = match self {
+            Self::Scalars(v) => {
+                return match v.get(index)? {
+                    Property::I16(v) => Some(f64::from(*v)),
+                    Property::I32(v) => Some(f64::from(*v)),
+                    Property::I64(v) => Some(*v as f64),
+                    Property::F32(v) => Some(f64::from(f32::from_bits(*v))),
+                    Property::F64(v) => Some(f64::from_bits(*v)),
+                    Property::AsciiNegativeZero => Some(-0.0),
+                    _ => None,
+                }
+            }
+            Self::Property(p) => p,
+        };
+        match p {
             Property::AsciiArray(a) => match a.get(index)? {
                 AsciiValue::I64(v) => Some(*v as f64),
                 AsciiValue::F64(v) => Some(f64::from_bits(*v)),
@@ -122,7 +145,18 @@ impl NumericArray<'_> {
         }
     }
     pub fn i64(&self, index: usize) -> Option<i64> {
-        match self.0 {
+        let p = match self {
+            Self::Scalars(v) => {
+                return match v.get(index)? {
+                    Property::I16(v) => Some(i64::from(*v)),
+                    Property::I32(v) => Some(i64::from(*v)),
+                    Property::I64(v) => Some(*v),
+                    _ => None,
+                }
+            }
+            Self::Property(p) => p,
+        };
+        match p {
             Property::AsciiArray(a) => match a.get(index)? {
                 AsciiValue::I64(v) => Some(*v),
                 AsciiValue::NegativeZero => Some(0),
@@ -219,14 +253,18 @@ fn array<'a>(doc: &'a Document<'a>, node: usize) -> Option<NumericArray<'a>> {
     if let Some(p @ (Property::Array { .. } | Property::AsciiArray(_))) =
         doc.properties.get(n.properties.clone())?.first()
     {
-        return Some(NumericArray(p));
+        return Some(NumericArray::Property(p));
+    }
+    let values = doc.properties.get(n.properties.clone())?;
+    if doc.version < 7000 && !values.is_empty() {
+        return Some(NumericArray::Scalars(values));
     }
     let child = doc.nodes.get(node.checked_add(1)?)?;
     if child.parent != Some(node) || child.name != b"a" {
         return None;
     }
     match doc.properties.get(child.properties.clone())?.first()? {
-        p @ (Property::Array { .. } | Property::AsciiArray(_)) => Some(NumericArray(p)),
+        p @ (Property::Array { .. } | Property::AsciiArray(_)) => Some(NumericArray::Property(p)),
         _ => None,
     }
 }
@@ -286,8 +324,19 @@ pub fn extract<'a>(
             .properties
             .get(n.properties.clone())
             .ok_or(Error::InvalidDom)?;
-        if n.name == b"Geometry"
-            && p.get(2).and_then(bytes).map(crate::scene::fbx_subtype) == Some(b"Mesh")
+        if (n.name == b"Geometry" || (doc.version < 7000 && n.name == b"Model"))
+            && (p
+                .get(if doc.version < 7000 { 1 } else { 2 })
+                .and_then(bytes)
+                .map(crate::scene::fbx_subtype)
+                == Some(b"Mesh")
+                || (doc.version < 7000
+                    && doc
+                        .nodes
+                        .iter()
+                        .skip(obj.node + 1)
+                        .take_while(|c| c.parent.is_some_and(|p| p >= obj.node))
+                        .any(|c| c.parent == Some(obj.node) && c.name == b"Vertices")))
         {
             mesh_count += 1;
         }
@@ -325,8 +374,19 @@ pub fn extract<'a>(
             .properties
             .get(n.properties.clone())
             .ok_or(Error::InvalidDom)?;
-        if n.name == b"Geometry"
-            && p.get(2).and_then(bytes).map(crate::scene::fbx_subtype) == Some(b"Mesh")
+        if (n.name == b"Geometry" || (doc.version < 7000 && n.name == b"Model"))
+            && (p
+                .get(if doc.version < 7000 { 1 } else { 2 })
+                .and_then(bytes)
+                .map(crate::scene::fbx_subtype)
+                == Some(b"Mesh")
+                || (doc.version < 7000
+                    && doc
+                        .nodes
+                        .iter()
+                        .skip(obj.node + 1)
+                        .take_while(|c| c.parent.is_some_and(|p| p >= obj.node))
+                        .any(|c| c.parent == Some(obj.node) && c.name == b"Vertices")))
         {
             meshes.push(Mesh {
                 object,

@@ -1,8 +1,8 @@
 //! The public loading API: [`load`] converts an FBX file into an owned
 //! [`Scene`] under one import profile ([`LoadOptions`]).
 //!
-//! Every value is the one ufbx 0.23.1 produces for the same file and options
-//! (proved field by field on the static corpus, see `docs/VERIFICATION.md`).
+//! Conversion targets ufbx 0.23.1 with the same file and options.
+//! Qualified file sets and remaining differences are in `docs/VERIFICATION.md`.
 
 use crate::canon::V;
 use crate::canon_scene::{self, CanonScene, DumpLimits, ElementType};
@@ -34,7 +34,7 @@ pub enum Error {
     /// default profile is); names the first unsupported option.
     UnsupportedOptions(&'static str),
     /// The file is not a supported FBX file (bad syntax, unsupported version
-    /// such as 6.1 and older, or a limit exceeded while parsing).
+    /// such as versions older than 5.8, or a limit exceeded while parsing).
     Parse(String),
     /// The file parsed but its object graph or geometry is invalid, or a
     /// conversion limit was exceeded.
@@ -441,7 +441,7 @@ impl LoadOptions {
     }
 }
 
-/// Load an FBX file (binary or ASCII, versions 7100 to 7700) with the
+/// Load an FBX file (binary or ASCII, FBX 5.8/6.x and 7.1–7.7) with the
 /// default [`Limits`].
 ///
 /// # Errors
@@ -1200,7 +1200,7 @@ impl SceneSettings {
     pub fn ambient_color(&self) -> [f64; 3] {
         self.ambient_color
     }
-    /// FBX version (7100 to 7700).
+    /// FBX version (5800–6999 or 7100–7700).
     pub fn version(&self) -> u32 {
         self.version
     }
@@ -1228,7 +1228,7 @@ impl SceneSettings {
 pub struct Unsupported {
     /// What kind of content.
     pub kind: UnsupportedKind,
-    /// FBX object ID (the owning geometry for legacy shapes).
+    /// FBX numeric object ID, or zero for name-based legacy objects.
     pub source_id: i64,
 }
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.3 (unreleased)
+
+- Add legacy FBX construction for name-based connections, embedded model
+  attributes, Properties60, Takes and heterogeneous animation keys, older
+  geometry layouts and both binary byte orders. Qualification is recorded in
+  `docs/VERIFICATION.md`; the construction rules are in `docs/LEGACY.md`.
+- Add a full-scene corpus comparison with strict typed list order, per-file
+  receipts and proved retained-DOM mutation checks, plus authored legacy
+  regression fixtures and reproducible fuzz seeds.
+
 ## 0.1.2 (unreleased)
 
 - Make every allocation on the default loading and evaluation paths fallible,

@@ -8,6 +8,8 @@ operation, so that results match ufbx bit for bit. The ported code cites the
 ufbx function it follows (`ufbxi_...` names) and lives in these files of
 `src/`:
 
+- `legacy.rs`: name-based legacy objects, embedded attributes, Takes,
+  settings and mesh texture-slot material patches.
 - `canon_dom.rs`: retained-DOM projection rules.
 - `canon_scene.rs`: element reading, property defaults, scene settings,
   animation-stack structure.

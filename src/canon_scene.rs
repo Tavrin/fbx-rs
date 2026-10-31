@@ -624,7 +624,10 @@ pub(crate) fn project_with<'a>(
         let mut by_object = allocation.filled(index.objects.len(), None)?;
         for (oi, o) in index.objects.iter().enumerate() {
             let p = props_of(&doc, o.node);
-            let ty = match element_type(doc.nodes[o.node].name, string_of(p.get(2))) {
+            let ty = match element_type(
+                doc.nodes[o.node].name,
+                string_of(p.get(if doc.version < 7000 { 1 } else { 2 })),
+            ) {
                 Some(t) => t,
                 None => continue,
             };
@@ -633,12 +636,18 @@ pub(crate) fn project_with<'a>(
             allocation.push(
                 &mut elements,
                 Element {
-                    key: allocation.format(format_args!("id:{}:ordinal:{ordinal}", o.id))?,
+                    key: if doc.version < 7000 {
+                        crate::legacy::key(&doc, o.node, &allocation)?
+                    } else {
+                        allocation.format(format_args!("id:{}:ordinal:{ordinal}", o.id))?
+                    },
                     ordinal,
-                    source_id: Some(o.id),
+                    source_id: if doc.version < 7000 { None } else { Some(o.id) },
                     ty,
                     node: Some(o.node),
-                    name: allocation.bytes(object_name(string_of(p.get(1))))?,
+                    name: allocation.bytes(object_name(string_of(
+                        p.get(usize::from(doc.version >= 7000)),
+                    )))?,
                     src_conns: Vec::new(),
                     dst_conns: Vec::new(),
                     instances: Vec::new(),
@@ -663,12 +672,16 @@ pub(crate) fn project_with<'a>(
             };
             allocation.push(&mut connections, (src, dst, allocation.bytes(dst_prop)?))?;
         }
-        let unsupported = allocation.collect(
-            index
-                .unsupported
-                .iter()
-                .map(|u| (u.kind, index.objects[u.object].id)),
-        )?;
+        let unsupported = allocation.collect(index.unsupported.iter().map(|u| {
+            (
+                u.kind,
+                if doc.version < 7000 {
+                    0
+                } else {
+                    index.objects[u.object].id
+                },
+            )
+        }))?;
         let unsupported = allocation.collect(unsupported.into_iter().filter(|(kind, _)| {
             !matches!(
                 kind,
@@ -683,6 +696,9 @@ pub(crate) fn project_with<'a>(
         }))?;
         (elements, connections, unsupported)
     };
+    if doc.version < 7000 {
+        crate::legacy::elements(&doc, &props, &mut elements, &mut connections, limits)?;
+    }
     // FBX 7.1 stores shapes inside the base Geometry. ufbx creates one
     // deformer and one channel/target pair per nested Shape.
     // Index nested shapes once; static meshes need no per-mesh DOM scan.
@@ -728,7 +744,11 @@ pub(crate) fn project_with<'a>(
                 allocation.push(
                     &mut elements,
                     Element {
-                        key: allocation.format(format_args!("id:0:ordinal:{}", shape + 1))?,
+                        key: if doc.version < 7000 {
+                            crate::legacy::key(&doc, shape, &allocation)?
+                        } else {
+                            allocation.format(format_args!("id:0:ordinal:{}", shape + 1))?
+                        },
                         ordinal: shape + 1,
                         source_id: Some(0),
                         ty: ElementType::BlendDeformer,
@@ -749,7 +769,11 @@ pub(crate) fn project_with<'a>(
             {
                 let shared = deformer.is_some_and(|k| elements[k].node == Some(shape));
                 let key = if offset == 0 && !shared {
-                    allocation.format(format_args!("id:0:ordinal:{}", shape + 1))?
+                    if doc.version < 7000 {
+                        crate::legacy::key(&doc, shape, &allocation)?
+                    } else {
+                        allocation.format(format_args!("id:0:ordinal:{}", shape + 1))?
+                    }
                 } else {
                     let count = &mut synthetic_counts[offset + 1];
                     let key = allocation.format(format_args!(
@@ -806,6 +830,21 @@ pub(crate) fn project_with<'a>(
         ascii,
         limits,
     )?;
+    if doc.version < 7000 {
+        // Canonical attachment identities use the final instance owner,
+        // including the scale helper that received the embedded attribute.
+        for &(src, dst, ref prop) in &connections {
+            if prop.is_empty()
+                && (ElementType::Mesh..=ElementType::LodGroup).contains(&elements[src].ty)
+                && elements[src].key.contains(":role:attachment:")
+            {
+                elements[src].key = allocation.format(format_args!(
+                    "synthetic:{}:role:attachment:type:{}:ordinal:0",
+                    elements[dst].key, elements[src].ty as u8
+                ))?;
+            }
+        }
+    }
     let mut scene = CanonScene {
         doc,
         props,
@@ -836,6 +875,11 @@ pub(crate) fn project_with<'a>(
     order.sort_unstable_by(|&a, &b| {
         let a = &scene.elements[a];
         let b = &scene.elements[b];
+        if scene.doc.version < 7000 {
+            return (a.key != "root")
+                .cmp(&(b.key != "root"))
+                .then_with(|| crate::legacy::order(&a.key, &b.key));
+        }
         a.source_id
             .unwrap_or(i64::MIN)
             .cmp(&b.source_id.unwrap_or(i64::MIN))
@@ -854,7 +898,38 @@ pub(crate) fn project_with<'a>(
             .iter()
             .map(|&(o, h)| (remap[o], remap[h])),
     )?;
-    scene.creation = order;
+    scene.creation = if scene.doc.version < 7000 {
+        let mut helpers = allocation.filled(scene.elements.len(), false)?;
+        for &(_, helper) in &scene.scale_helpers {
+            helpers[helper] = true;
+        }
+        let mut ids = allocation.collect(0..scene.elements.len())?;
+        ids.sort_unstable_by_key(|&i| {
+            let e = &scene.elements[i];
+            (
+                if e.key == "root" {
+                    0
+                } else if helpers[i] {
+                    usize::MAX
+                } else {
+                    e.node.and_then(|n| n.checked_add(1)).unwrap_or(usize::MAX)
+                },
+                if e.ty == ElementType::Node {
+                    u8::from(scene.doc.version >= 6000)
+                } else {
+                    u8::from(scene.doc.version < 6000)
+                },
+                order[i],
+            )
+        });
+        let mut ranks = allocation.filled(ids.len(), 0)?;
+        for (rank, i) in ids.into_iter().enumerate() {
+            ranks[i] = rank;
+        }
+        ranks
+    } else {
+        order
+    };
     let conn = |src: usize, dst: usize, prop: &[u8]| {
         V::Obj(
             Obj::new()
@@ -934,6 +1009,7 @@ pub(crate) fn project_with<'a>(
                     &scene.doc,
                     &scene.props,
                     n,
+                    e.ty,
                     owner_for[i].is_some(),
                     helper_for[i].is_some(),
                     limits,
@@ -1155,7 +1231,11 @@ fn project_attributes(
             Light => sa::light(&props, direction[i]).to_obj(),
             Camera => sa::camera(&props, &units, axes[i]).to_obj(),
             _ => {
-                let sub = string_of(props_of(&scene.doc, node).get(2));
+                let sub = string_of(props_of(&scene.doc, node).get(if scene.doc.version < 7000 {
+                    1
+                } else {
+                    2
+                }));
                 sa::bone(&props, &units, sub == b"Root", &a)?
             }
         };
@@ -1220,6 +1300,9 @@ fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<
     }
     if items.is_empty() {
         return Ok(());
+    }
+    if scene.doc.version < 7000 {
+        crate::legacy::material_textures(scene, &mut items, limits.max_allocation)?;
     }
     let env = Env {
         doc: &scene.doc,
@@ -1287,6 +1370,18 @@ fn project_graph(
         } else if (Mesh..=LodGroup).contains(&st) {
             allocation.push(&mut attribs[dst], src)?;
             allocation.push(&mut instances[src], dst)?;
+        }
+    }
+    if scene.doc.version < 7000 {
+        // `ufbxi_finalize_scene`: unparented models belong to the root even
+        // though no authored connection exists (notably the 5.8 root layout).
+        let mut orphans = allocation
+            .collect((1..n).filter(|&i| scene.elements[i].ty == Node && parent[i].is_none()))?;
+        budget.sort_work(orphans.len())?;
+        orphans.sort_unstable_by_key(|&i| scene.created(i));
+        for i in orphans {
+            parent[i] = Some(0);
+            allocation.push(&mut children[0], i)?;
         }
     }
     let (_, owner_for) =
@@ -1477,6 +1572,7 @@ fn project_transforms(
                     &scene.doc,
                     &scene.props,
                     d,
+                    e.ty,
                     owner_for[slot].is_some(),
                     helper_for[slot].is_some(),
                     limits,
@@ -1484,6 +1580,47 @@ fn project_transforms(
                 _ => None,
             },
         )?;
+    }
+    if scene.doc.version < 6000 {
+        // `ufbxi_add_connections_to_elements`: pre-6000 defaults live only in the
+        // take channels. Install missing transform props before node updates.
+        for e in scene
+            .elements
+            .iter()
+            .filter(|e| e.ty == ElementType::AnimValue)
+        {
+            let Some(source) = e.node else {
+                continue;
+            };
+            let defaults =
+                crate::legacy::defaults(&scene.doc, &scene.props, source, scene.ascii, &a)?;
+            for (dst, name) in &e.src_conns {
+                let (nm, kind): (&[u8], scene_property::Type) = match name.as_slice() {
+                    b"Lcl Translation" => (b"Lcl Translation", scene_property::Type::Translation),
+                    b"Lcl Rotation" => (b"Lcl Rotation", scene_property::Type::Rotation),
+                    b"Lcl Scaling" => (b"Lcl Scaling", scene_property::Type::Scaling),
+                    _ => continue,
+                };
+                if let Some(l) = &mut layers[*dst] {
+                    if l.find(nm).is_none() {
+                        a.push(
+                            &mut l.authored,
+                            AuthoredProperty {
+                                source_node: source,
+                                name: nm,
+                                kind,
+                                flags: 0x3001,
+                                value_int: 0,
+                                value_real: [defaults[0], defaults[1], defaults[2], 0.0],
+                                value_str: b"",
+                                value_blob: b"",
+                            },
+                        )?;
+                        l.authored.sort_unstable_by(|a, b| a.name.cmp(b.name));
+                    }
+                }
+            }
+        }
     }
     let find = |i: usize, name: &[u8]| layers[i].as_ref().and_then(|l| l.find(name));
     let vec3 = |i: usize, name: &[u8], d: [f64; 3]| {
@@ -1494,11 +1631,12 @@ fn project_transforms(
     // Source axes and units (`ufbxi_update_scene_settings`).
     let doc = &scene.doc;
     let mut global = Vec::new();
-    if let Some(g) = doc
-        .nodes
-        .iter()
-        .position(|x| x.parent.is_none() && x.name == b"GlobalSettings")
-    {
+    if let Some(g) = doc.nodes.iter().position(|x| {
+        x.name == b"GlobalSettings"
+            && (x.parent.is_none()
+                || (doc.version < 7000
+                    && x.parent.is_some_and(|p| doc.nodes[p].name == b"Objects")))
+    }) {
         global = scene_property::authored_indexed(
             doc,
             &scene.props,
@@ -1924,6 +2062,16 @@ fn project_meshes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 }
             }
         }
+        if scene.doc.version < 7000 {
+            for list in [
+                &mut links.skin_deformers,
+                &mut links.blend_deformers,
+                &mut links.cache_deformers,
+                &mut links.all_deformers,
+            ] {
+                list.sort_unstable_by_key(|&i| scene.created(i));
+            }
+        }
         if instances.len() == 1 {
             links.geometry_to_node = scene.geometry_modify.get(instances[0]).copied().flatten();
         }
@@ -2128,7 +2276,13 @@ fn project_globals(
             .position(|n| n.parent.is_none() && n.name == name)
     };
     let mut global_props = Vec::new();
-    if let Some(g) = find_top(b"GlobalSettings") {
+    if let Some(g) = find_top(b"GlobalSettings").or_else(|| {
+        if doc.version < 7000 {
+            doc.nodes.iter().position(|n| n.name == b"GlobalSettings")
+        } else {
+            None
+        }
+    }) {
         global_props = scene_property::authored_indexed(
             doc,
             &scene.props,
@@ -2145,6 +2299,24 @@ fn project_globals(
                     V::Obj(Obj::new().try_with(
                         "data",
                         V::List(global_props.iter().map(prop_obj).collect()),
+                        &a,
+                    )?),
+                    &a,
+                )?),
+                &a,
+            )?;
+        }
+    }
+    if doc.version < 7000 {
+        crate::legacy::settings(doc, &scene.props, &mut global_props, &a)?;
+        if !scene.lean {
+            scene.settings.try_set(
+                "props",
+                V::Obj(Obj::new().try_with(
+                    "props",
+                    V::Obj(Obj::new().try_with(
+                        "data",
+                        V::List(a.collect(global_props.iter().map(prop_obj))?),
                         &a,
                     )?),
                     &a,
@@ -2317,6 +2489,22 @@ fn project_globals(
             .map_err(crate::api::property_error)?;
         }
     }
+    if doc.version < 7000 {
+        for (i, node) in doc.nodes.iter().enumerate() {
+            if node.name == b"SceneInfo"
+                && node.parent.is_some_and(|p| doc.nodes[p].name == b"Objects")
+            {
+                scene_props = scene_property::authored_indexed(
+                    doc,
+                    &scene.props,
+                    i,
+                    limits.max_properties,
+                    limits.max_allocation,
+                )
+                .map_err(crate::api::property_error)?;
+            }
+        }
+    }
     // `ufbxi_finalize_scene`: `ufbx_find_string`/`ufbx_find_blob` on
     // `DocumentUrl` (used to derive relative texture and video paths).
     if let Some(p) = scene_props.iter().find(|p| p.name == b"DocumentUrl") {
@@ -2466,11 +2654,23 @@ fn write_all<W: Write>(
     em.restore(m);
     em.end()?;
     crate::canon_dom::write_dom(em, &scene.doc, scene.ascii)?;
+    // Internal graph indices retain root=0. The legacy oracle's identity
+    // order places source-backed elements before the root.
+    let a = crate::api_alloc::Budget::new(limits.max_allocation);
+    let mut emitted = a
+        .collect(0..scene.elements.len())
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    if scene.doc.version < 7000 {
+        emitted.sort_unstable_by(|&a, &b| {
+            crate::legacy::order(&scene.elements[a].key, &scene.elements[b].key)
+        });
+    }
     em.begin("elements")?;
     em.count("length", scene.elements.len())?;
-    for (i, e) in scene.elements.iter().enumerate() {
+    for (i, &element) in emitted.iter().enumerate() {
+        let e = &scene.elements[element];
         let m = em.push_index(i);
-        em.leaf_here(crate::canon::K::Ref, Some(&V::Ref(Some(i))))?;
+        em.leaf_here(crate::canon::K::Ref, Some(&V::Ref(Some(element))))?;
         // The root has no source: canon.c writes SIZE_MAX of the 64-bit oracle,
         // independent of this target's pointer width.
         let ordinal = if e.ordinal == usize::MAX {
@@ -2481,7 +2681,7 @@ fn write_all<W: Write>(
         em.leaf_raw("source_ordinal", |b| {
             b.extend_from_slice(format!("{{\"u64\":\"{ordinal}\"}}").as_bytes())
         })?;
-        if let Some(id) = e.source_id {
+        if let Some(id) = e.source_id.filter(|_| scene.doc.version >= 7000) {
             em.leaf_raw("source_id", |b| {
                 b.extend_from_slice(format!("{{\"i64\":\"{id}\"}}").as_bytes())
             })?;
@@ -2513,7 +2713,11 @@ fn write_all<W: Write>(
             .filter(|e| e.ty.domain() == domain)
             .count();
         em.count("length", n)?;
-        for e in scene.elements.iter().filter(|e| e.ty.domain() == domain) {
+        for e in emitted
+            .iter()
+            .map(|&i| &scene.elements[i])
+            .filter(|e| e.ty.domain() == domain)
+        {
             let m = em.push(&e.key);
             em.emit_struct(e.ty.schema(), Some(&e.obj))?;
             em.restore(m);
@@ -2535,7 +2739,34 @@ fn write_all<W: Write>(
         max_allocation: dl.max_allocation.saturating_sub(draft.retained_bytes),
         ..Default::default()
     };
-    crate::canonical_writer::write_source_triangles(&mut em.w, &draft.index, &draft.meshes, &tl)?;
+    if scene.doc.version < 7000 {
+        let a = crate::api_alloc::Budget::new(limits.max_allocation);
+        let mut keys = a
+            .try_collect(
+                scene
+                    .elements
+                    .iter()
+                    .filter(|e| e.ty == ElementType::Mesh)
+                    .filter_map(|e| e.node.map(|n| (n, &e.key)))
+                    .map(|(n, k)| Ok((n, a.text(k.as_bytes())?))),
+            )
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        keys.sort_unstable_by_key(|p| p.0);
+        crate::canonical_writer::write_source_triangles_keyed(
+            &mut em.w,
+            &draft.index,
+            &draft.meshes,
+            &tl,
+            Some(&keys),
+        )?;
+    } else {
+        crate::canonical_writer::write_source_triangles(
+            &mut em.w,
+            &draft.index,
+            &draft.meshes,
+            &tl,
+        )?;
+    }
     crate::animation_canon::write(em, scene)?;
     // Every section above is keyed by identity; this one records the sequence
     // of each typed list, as `reference/canon.c` does.

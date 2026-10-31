@@ -78,7 +78,7 @@ fn limits_and_versions() {
             what: "string length"
         }
     );
-    for v in [3000, 6100, 7000, 7099, 7701, 7800] {
+    for v in [3000, 5700, 5799, 7000, 7099, 7701, 7800] {
         assert_eq!(
             parse(&fixture(v, false, &[]), &Limits::default()).unwrap_err(),
             Error::UnsupportedVersion { v }
@@ -163,7 +163,7 @@ fn nested(version: u32) -> Vec<u8> {
 
 #[test]
 fn all_7x_versions_and_header_widths() {
-    for version in [7100, 7200, 7300, 7400, 7500, 7600, 7700] {
+    for version in [5800, 6000, 6100, 7100, 7200, 7300, 7400, 7500, 7600, 7700] {
         let input = nested(version);
         let doc = parse(&input, &Limits::default()).unwrap();
         assert_eq!(doc.version, version);

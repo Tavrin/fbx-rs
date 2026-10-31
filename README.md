@@ -1,16 +1,17 @@
 # fbx-rs
 
-A pure-Rust loader for FBX files. It reads binary and ASCII FBX 7.x files
+A pure-Rust loader for FBX files. It reads binary and ASCII FBX 5.8/6.x and 7.1–7.7 files
 into an owned scene: nodes, meshes, materials, textures, cameras and
-lights, skins, blend shapes and animation. On the verification corpus, all 316
-supported files match [ufbx](https://github.com/ufbx/ufbx) 0.23.1 with the same
+lights, skins, blend shapes and animation. The last completed FBX 7.x
+qualification covers 316 files that match [ufbx](https://github.com/ufbx/ufbx) 0.23.1 with the same
 import options: every value bit for bit (matched by object identity, with the
 differences in [docs/VERIFICATION.md](docs/VERIFICATION.md) explained), and the
-order of every list identical.
+order of every list identical. Legacy qualification is pending; see
+[the construction rules](docs/LEGACY.md) and verification notes.
 
 ## What it does
 
-- Reads binary and ASCII FBX, file versions 7100 to 7700 (FBX 7.1 to 7.7).
+- Reads binary and ASCII FBX 5.8/6.x and 7.1 to 7.7, with both binary byte orders.
 - Converts the static scene: the node hierarchy with local and world
   transforms; meshes with positions, normals, every UV set (with tangents and
   bitangents), color sets, faces, per-face materials and a triangulated index
@@ -35,7 +36,7 @@ order of every list identical.
 - NURBS geometry, caches, constraints and audio are listed in
   `Scene::unsupported()`. Mesh positions remain undeformed; the API exposes the stored skin and blend
   data for callers to apply.
-- FBX 6.1 and older files are rejected with an error.
+- Files older than FBX 5.8 and FBX 7.0 are rejected with an error.
 - Other target axes or units are not implemented yet; asking for them
   returns `Error::UnsupportedOptions`.
 - It does not write FBX, decode images or load external files: texture paths
@@ -117,7 +118,8 @@ animation lists is identical. Baked animation matches ufbx on the 8 animated
 corpus files and 4 generated fixtures under four option sets, with node and
 property order compared. Deliberate differences for malformed inputs and
 Blender weight order are described in that verification report.
-The 24 remaining files are FBX 6.1 or older and are rejected. Camera and light
+The 24 legacy files are FBX 5.8/6.x; their new conversion path is being
+qualified separately (see the legacy qualification in the verification notes). Camera and light
 modes that the corpus does not contain are ported but not exercised. The parser
 and loader are fuzzed with libFuzzer; the latest animation changes have regression
 tests and differential checks, without a new fuzz campaign.

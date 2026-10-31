@@ -1,4 +1,4 @@
-//! FBX 7.x syntax layer: binary and ASCII documents into a bounded flat DOM.
+//! FBX 5.8/6.x and 7.1–7.7 syntax layer: binary and ASCII documents into a bounded flat DOM.
 //! See docs/VERIFICATION.md for how it is checked against ufbx.
 use std::borrow::Cow;
 
@@ -51,7 +51,7 @@ pub enum Error {
     Truncated,
     /// A compressed array is not valid zlib data or has the wrong length.
     BadCompression,
-    /// The file version is outside [`MIN_VERSION`]..=[`MAX_VERSION`].
+    /// The file version is outside the ranges accepted by [`supported_version`].
     UnsupportedVersion {
         /// The version number found in the file.
         v: u32,
@@ -216,18 +216,17 @@ fn push<T>(vec: &mut Vec<T>, value: T, total: &mut usize, limit: usize) -> Resul
     vec.push(value);
     Ok(())
 }
-/// Oldest accepted FBX version (7.1).
-pub const MIN_VERSION: u32 = 7100;
+/// Oldest accepted FBX version (5.8).
+pub const MIN_VERSION: u32 = 5800;
 /// Newest accepted FBX version (7.7).
 pub const MAX_VERSION: u32 = 7700;
 
-/// Whether `version` is in the accepted FBX 7.x range (7100..=7700).
-/// 6.1 and older use a different document model and are rejected.
+/// Whether `version` is in an accepted range: 5800..7000 or 7100..=7700.
 pub fn supported_version(version: u32) -> bool {
-    (MIN_VERSION..=MAX_VERSION).contains(&version)
+    (MIN_VERSION..7000).contains(&version) || (7100..=MAX_VERSION).contains(&version)
 }
 
-/// Parse a binary or ASCII FBX 7.x document (7100..=7700).
+/// Parse a binary or ASCII FBX document (5.8/6.x or 7.1–7.7).
 pub fn parse<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>, Error> {
     const MAGIC: &[u8] = b"Kaydara FBX Binary  \x00\x1a";
     if input.len() < MAGIC.len() && MAGIC.starts_with(input) {
@@ -254,7 +253,7 @@ fn parse_binary<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>, Er
         be: endian == 1,
     };
     let version = u32::try_from(r.num(4)?).map_err(|_| Error::InvalidFormat)?;
-    if !supported_version(version) {
+    if !supported_version(version) && !(3000..MIN_VERSION).contains(&version) {
         return Err(Error::UnsupportedVersion { v: version });
     }
     // Node record headers use 64-bit words from 7500 on (ufbx and the
@@ -443,6 +442,31 @@ fn parse_binary<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>, Er
             push(&mut stack, (index, end), &mut total, limits.max_allocation)?;
         } else if r.pos != end {
             return Err(Error::InvalidFormat);
+        }
+    }
+    if (3000..MIN_VERSION).contains(&version) {
+        if let Some(header) = doc
+            .nodes
+            .iter()
+            .position(|n| n.parent.is_none() && n.name == b"FBXHeaderExtension")
+        {
+            if let Some(node) = doc
+                .nodes
+                .iter()
+                .find(|n| n.parent == Some(header) && n.name == b"FBXVersion")
+            {
+                let declared = match doc.properties.get(node.properties.start) {
+                    Some(Property::I32(v)) => u32::try_from(*v).ok(),
+                    Some(Property::I64(v)) => u32::try_from(*v).ok(),
+                    _ => None,
+                };
+                if let Some(declared) = declared.filter(|&v| v > version && v < 6000) {
+                    doc.version = declared;
+                }
+            }
+        }
+        if !supported_version(doc.version) {
+            return Err(Error::UnsupportedVersion { v: doc.version });
         }
     }
     Ok(doc)

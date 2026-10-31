@@ -388,6 +388,16 @@ pub(super) fn parse<'a>(input: &'a [u8], limits: &Limits) -> Result<Document<'a>
                 c.whitespace();
                 continue;
             }
+            if doc.version < 7000 && matches!(c.peek(), Some(b'\n' | b';')) {
+                let saved = c.pos;
+                c.whitespace();
+                if c.peek() == Some(b',') {
+                    c.pos += 1;
+                    c.whitespace();
+                    continue;
+                }
+                c.pos = saved;
+            }
             if !matches!(c.peek(), None | Some(b'\n' | b';' | b'{' | b'}')) {
                 return Err(Error::InvalidFormat);
             }

@@ -1,6 +1,6 @@
 //! A pure-Rust FBX loader with skins, blend shapes and animation evaluation.
 //!
-//! [`load`] parses a binary or ASCII FBX file (versions 7100 to 7700) and
+//! [`load`] parses a binary or ASCII FBX file (FBX 5.8/6.x and 7.1–7.7) and
 //! converts it into an owned [`Scene`]: the node hierarchy with local and
 //! world transforms, meshes with every UV and color set and a triangulated
 //! index buffer, materials (FBX and PBR maps), textures, cameras, lights,
@@ -36,7 +36,7 @@
 //!
 //! # What is supported
 //!
-//! - Binary and ASCII FBX 7.x (file versions 7100 to 7700).
+//! - Binary and ASCII FBX 5.8/6.x and 7.1–7.7.
 //! - Static scenes: the node hierarchy and transforms, meshes (positions,
 //!   normals, UV sets with tangents, color sets, faces, material parts,
 //!   triangulation), materials, textures (paths and embedded content),
@@ -45,7 +45,7 @@
 //!   mesh positions stay undeformed. Animation curves, layers and pose evaluation
 //!   are exposed through [`Scene`]. NURBS geometry, caches, constraints and audio
 //!   are listed in [`Scene::unsupported`].
-//! - FBX 6.1 and older files are rejected with [`Error::Parse`].
+//! - Files older than FBX 5.8 and FBX 7.0 are rejected with [`Error::Parse`].
 //! - Only the default [`LoadOptions`] (right-handed Y-up, 1 m units) are
 //!   implemented; other values return [`Error::UnsupportedOptions`].
 //!
@@ -208,3 +208,5 @@ pub use api::{
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 mod readme {}
+
+mod legacy;

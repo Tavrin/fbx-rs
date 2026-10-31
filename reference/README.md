@@ -129,3 +129,13 @@ streams are invalid because they included raw-string structure pointers.
 lengths, and raw-string-array framing. Supplying `--input` and
 `--build-receipt` also checks those bindings. This validates the oracle stream,
 not its equivalence to the Rust syntax DOM.
+
+## Full scene corpus comparison
+
+`compare_corpus.py PATHS ORACLE PARITY --out NEW_DIRECTORY` checks every
+listed input, including 5.8/6.x files. It retains hashed per-file streams and
+JSON results, validates both streams, compares every field and typed list
+order without tolerances, and checks the public projection. Only retained-DOM
+mutations proved against the oracle's own loaded arrays are allowed.
+`test_corpus_comparison.py` exercises that boundary with deliberate faults.
+The output directory must be outside the repository and must not exist.

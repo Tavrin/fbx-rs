@@ -137,10 +137,43 @@ fn allocation_refusal_while_reporting_invalid_input_is_typed() {
     let options = fbx_rs::LoadOptions::default();
     for input in [
         b"; FBX 7.4.0\nObjects: { Model: ".as_slice(),
-        b"; FBX 6.1.0\nObjects: { }\n".as_slice(),
+        b"; FBX 5.7.0\nObjects: { }\n".as_slice(),
     ] {
         sweep("invalid input diagnostics", false, || {
             fbx_rs::load(input, &options)
         });
     }
+}
+
+#[test]
+fn legacy_load_and_take_refusals_are_typed() {
+    let _serial = SERIAL.lock().unwrap();
+    let options = fbx_rs::LoadOptions::default();
+    for (name, input) in [
+        (
+            "legacy named deformers",
+            include_bytes!("fixtures/legacy-deform.fbx").as_slice(),
+        ),
+        (
+            "legacy texture layers",
+            include_bytes!("fixtures/legacy-texture.fbx").as_slice(),
+        ),
+        (
+            "legacy big-endian take",
+            include_bytes!("fixtures/legacy-be.fbx").as_slice(),
+        ),
+        (
+            "legacy 5800 container",
+            include_bytes!("fixtures/legacy-v5-binary.fbx").as_slice(),
+        ),
+    ] {
+        sweep(name, true, || fbx_rs::load(input, &options));
+    }
+    let scene = fbx_rs::load(include_bytes!("fixtures/legacy-be.fbx"), &options).unwrap();
+    sweep("legacy take evaluation", true, || {
+        scene.evaluate(Some(0), 0.25)
+    });
+    sweep("legacy take bake", true, || {
+        scene.bake_animation(Some(0), &fbx_rs::BakeOptions::default())
+    });
 }

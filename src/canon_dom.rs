@@ -32,6 +32,7 @@ enum St {
     Thumbnail,
     Objects,
     Connections,
+    Relations,
     Model,
     Geometry,
     NodeAttribute,
@@ -64,6 +65,7 @@ enum St {
     Take,
     TakeObject,
     Channel,
+    GeometryUv,
     Unknown,
 }
 
@@ -74,7 +76,9 @@ fn child_state(parent: St, name: &[u8]) -> St {
         Root => match name {
             b"FBXHeaderExtension" => HeaderExt,
             b"Objects" => Objects,
+            b"Model" => Model,
             b"Connections" => Connections,
+            b"Relations" => Relations,
             b"Takes" => Takes,
             _ => Unknown,
         },
@@ -111,6 +115,8 @@ fn child_state(parent: St, name: &[u8]) -> St {
             _ => Unknown,
         },
         Model | Geometry if name == b"Shape" => Shape,
+        Model if name == b"GeometryUVInfo" => GeometryUv,
+        Model if name == b"Channel" => Channel,
         Deformer if name == b"AssociateModel" => AssociateModel,
         Pose if name == b"PoseNode" => PoseNode,
         Takes if name == b"Take" => Take,
@@ -170,18 +176,22 @@ fn array_type(parent: St, name: &[u8], ascii: bool, version: u32) -> Option<u8> 
         (AssociateModel, b"Transform") => b'd',
         (PoseNode, b"Matrix") => b'd',
         (Channel, b"Key") => b'd',
+        (GeometryUv, b"TextureUV") => b'd',
+        (GeometryUv, b"TextureUVVerticeIndex") | (Model, b"Materials") => b'i',
         (Audio, b"Content" | b"BinaryData") => b'C',
         _ => return None,
     })
 }
 
 /// `ufbxi_is_raw_string` (7.x).
-fn raw_string(parent: St, name: &[u8]) -> bool {
+fn raw_string(parent: St, name: &[u8], version: u32) -> bool {
     use St::*;
     match parent {
         Root => name == b"Model" || name == b"FileId",
         HeaderExt => name == b"SceneInfo",
         Objects => true,
+        Connections | Relations => version < 7000,
+        Take => name == b"Model",
         Model | Geometry | NodeAttribute | UnknownObject => {
             name == b"NodeAttributeName" || name == b"Name"
         }
@@ -617,7 +627,7 @@ fn project(
         return a.collect([encode(target, &nums, boolean, a)?]);
     }
     let mut out = Vec::new();
-    let raw_context = raw_string(parent, name);
+    let raw_context = raw_string(parent, name, doc.version);
     for v in values {
         match v {
             Property::String(b) => a.push(
@@ -842,7 +852,7 @@ pub(crate) fn node_string(
 ) -> Result<Option<StringViews>, Error> {
     let parent = state_of(doc, doc.nodes[i].parent);
     let state = child_state(parent, doc.nodes[i].name);
-    let raw_context = raw_string(parent, doc.nodes[i].name);
+    let raw_context = raw_string(parent, doc.nodes[i].name, doc.version);
     Ok(
         match project(doc, i, state, parent, ascii, a)?.into_iter().next() {
             Some(DomValue::Str(view, raw)) => Some(((!raw_context).then_some(view), raw)),

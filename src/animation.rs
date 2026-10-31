@@ -83,7 +83,7 @@ pub struct Extrapolation {
 #[non_exhaustive]
 pub struct AnimationCurve {
     pub(crate) element: usize,
-    /// Original object ID.
+    /// Original numeric object ID, or zero for name-based legacy records.
     pub source_id: i64,
     /// Authored keys in source order.
     pub keys: Vec<Keyframe>,
@@ -258,7 +258,7 @@ fn bezier_t(handle1: f64, handle2: f64, x0: f64) -> f64 {
 #[non_exhaustive]
 pub struct AnimationValue {
     pub(crate) element: usize,
-    /// Original object ID.
+    /// Original numeric object ID, or zero for name-based legacy records.
     pub source_id: i64,
     /// Values used for absent or empty component curves.
     pub default_value: [f64; 3],
@@ -270,7 +270,7 @@ pub struct AnimationValue {
 #[non_exhaustive]
 pub struct AnimationBinding {
     pub(crate) element: usize,
-    /// ID of the target object.
+    /// Numeric ID of the target object, or zero for a name-based legacy target.
     pub source_id: i64,
     /// Property name, preserving source bytes.
     pub property: Vec<u8>,
@@ -282,7 +282,7 @@ pub struct AnimationBinding {
 #[non_exhaustive]
 pub struct AnimationLayer {
     pub(crate) element: usize,
-    /// Original object ID.
+    /// Original numeric object ID, or zero for name-based legacy records.
     pub source_id: i64,
     /// Layer name.
     pub name: String,
@@ -308,7 +308,7 @@ pub struct AnimationLayer {
 #[non_exhaustive]
 pub struct AnimationStack {
     pub(crate) element: usize,
-    /// Original object ID.
+    /// Original numeric object ID, or zero for name-based legacy records.
     pub source_id: i64,
     /// Take name.
     pub name: String,

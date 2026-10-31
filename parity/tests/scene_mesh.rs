@@ -183,7 +183,7 @@ fn numeric_arrays_preserve_endian_and_signed_indices() {
         big_endian: true,
         bytes: Cow::Borrowed(&[0, 0, 0, 4, 255, 255, 255, 253]),
     };
-    let a = scene_mesh::NumericArray(&ints);
+    let a = scene_mesh::NumericArray::Property(&ints);
     assert_eq!(a.i64(0), Some(4));
     assert_eq!(a.i64(1), Some(-3));
     assert_eq!(a.i64(2), None);
@@ -193,14 +193,17 @@ fn numeric_arrays_preserve_endian_and_signed_indices() {
         big_endian: false,
         bytes: Cow::Owned(1.25f64.to_le_bytes().to_vec()),
     };
-    assert_eq!(scene_mesh::NumericArray(&floats).f64(0), Some(1.25));
+    assert_eq!(
+        scene_mesh::NumericArray::Property(&floats).f64(0),
+        Some(1.25)
+    );
     let truncated = syntax::Property::Array {
         kind: b'l',
         count: 2,
         big_endian: false,
         bytes: Cow::Borrowed(&[0; 8]),
     };
-    assert_eq!(scene_mesh::NumericArray(&truncated).i64(1), None);
+    assert_eq!(scene_mesh::NumericArray::Property(&truncated).i64(1), None);
 }
 
 #[test]
@@ -222,7 +225,7 @@ fn layer_mapping_modes_and_index_to_direct() {
         mapping: None,
         reference: Some(scene_mesh::Reference::Direct),
         direct: None,
-        indices: Some(scene_mesh::NumericArray(&indices)),
+        indices: Some(scene_mesh::NumericArray::Property(&indices)),
     };
     let c = scene_mesh::CornerContext {
         polygon_vertex: 4,
@@ -464,7 +467,7 @@ fn borrowed_numeric_words_preserve_endianness_sign_and_float_bits() {
                 big_endian: be,
                 bytes: Cow::Borrowed(&bytes),
             };
-            let a = NumericArray(&p);
+            let a = NumericArray::Property(&p);
             assert_eq!(a.i64(0), integer);
             assert_eq!(a.f64(0).unwrap().to_bits(), real.to_bits());
             assert_eq!(a.i64(1), None);
@@ -475,8 +478,8 @@ fn borrowed_numeric_words_preserve_endianness_sign_and_float_bits() {
                 big_endian: be,
                 bytes: Cow::Borrowed(&bytes[..bytes.len() - 1]),
             };
-            assert_eq!(NumericArray(&truncated).f64(0), None);
-            assert_eq!(NumericArray(&truncated).i64(0), None);
+            assert_eq!(NumericArray::Property(&truncated).f64(0), None);
+            assert_eq!(NumericArray::Property(&truncated).i64(0), None);
         }
     }
 }
@@ -485,7 +488,7 @@ fn borrowed_numeric_words_preserve_endianness_sign_and_float_bits() {
 fn ascii_special_numbers_reach_numeric_arrays() {
     let input = b"; FBX 7.4.0\nValues: *8 { a: inf,nan,-inf,+inf,1.#INF,-1.#IND,NaN(payload),T }\n";
     let doc = syntax::parse(input, &syntax::Limits::default()).unwrap();
-    let array = scene_mesh::NumericArray(&doc.properties[0]);
+    let array = scene_mesh::NumericArray::Property(&doc.properties[0]);
     for (i, bits) in [
         0x7ff0000000000000,
         0x7ff8000000000000,

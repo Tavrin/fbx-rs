@@ -176,6 +176,30 @@ impl Reader<'_, '_> {
         }
         Ok(out)
     }
+    fn legacy_curve(
+        &self,
+        i: usize,
+        n: usize,
+        limit: usize,
+        max_keys: usize,
+    ) -> Result<AnimationCurve, Error> {
+        let keys = legacy_keys(
+            &self.s.doc,
+            self.s.ascii,
+            &self.children,
+            &self.budget,
+            n,
+            limit,
+            max_keys,
+        )?;
+        Ok(AnimationCurve {
+            element: i,
+            source_id: 0,
+            keys,
+            pre_extrapolation: self.ext(n, b"Pre-Extrapolation")?,
+            post_extrapolation: self.ext(n, b"Post-Extrapolation")?,
+        })
+    }
     fn curve(
         &self,
         i: usize,
@@ -183,6 +207,9 @@ impl Reader<'_, '_> {
         limit: usize,
         max_keys: usize,
     ) -> Result<AnimationCurve, Error> {
+        if self.s.doc.version < 7000 {
+            return self.legacy_curve(i, n, limit, max_keys);
+        }
         let ticks = self.array(n, b"KeyTime", 8, limit.min(max_keys.saturating_mul(8)))?;
         let values = self.array(n, b"KeyValueFloat", 8, limit)?;
         let flags = self.array(n, b"KeyAttrFlags", 4, limit)?;
@@ -401,6 +428,204 @@ impl Reader<'_, '_> {
         })
     }
 }
+/// `ufbxi_read_take_anim_channel`: heterogeneous Key array, versions 4003–4005.
+fn legacy_keys(
+    doc: &crate::syntax::Document<'_>,
+    ascii: bool,
+    children: &[Vec<usize>],
+    budget: &Budget,
+    n: usize,
+    limit: usize,
+    max_keys: usize,
+) -> Result<Vec<Keyframe>, Error> {
+    let child = |n: usize, name: &[u8]| {
+        children[n]
+            .iter()
+            .copied()
+            .find(|&c| doc.nodes[c].name == name)
+    };
+    use crate::canon_dom::{node_data, NodeData, Scalar};
+    let scalar = |name: &[u8]| -> Result<Option<f64>, Error> {
+        child(n, name)
+            .map(|c| {
+                Ok(match node_data(doc, c, ascii, budget)? {
+                    NodeData::Values(v) => v.first().and_then(|s| match s {
+                        Scalar::Num(_, v) => Some(*v),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+            })
+            .transpose()
+            .map(Option::flatten)
+    };
+    let count = scalar(b"KeyCount")?.ok_or("animation: missing legacy key count")?;
+    if !count.is_finite() || count < 0.0 || count.fract() != 0.0 || count > max_keys as f64 {
+        return Err(Error::LimitExceeded(crate::Limit::AnimationKeys));
+    }
+    let count = usize::try_from(crate::numeric::saturating_i64(count))
+        .map_err(|_| Error::LimitExceeded(crate::Limit::AnimationKeys))?;
+    budget.charge(count, std::mem::size_of::<Keyframe>())?;
+    let version = scalar(b"KeyVer")?
+        .filter(|&v| v > 0.0)
+        .unwrap_or(if doc.version < 6000 { 4004.0 } else { 4005.0 });
+    let c = child(n, b"Key").ok_or("animation: missing legacy keys")?;
+    let data = match node_data(doc, c, ascii, budget)? {
+        NodeData::Reals(v) => v,
+        _ => return Err("animation: invalid legacy keys".into()),
+    };
+    if data.len() > limit / 8 {
+        return Err(Error::LimitExceeded(crate::Limit::Allocation));
+    }
+    budget.work(data.len())?;
+    let mut at = 0usize;
+    let next = |at: &mut usize| -> Result<f64, Error> {
+        let v = *data.get(*at).ok_or("animation: truncated legacy key")?;
+        *at = at.checked_add(1).ok_or("animation: legacy key overflow")?;
+        if !v.is_finite() {
+            return Err("animation: nonfinite legacy key".into());
+        }
+        Ok(v)
+    };
+    let mut keys: Vec<Keyframe> = Vec::new();
+    let (mut sl, mut wl) = (0.0f32, 0.333333f32);
+    let mut prev = 0.0;
+    for k in 0..count {
+        let tick = next(&mut at)?;
+        let time = tick / KTIME;
+        let value = next(&mut at)?;
+        if k > 0 && time < prev {
+            return Err("animation: unsorted legacy keys".into());
+        }
+        let mode = next(&mut at)?;
+        let (mut sr, mut wr, mut nsl, mut nwl) = (0.0f32, 0.333333f32, 0.0f32, 0.333333f32);
+        let mut auto = false;
+        let interpolation = if mode == f64::from(b'U') {
+            let slope = next(&mut at)?;
+            let mut weights = 1;
+            if slope == f64::from(b's') || slope == f64::from(b'b') {
+                sr = crate::numeric::round_f32(next(&mut at)?);
+                nsl = crate::numeric::round_f32(next(&mut at)?);
+                if version == 4003.0 {
+                    weights = 0;
+                }
+            } else if slope == f64::from(b'a') {
+                auto = true;
+                if version <= 4004.0 {
+                    weights = 0;
+                }
+            } else if slope == f64::from(b'p') || slope == f64::from(b'q') {
+                auto = true;
+                next(&mut at)?;
+                next(&mut at)?;
+                weights = if version <= 4004.0 { 1 } else { 2 };
+            } else if slope == f64::from(b't') {
+                auto = true;
+                next(&mut at)?;
+                next(&mut at)?;
+                next(&mut at)?;
+                weights = 0;
+            } else if slope == f64::from(b'd') {
+                auto = true;
+                next(&mut at)?;
+            } else {
+                return Err("animation: unknown legacy slope mode".into());
+            }
+            for _ in 0..weights {
+                match next(&mut at)? {
+                    v if v == f64::from(b'n') || v == f64::from(b'c') => {}
+                    v if v == f64::from(b'a') => {
+                        wr = crate::numeric::round_f32(next(&mut at)?);
+                        nwl = crate::numeric::round_f32(next(&mut at)?);
+                    }
+                    v if v == f64::from(b'l') => {
+                        nwl = crate::numeric::round_f32(next(&mut at)?);
+                    }
+                    v if v == f64::from(b'r') => {
+                        wr = crate::numeric::round_f32(next(&mut at)?);
+                    }
+                    _ => return Err("animation: unknown legacy weight mode".into()),
+                }
+            }
+            Interpolation::Cubic
+        } else if mode == f64::from(b'L') {
+            Interpolation::Linear
+        } else if mode == f64::from(b'C') {
+            if version >= 4004.0 && next(&mut at)? == f64::from(b'n') {
+                Interpolation::ConstantNext
+            } else {
+                Interpolation::ConstantPrevious
+            }
+        } else {
+            return Err("animation: unknown legacy key mode".into());
+        };
+        let (nt, nv) = if k + 1 < count {
+            (
+                *data.get(at).ok_or("animation: missing next key")? / KTIME,
+                *data.get(at + 1).ok_or("animation: missing next value")?,
+            )
+        } else {
+            (time, value)
+        };
+        if auto {
+            sl = if k > 0 {
+                auto_tangent(
+                    [prev, time, nt],
+                    [keys[k - 1].value, value, nv],
+                    [wl, wr],
+                    0.0,
+                    0x6000,
+                )
+            } else {
+                0.0
+            };
+            sr = sl;
+        }
+        if interpolation == Interpolation::Linear {
+            sr = if nt > time {
+                crate::numeric::round_f32((nv - value) / (nt - time))
+            } else {
+                0.0
+            };
+            nsl = sr;
+        }
+        let ld = if time > prev {
+            crate::numeric::round_f32(f64::from(wl) * (time - prev))
+        } else {
+            0.0
+        };
+        let rd = if nt > time {
+            crate::numeric::round_f32(f64::from(wr) * (nt - time))
+        } else {
+            0.0
+        };
+        if ![ld, rd, sl, sr, ld * sl, rd * sr]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err("animation: nonfinite legacy tangent".into());
+        }
+        budget.push(
+            &mut keys,
+            Keyframe {
+                ticks: crate::numeric::saturating_i64(tick),
+                time,
+                value,
+                interpolation,
+                left: Tangent::new(ld, if time > prev { ld * sl } else { 0.0 }),
+                right: Tangent::new(rd, if nt > time { rd * sr } else { 0.0 }),
+            },
+        )?;
+        sl = nsl;
+        wl = nwl;
+        prev = time;
+    }
+    if at != data.len() {
+        return Err("animation: trailing legacy key data".into());
+    }
+    Ok(keys)
+}
+
 fn property(
     p: &scene_property::AuthoredProperty<'_>,
     a: &crate::api_alloc::Budget,
@@ -459,6 +684,16 @@ fn preflight_curves(
         }
         let n = e.node.ok_or("animation: curve source")?;
         budget.work(children[n].len())?;
+        if doc.version < 7000 {
+            for &c in &children[n] {
+                if doc.nodes[c].name == b"Key" {
+                    let count = crate::canon_dom::data_len(doc, c)?;
+                    budget.work(count)?;
+                    budget.charge(count, 16)?;
+                }
+            }
+            continue;
+        }
         let mut arrays = [None; 5];
         for &c in &children[n] {
             let slot = match doc.nodes[c].name {
@@ -603,6 +838,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 &scn.doc,
                 &scn.props,
                 n,
+                e.ty,
                 owner_for[i].is_some(),
                 helper_for[i].is_some(),
                 limits,
@@ -695,6 +931,12 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 .or_else(|| get(plain))
                 .map_or(0.0, |p| p.components[0]);
         }
+        if scn.doc.version < 7000 {
+            if let Some(n) = e.node {
+                v.default_value =
+                    crate::legacy::defaults(&scn.doc, &scn.props, n, scn.ascii, alloc)?;
+            }
+        }
         r.budget.sort_work(e.dst_conns.len())?;
         let mut conns = alloc.collect(e.dst_conns.iter())?;
         alloc.stable_sort(&mut conns, |a, b| a.1.cmp(&b.1))?;
@@ -743,6 +985,9 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                         ..EvaluatedProperty::default()
                     },
                 };
+                if scn.doc.version < 6000 && defaults[*dst].get(name).is_none() {
+                    p.components[..3].copy_from_slice(&v.default_value);
+                }
                 p.flags |= 0x1001;
                 p.value_str.clear();
                 p.value_blob.clear();
@@ -865,7 +1110,11 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     let mut node_element = alloc.filled(scn.doc.nodes.len(), None)?;
     for (i, e) in scn.elements.iter().enumerate() {
         if let Some(n) = e.node {
-            node_element[n].get_or_insert(i);
+            if scn.doc.version < 7000 && e.ty == T::Mesh {
+                node_element[n] = Some(i);
+            } else {
+                node_element[n].get_or_insert(i);
+            }
         }
     }
     let mut node_slot = alloc.filled(scn.elements.len(), None)?;
@@ -1105,6 +1354,10 @@ pub(crate) fn scale_helpers(
                     limits.max_allocation,
                 )
                 .map_err(crate::api::property_error)?;
+                if doc.version < 7000 {
+                    constant[i] = crate::legacy::defaults(doc, props, node, ascii, &budget)?;
+                    continue;
+                }
                 for (c, (plain, prefixed)) in [
                     (b"X".as_slice(), b"d|X".as_slice()),
                     (b"Y", b"d|Y"),
@@ -1127,6 +1380,27 @@ pub(crate) fn scale_helpers(
             continue;
         }
         let node = e.node.ok_or("animation: curve source")?;
+        if doc.version < 7000 {
+            let keys = legacy_keys(
+                doc,
+                ascii,
+                &dom_children,
+                &budget,
+                node,
+                limits.max_allocation,
+                limits.max_keys,
+            )?;
+            ranges[i] = Some(
+                keys.iter()
+                    .fold(None::<(f64, f64)>, |acc, k| {
+                        Some(acc.map_or((k.value, k.value), |(lo, hi)| {
+                            (lo.min(k.value), hi.max(k.value))
+                        }))
+                    })
+                    .unwrap_or((0.0, 0.0)),
+            );
+            continue;
+        }
         let value_node = dom_children[node]
             .iter()
             .copied()
@@ -1278,6 +1552,7 @@ pub(crate) fn node_layers<'a>(
     doc: &'a crate::syntax::Document<'a>,
     props: &scene_property::PropertyIndex,
     n: usize,
+    ty: T,
     helper: bool,
     owner: bool,
     limits: &DumpLimits,
@@ -1285,6 +1560,14 @@ pub(crate) fn node_layers<'a>(
     let mut l =
         scene_property::layers_indexed(doc, props, n, limits.max_properties, limits.max_allocation)
             .map_err(crate::api::property_error)?;
+    if doc.version < 7000 && doc.nodes[n].name == b"Model" {
+        l.authored.retain(|p| {
+            (crate::legacy::node_property(p.name) || p.flags & 0x2 != 0) == (ty == T::Node)
+        });
+    }
+    if doc.version < 7000 && ty == T::AnimLayer {
+        l.authored.clear();
+    }
     let moved = |name: &[u8]| {
         matches!(
             name,
