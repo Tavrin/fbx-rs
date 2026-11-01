@@ -160,6 +160,9 @@ pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a
         }
     }
     let is_child = |i: usize, name: &[u8]| {
+        if doc.version < 6000 && name == b"Objects" {
+            return doc.nodes[i].parent.is_none() && doc.nodes[i].name == b"Model";
+        }
         doc.nodes[i]
             .parent
             .and_then(|p| doc.nodes.get(p))
@@ -168,8 +171,9 @@ pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a
     let object_count = (0..doc.nodes.len())
         .filter(|&i| is_child(i, b"Objects"))
         .count();
+    let legacy = doc.version < 7000;
     let connection_count = (0..doc.nodes.len())
-        .filter(|&i| is_child(i, b"Connections") && doc.nodes[i].name == b"C")
+        .filter(|&i| is_child(i, b"Connections") && matches!(doc.nodes[i].name, b"C" | b"Connect"))
         .count();
     if object_count > limits.max_objects {
         return Err(Error::LimitExceeded("objects"));
@@ -214,11 +218,18 @@ pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a
             continue;
         }
         let p = props(doc, i)?;
-        let object_id = p
-            .first()
-            .and_then(id)
-            .filter(|&v| v != 0)
-            .ok_or(Error::InvalidObject { node: i })?;
+        if legacy
+            && (doc.nodes[i].name == b"GlobalSettings" || (p.len() < 2 && doc.version >= 6000))
+        {
+            continue;
+        }
+        let object_id = if legacy {
+            i64::try_from(i).ok().and_then(|v| v.checked_add(1))
+        } else {
+            p.first().and_then(id)
+        }
+        .filter(|&v| v != 0)
+        .ok_or(Error::InvalidObject { node: i })?;
         let index = objects.len();
         objects.push(Object {
             id: object_id,
@@ -226,7 +237,12 @@ pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a
             parent: None,
         });
         lookup.push((object_id, index));
-        let kind = match (doc.nodes[i].name, p.get(2).and_then(bytes).map(fbx_subtype)) {
+        let kind = match (
+            doc.nodes[i].name,
+            p.get(if legacy { 1 } else { 2 })
+                .and_then(bytes)
+                .map(fbx_subtype),
+        ) {
             (b"Deformer", Some(b"Skin")) => Some(UnsupportedKind::Skin),
             (b"Deformer", Some(b"Cluster")) => Some(UnsupportedKind::SkinCluster),
             (b"Deformer", Some(b"BlendShape")) => Some(UnsupportedKind::BlendShape),
@@ -282,16 +298,45 @@ pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a
             .map(|i| lookup[i].1)
             .map_err(|_| Error::MissingId(v))
     };
-    colors.resize(object_count, 0);
+    // Sorted borrowed names bound lookup work and avoid copying source strings.
+    let mut names = Vec::new();
+    if legacy {
+        reserve(&mut names, objects.len(), &mut used, limits.max_allocation)?;
+        for o in &objects {
+            if let Some(name) = props(doc, o.node)?.first().and_then(bytes) {
+                names.push((name, o.id));
+            }
+        }
+        names.sort_unstable();
+    }
+    let legacy_id = |p: Option<&Property<'_>>| -> Result<i64, Error> {
+        let name = p.and_then(bytes).ok_or(Error::InvalidDom)?;
+        if matches!(name, b"Model::Scene" | b"Scene\x00\x01Model") {
+            return Ok(0);
+        }
+        let i = names
+            .binary_search_by(|v| v.0.cmp(name))
+            .map_err(|_| Error::InvalidDom)?;
+        Ok(names[i].1)
+    };
+    colors.resize(objects.len(), 0);
     for i in 0..doc.nodes.len() {
-        if !is_child(i, b"Connections") || doc.nodes[i].name != b"C" {
+        if !is_child(i, b"Connections") || !matches!(doc.nodes[i].name, b"C" | b"Connect") {
             continue;
         }
         let p = props(doc, i)?;
         let invalid = || Error::InvalidConnection { node: i };
         let tag = p.first().and_then(bytes).ok_or_else(invalid)?;
-        let source_id = p.get(1).and_then(id).ok_or_else(invalid)?;
-        let dest_id = p.get(2).and_then(id).ok_or_else(invalid)?;
+        let source_id = if legacy {
+            legacy_id(p.get(1))?
+        } else {
+            p.get(1).and_then(id).ok_or_else(invalid)?
+        };
+        let dest_id = if legacy {
+            legacy_id(p.get(2))?
+        } else {
+            p.get(2).and_then(id).ok_or_else(invalid)?
+        };
         let kind = match tag {
             b"OO" => ConnectionKind::Object,
             b"OP" => ConnectionKind::Property(p.get(3).and_then(bytes).ok_or_else(invalid)?),
@@ -321,7 +366,7 @@ pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a
         });
     }
     colors.fill(0);
-    for start in 0..object_count {
+    for start in 0..objects.len() {
         let mut at = Some(start);
         while let Some(i) = at {
             if colors[i] == 2 {

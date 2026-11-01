@@ -95,12 +95,24 @@ pub fn layers_indexed<'a>(
     max_properties: usize,
     max_allocation: usize,
 ) -> Result<PropertyLayers<'a>, Error> {
+    if doc.version < 7000
+        && doc
+            .nodes
+            .get(owner)
+            .is_some_and(|n| matches!(n.name, b"Take" | b"Channel"))
+    {
+        return crate::legacy::layers(doc, index, owner, max_properties, max_allocation);
+    }
     let node = doc.nodes.get(owner).ok_or(Error::InvalidDom)?;
     let p = doc
         .properties
         .get(node.properties.clone())
         .ok_or(Error::InvalidDom)?;
-    let subtype = p.get(2).and_then(string).ok_or(Error::InvalidDom)?;
+    let subtype = if doc.version < 7000 {
+        p.get(1).and_then(string).unwrap_or(b"")
+    } else {
+        p.get(2).and_then(string).ok_or(Error::InvalidDom)?
+    };
     let template = template_owner_indexed(doc, index, node.name, subtype)?;
     let direct = authored_indexed(doc, index, owner, max_properties, max_allocation)?;
     let used = direct
@@ -203,7 +215,7 @@ impl PropertyIndex {
         })
     }
     /// The children of node `p` in document order.
-    fn children(&self, p: usize) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn children(&self, p: usize) -> impl Iterator<Item = usize> + '_ {
         let range = match (self.child_start.get(p), p.checked_add(1)) {
             (Some(&a), Some(next)) => self.child_start.get(next).map(|&b| a as usize..b as usize),
             _ => None,

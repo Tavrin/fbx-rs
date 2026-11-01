@@ -1,0 +1,39 @@
+; FBX 6.1.0 project file
+FBXHeaderExtension: { FBXVersion: 6100 }
+Objects: {
+ Model: "Model::Triangle", "Mesh" {
+  Properties60: { Property: "Target", "Number", "A", 50 }
+  Vertices: 0,0,0,1,0,0,0,1,0
+  PolygonVertexIndex: 0,1,-3
+  Shape: "Target" {
+   Indexes: 0
+   Vertices: 0,0,1
+   Normals: 0,0,1
+  }
+ }
+ Model: "Model::Joint", "LimbNode" { }
+ Deformer: "Deformer::Skin", "Skin" { Version: 101 }
+ Deformer: "SubDeformer::Cluster", "Cluster" {
+  Version: 100
+  Indexes: 0,1,2
+  Weights: 1,1,1
+  Transform: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+  TransformLink: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+ }
+ Pose: "Pose::Bind", "BindPose" {
+  Type: "BindPose"
+  Version: 100
+  NbPoseNodes: 1
+  PoseNode: {
+   Node: "Model::Joint"
+   Matrix: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+  }
+ }
+}
+Connections: {
+ Connect: "OO", "Model::Triangle", "Model::Scene"
+ Connect: "OO", "Model::Joint", "Model::Scene"
+ Connect: "OO", "Model::Joint", "SubDeformer::Cluster"
+ Connect: "OO", "SubDeformer::Cluster", "Deformer::Skin"
+ Connect: "OO", "Deformer::Skin", "Model::Triangle"
+}

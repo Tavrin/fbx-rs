@@ -1,16 +1,17 @@
 # fbx-rs
 
-A pure-Rust loader for FBX files. It reads binary and ASCII FBX 7.x files
+A pure-Rust loader for FBX files. It reads binary and ASCII FBX 5.8/6.x and 7.1–7.7 files
 into an owned scene: nodes, meshes, materials, textures, cameras and
-lights, skins, blend shapes and animation. On the verification corpus, all 316
-supported files match [ufbx](https://github.com/ufbx/ufbx) 0.23.1 with the same
-import options: every value bit for bit (matched by object identity, with the
-differences in [docs/VERIFICATION.md](docs/VERIFICATION.md) explained), and the
-order of every list identical.
+lights, skins, blend shapes and animation. Qualification covers all 340 corpus
+files and seven legacy fixtures against [ufbx](https://github.com/ufbx/ufbx)
+0.23.1 with the same import options: values match bit for bit apart from the
+proved differences in [docs/VERIFICATION.md](docs/VERIFICATION.md), and every
+list has identical order. All 24 legacy corpus files pass, including the 5.8
+and big-endian inputs; see [the construction rules](docs/LEGACY.md).
 
 ## What it does
 
-- Reads binary and ASCII FBX, file versions 7100 to 7700 (FBX 7.1 to 7.7).
+- Reads binary and ASCII FBX 5.8/6.x and 7.1 to 7.7, with both binary byte orders.
 - Converts the static scene: the node hierarchy with local and world
   transforms; meshes with positions, normals, every UV set (with tangents and
   bitangents), color sets, faces, per-face materials and a triangulated index
@@ -35,7 +36,7 @@ order of every list identical.
 - NURBS geometry, caches, constraints and audio are listed in
   `Scene::unsupported()`. Mesh positions remain undeformed; the API exposes the stored skin and blend
   data for callers to apply.
-- FBX 6.1 and older files are rejected with an error.
+- Files older than FBX 5.8 and FBX 7.0 are rejected with an error.
 - Other target axes or units are not implemented yet; asking for them
   returns `Error::UnsupportedOptions`.
 - It does not write FBX, decode images or load external files: texture paths
@@ -108,16 +109,17 @@ for untrusted input. The lower-level
 
 ## Status and limits
 
-Version 0.1.1 covers static scenes, stored deformers and animation evaluation.
+The loader covers static scenes, stored deformers and animation evaluation.
 On a corpus of 340 FBX files (see [docs/VERIFICATION.md](docs/VERIFICATION.md)),
-all 316 supported files match ufbx 0.23.1 bit for bit by object identity,
-including authored curves and evaluated samples, and the order of nodes,
-materials, meshes, textures, cameras, lights, bones, deformers, poses and
-animation lists is identical. Baked animation matches ufbx on the 8 animated
-corpus files and 4 generated fixtures under four option sets, with node and
-property order compared. Deliberate differences for malformed inputs and
-Blender weight order are described in that verification report.
-The 24 remaining files are FBX 6.1 or older and are rejected. Camera and light
+all 340 match ufbx 0.23.1 under the documented comparison rules, including the
+24 FBX 5.8/6.x inputs, authored curves and evaluated samples. The order of
+nodes, materials, meshes, textures, cameras, lights, bones, deformers, poses and
+animation lists is identical. Seven additional legacy fixtures also pass.
+Baked animation matches ufbx on the 8 animated modern corpus files and 4
+generated fixtures under four option sets, with node and property order
+compared: 48 of 48 streams. Deliberate differences for retained DOM arrays,
+reported source axes, malformed inputs and Blender weight order are described
+in that verification report. Camera and light
 modes that the corpus does not contain are ported but not exercised. The parser
 and loader are fuzzed with libFuzzer; the latest animation changes have regression
 tests and differential checks, without a new fuzz campaign.

@@ -14,10 +14,11 @@
 //! from `ufbxi_update_scene`.
 //!
 //! Not ported (no corpus input reaches them; each is reported on stderr and
-//! leaves the affected record as far as computed): shader elements
-//! (`Implementation`/`BindingTable`), shader textures
-//! (`ufbxi_finalize_shader_texture`), PBR mapping tables requiring shader elements
-//! (Arnold, OSL, ShaderFX), Blender-specific Phong mapping, and the 6x00-style `LayerElement*Texture` patch.
+//! leaves the affected record as far as computed): shader textures
+//! (OSL/select-output branches of `ufbxi_finalize_shader_texture`), ShaderFX
+//! mapping tables and Blender-specific Phong mapping. Legacy
+//! `LayerElement*Texture` bindings are patched into the material projection
+//! inputs by `legacy::material_textures`.
 use crate::canon::{s, Obj, V};
 use crate::canon_dom::{node_content, node_data, node_string, NodeData};
 use crate::canon_scene::ElementType;
@@ -464,7 +465,150 @@ const OPENPBR_MAPPING: &[Mapping] = &[
 /// `ufbxi_openpbr_material_features` (ufbx 0.23.1).
 const OPENPBR_FEATURES: &[Mapping] = &[("thin_walled", 0, N, "geometry_thin_walled")];
 
+/// ufbx 0.23.1 `ufbxi_osl_standard_shader_pbr_mapping`, ufbx.c:19521-19626.
+const OSL_MAPPING: &[Mapping] = &[
+    ("base_factor", 0, N, "base"),
+    ("base_color", DEFAULT_W_1, N, "base_color"),
+    ("roughness", 0, N, "specular_roughness"),
+    ("diffuse_roughness", 0, N, "diffuse_roughness"),
+    ("metalness", 0, N, "metalness"),
+    ("specular_factor", 0, N, "specular"),
+    ("specular_color", DEFAULT_W_1, N, "specular_color"),
+    ("specular_ior", 0, N, "specular_IOR"),
+    ("specular_anisotropy", 0, N, "specular_anisotropy"),
+    ("specular_rotation", 0, N, "specular_rotation"),
+    ("transmission_factor", 0, N, "transmission"),
+    ("transmission_color", DEFAULT_W_1, N, "transmission_color"),
+    ("transmission_depth", 0, N, "transmission_depth"),
+    (
+        "transmission_scatter",
+        WIDEN_TO_RGB,
+        N,
+        "transmission_scatter",
+    ),
+    (
+        "transmission_scatter_anisotropy",
+        0,
+        N,
+        "transmission_scatter_anisotropy",
+    ),
+    ("transmission_dispersion", 0, N, "transmission_dispersion"),
+    (
+        "transmission_extra_roughness",
+        0,
+        N,
+        "transmission_extra_roughness",
+    ),
+    ("subsurface_factor", 0, N, "subsurface"),
+    ("subsurface_color", DEFAULT_W_1, N, "subsurface_color"),
+    ("subsurface_radius", WIDEN_TO_RGB, N, "subsurface_radius"),
+    ("subsurface_scale", 0, N, "subsurface_scale"),
+    ("subsurface_anisotropy", 0, N, "subsurface_anisotropy"),
+    ("sheen_factor", 0, N, "sheen"),
+    ("sheen_color", DEFAULT_W_1, N, "sheen_color"),
+    ("sheen_roughness", 0, N, "sheen_roughness"),
+    ("coat_factor", 0, N, "coat"),
+    ("coat_color", DEFAULT_W_1, N, "coat_color"),
+    ("coat_roughness", 0, N, "coat_roughness"),
+    ("coat_ior", 0, N, "coat_IOR"),
+    ("coat_anisotropy", 0, N, "coat_anisotropy"),
+    ("coat_rotation", 0, N, "coat_rotation"),
+    ("coat_normal", 0, N, "coat_normal"),
+    (
+        "coat_affect_base_color",
+        DEFAULT_W_1,
+        N,
+        "coat_affect_color",
+    ),
+    ("coat_affect_base_roughness", 0, N, "coat_affect_roughness"),
+    ("thin_film_thickness", 0, N, "thin_film_thickness"),
+    ("thin_film_ior", 0, N, "thin_film_IOR"),
+    ("emission_factor", 0, N, "emission"),
+    ("emission_color", DEFAULT_W_1, N, "emission_color"),
+    ("opacity", WIDEN_TO_RGB, N, "opacity"),
+    ("normal_map", 0, N, "NormalMap"),
+    ("normal_map", 0, N, "normalCamera"),
+    ("tangent_map", 0, N, "tangent"),
+];
+/// ufbx 0.23.1 `ufbxi_osl_standard_shader_features`, ufbx.c:19521-19626.
+const OSL_FEATURES: &[Mapping] = &[("thin_walled", 0, N, "thin_walled")];
+/// ufbx 0.23.1 `ufbxi_arnold_shader_pbr_mapping`, ufbx.c:19521-19626.
+const ARNOLD_MAPPING: &[Mapping] = &[
+    ("base_factor", 0, N, "base"),
+    ("base_color", DEFAULT_W_1, N, "baseColor"),
+    ("roughness", 0, N, "specularRoughness"),
+    ("diffuse_roughness", 0, N, "diffuseRoughness"),
+    ("metalness", 0, N, "metalness"),
+    ("specular_factor", 0, N, "specular"),
+    ("specular_color", DEFAULT_W_1, N, "specularColor"),
+    ("specular_ior", 0, N, "specularIOR"),
+    ("specular_anisotropy", 0, N, "specularAnisotropy"),
+    ("specular_rotation", 0, N, "specularRotation"),
+    ("transmission_factor", 0, N, "transmission"),
+    ("transmission_color", DEFAULT_W_1, N, "transmissionColor"),
+    ("transmission_depth", 0, N, "transmissionDepth"),
+    (
+        "transmission_scatter",
+        WIDEN_TO_RGB,
+        N,
+        "transmissionScatter",
+    ),
+    (
+        "transmission_scatter_anisotropy",
+        0,
+        N,
+        "transmissionScatterAnisotropy",
+    ),
+    ("transmission_dispersion", 0, N, "transmissionDispersion"),
+    (
+        "transmission_extra_roughness",
+        0,
+        N,
+        "transmissionExtraRoughness",
+    ),
+    ("subsurface_factor", 0, N, "subsurface"),
+    ("subsurface_color", DEFAULT_W_1, N, "subsurfaceColor"),
+    ("subsurface_radius", WIDEN_TO_RGB, N, "subsurfaceRadius"),
+    ("subsurface_scale", 0, N, "subsurfaceScale"),
+    ("subsurface_anisotropy", 0, N, "subsurfaceAnisotropy"),
+    ("sheen_factor", 0, N, "sheen"),
+    ("sheen_color", DEFAULT_W_1, N, "sheenColor"),
+    ("sheen_roughness", 0, N, "sheenRoughness"),
+    ("coat_factor", 0, N, "coat"),
+    ("coat_color", DEFAULT_W_1, N, "coatColor"),
+    ("coat_roughness", 0, N, "coatRoughness"),
+    ("coat_ior", 0, N, "coatIOR"),
+    ("coat_anisotropy", 0, N, "coatAnisotropy"),
+    ("coat_rotation", 0, N, "coatRotation"),
+    ("coat_normal", 0, N, "coatNormal"),
+    ("thin_film_thickness", 0, N, "thinFilmThickness"),
+    ("thin_film_ior", 0, N, "thinFilmIOR"),
+    ("emission_factor", 0, N, "emission"),
+    ("emission_color", DEFAULT_W_1, N, "emissionColor"),
+    ("opacity", WIDEN_TO_RGB, N, "opacity"),
+    ("indirect_diffuse", 0, N, "indirectDiffuse"),
+    ("indirect_specular", 0, N, "indirectSpecular"),
+    ("normal_map", 0, N, "NormalMap"),
+    ("normal_map", 0, N, "normalCamera"),
+    ("tangent_map", 0, N, "tangent"),
+    ("matte_color", DEFAULT_W_1, N, "aiMatteColor"),
+    ("matte_factor", 0, N, "aiMatteColorA"),
+    ("subsurface_type", 0, N, "subsurfaceType"),
+    ("transmission_priority", 0, N, "dielectricPriority"),
+    ("transmission_enable_in_aov", 0, N, "transmitAovs"),
+];
+/// ufbx 0.23.1 `ufbxi_arnold_shader_features`, ufbx.c:19521-19626.
+const ARNOLD_FEATURES: &[Mapping] = &[
+    ("matte", 0, N, "aiEnableMatte"),
+    ("thin_walled", 0, N, "thinWalled"),
+    ("caustics", 0, N, "caustics"),
+    ("internal_reflections", 0, N, "internalReflections"),
+    ("exit_to_background", 0, N, "exitToBackground"),
+];
+
 /// `ufbx_shader_type` values used here.
+const SHADER_OSL: i64 = 3;
+const SHADER_ARNOLD: i64 = 4;
 const SHADER_UNKNOWN: i64 = 0;
 const SHADER_FBX_LAMBERT: i64 = 1;
 const SHADER_FBX_PHONG: i64 = 2;
@@ -493,6 +637,30 @@ fn pbr_mapping(shader_type: i64) -> Option<ShaderMapping> {
         enabled_suffix: b"",
     };
     match shader_type {
+        SHADER_OSL | SHADER_ARNOLD => {
+            m.maps = if shader_type == SHADER_OSL {
+                OSL_MAPPING
+            } else {
+                ARNOLD_MAPPING
+            };
+            m.features = if shader_type == SHADER_OSL {
+                OSL_FEATURES
+            } else {
+                ARNOLD_FEATURES
+            };
+            m.defaults = &[
+                "pbr",
+                "metalness",
+                "diffuse",
+                "specular",
+                "coat",
+                "sheen",
+                "transmission",
+                "opacity",
+                "ior",
+                "diffuse_roughness",
+            ];
+        }
         SHADER_UNKNOWN | SHADER_FBX_PHONG => {
             m.maps = PHONG_PBR_MAPPING;
             m.defaults = &["diffuse", "specular", "emission", "transmission"];
@@ -660,6 +828,7 @@ pub struct Env<'a, 'd> {
 /// typed results instead in a lean projection.
 pub struct Output {
     pub records: Vec<(usize, Obj)>,
+    pub(crate) num_shader_textures: u64,
     pub texture_files: Vec<V>,
     /// Typed materials by element index (lean projection only).
     pub(crate) materials: Vec<(usize, LeanMaterial)>,
@@ -901,12 +1070,70 @@ enum Fetch {
     Textures,
     TextureEnabled,
 }
+fn implementation_type(props: &PropertyLayers<'_>) -> i64 {
+    match find(props, b"RenderAPI").map(|p| p.value_str) {
+        Some(b"ARNOLD_SHADER_ID") => SHADER_ARNOLD,
+        Some(b"OSL") => SHADER_OSL,
+        Some(b"SFX_PBS_SHADER") => 10,
+        _ => SHADER_UNKNOWN,
+    }
+}
+fn read_bindings(env: &Env<'_, '_>, node: usize, a: &Budget) -> Result<BindingTable, Error> {
+    let mut entries = Vec::new();
+    for &child in &env.children[node] {
+        if env.doc.nodes[child].name != b"Entry" {
+            continue;
+        }
+        let NodeData::Values(values) = node_data(env.doc, child, env.ascii, a)? else {
+            continue;
+        };
+        use crate::canon_dom::Scalar;
+        let [Scalar::Str(src), Scalar::Str(st), Scalar::Str(dst), Scalar::Str(dt), ..] =
+            values.as_slice()
+        else {
+            continue;
+        };
+        let pair = if st == b"FbxPropertyEntry" && dt == b"FbxSemanticEntry" {
+            Some((a.bytes(dst)?, a.bytes(src)?))
+        } else if st == b"FbxSemanticEntry" && dt == b"FbxPropertyEntry" {
+            Some((a.bytes(src)?, a.bytes(dst)?))
+        } else {
+            None
+        };
+        if let Some(pair) = pair {
+            a.push(&mut entries, pair)?;
+        }
+    }
+    a.stable_sort(&mut entries, |a, b| a.0.cmp(&b.0))?;
+    Ok(entries)
+}
+
+type PropBinding = (Vec<u8>, Vec<u8>);
+type BindingTable = Vec<PropBinding>;
+type Bindings = Vec<BindingTable>;
+// First table containing the semantic wins; duplicates retain their stable order.
+fn bound_names<'a>(bindings: &'a [BindingTable], name: &'a [u8]) -> impl Iterator<Item = &'a [u8]> {
+    let table = bindings
+        .iter()
+        .find(|t| t.iter().any(|(shader, _)| shader == name));
+    let identity = if table.is_none() { Some(name) } else { None };
+    table
+        .into_iter()
+        .flat_map(move |t| {
+            t.iter()
+                .filter(move |(shader, _)| shader == name)
+                .map(|(_, material)| material.as_slice())
+        })
+        .chain(identity)
+}
 struct MappingSource<'a> {
+    bindings: &'a [BindingTable],
     prefix: &'a [u8],
     suffix: &'a [u8],
     fetch: Fetch,
 }
-/// `ufbxi_fetch_mapping_maps` without shader-element bindings (identity binding).
+/// `ufbxi_fetch_mapping_maps`, ufbx.c:19968-20129; semantic bindings
+/// fall back to identity only when no table contains that semantic.
 fn fetch_mapping_maps(
     props: &PropertyLayers<'_>,
     textures: &[MaterialTexture],
@@ -919,55 +1146,57 @@ fn fetch_mapping_maps(
         let map = &mut maps[index(target)];
         let mut scratch = [0; 512];
         let name = mapping_name(&mut scratch, source.prefix, name, source.suffix);
-        let prop = find(props, name);
-        if let Some(p) = prop.filter(|p| {
-            p.kind != Type::Reference && matches!(source.fetch, Fetch::ValuesAndTextures)
-        }) {
-            if flags & MULTIPLY_VALUE != 0 {
-                map.value[0] *= p.value_real[0];
-                map.int = crate::canon_dom::f64_to_i64(map.value[0]);
-            } else {
-                map.value = p.value_real;
-                map.int = p.value_int;
-            }
-            map.has_value = true;
-            if transform == MatTransform::UnknownShininess {
-                // ufbxi_mat_transform_unknown_shininess
-                let v = &mut map.value[0];
-                if *v >= 0.0 {
-                    *v = 1.0 - v.sqrt() * 0.1;
+        for name in bound_names(source.bindings, name) {
+            let prop = find(props, name);
+            if let Some(p) = prop.filter(|p| {
+                p.kind != Type::Reference && matches!(source.fetch, Fetch::ValuesAndTextures)
+            }) {
+                if flags & MULTIPLY_VALUE != 0 {
+                    map.value[0] *= p.value_real[0];
+                    map.int = crate::canon_dom::f64_to_i64(map.value[0]);
+                } else {
+                    map.value = p.value_real;
+                    map.int = p.value_int;
                 }
-                // `!(x >= 0)`: negative or NaN.
-                if v.is_nan() || *v < 0.0 {
-                    *v = 0.0;
+                map.has_value = true;
+                if transform == MatTransform::UnknownShininess {
+                    // ufbxi_mat_transform_unknown_shininess
+                    let v = &mut map.value[0];
+                    if *v >= 0.0 {
+                        *v = 1.0 - v.sqrt() * 0.1;
+                    }
+                    // `!(x >= 0)`: negative or NaN.
+                    if v.is_nan() || *v < 0.0 {
+                        *v = 0.0;
+                    }
                 }
+                if flags & DEFAULT_W_1 != 0 && p.flags & PROP_FLAG_VALUE_VEC4 == 0 {
+                    map.value[3] = 1.0;
+                }
+                if flags & WIDEN_TO_RGB != 0 && p.flags & PROP_FLAG_VALUE_REAL != 0 {
+                    map.value[1] = map.value[0];
+                    map.value[2] = map.value[0];
+                }
+                map.components = if p.flags & PROP_FLAG_VALUE_REAL != 0 {
+                    1
+                } else if p.flags & PROP_FLAG_VALUE_VEC2 != 0 {
+                    2
+                } else if p.flags & PROP_FLAG_VALUE_VEC3 != 0 {
+                    3
+                } else if p.flags & PROP_FLAG_VALUE_VEC4 != 0 {
+                    4
+                } else {
+                    0
+                };
             }
-            if flags & DEFAULT_W_1 != 0 && p.flags & PROP_FLAG_VALUE_VEC4 == 0 {
-                map.value[3] = 1.0;
+            if matches!(source.fetch, Fetch::TextureEnabled) {
+                if let Some(p) = prop {
+                    map.texture_enabled = p.value_int != 0;
+                }
+            } else if let Some(t) = prop_texture(textures, name) {
+                map.texture = Some(t);
+                map.texture_enabled = true;
             }
-            if flags & WIDEN_TO_RGB != 0 && p.flags & PROP_FLAG_VALUE_REAL != 0 {
-                map.value[1] = map.value[0];
-                map.value[2] = map.value[0];
-            }
-            map.components = if p.flags & PROP_FLAG_VALUE_REAL != 0 {
-                1
-            } else if p.flags & PROP_FLAG_VALUE_VEC2 != 0 {
-                2
-            } else if p.flags & PROP_FLAG_VALUE_VEC3 != 0 {
-                3
-            } else if p.flags & PROP_FLAG_VALUE_VEC4 != 0 {
-                4
-            } else {
-                0
-            };
-        }
-        if matches!(source.fetch, Fetch::TextureEnabled) {
-            if let Some(p) = prop {
-                map.texture_enabled = p.value_int != 0;
-            }
-        } else if let Some(t) = prop_texture(textures, name) {
-            map.texture = Some(t);
-            map.texture_enabled = true;
         }
     }
 }
@@ -991,6 +1220,7 @@ fn fetch_maps(
     shader_type: i64,
     props: &PropertyLayers<'_>,
     textures: &[MaterialTexture],
+    bindings: &Bindings,
     warnings: &mut Vec<String>,
     a: &Budget,
 ) -> Result<MaterialMaps, Error> {
@@ -1004,6 +1234,7 @@ fn fetch_maps(
         fbx,
         BASE_FBX_MAPPING,
         MappingSource {
+            bindings: &[],
             prefix: b"",
             suffix: b"",
             fetch: Fetch::ValuesAndTextures,
@@ -1022,6 +1253,7 @@ fn fetch_maps(
                     pbr,
                     m.maps,
                     MappingSource {
+                        bindings,
                         prefix: m.prefix,
                         suffix: m.texture_suffix,
                         fetch: Fetch::Textures,
@@ -1035,6 +1267,7 @@ fn fetch_maps(
                 pbr,
                 m.maps,
                 MappingSource {
+                    bindings,
                     prefix: m.prefix,
                     suffix: b"",
                     fetch: Fetch::ValuesAndTextures,
@@ -1048,6 +1281,7 @@ fn fetch_maps(
                     pbr,
                     m.maps,
                     MappingSource {
+                        bindings,
                         prefix: m.prefix,
                         suffix: m.enabled_suffix,
                         fetch: Fetch::TextureEnabled,
@@ -1057,15 +1291,17 @@ fn fetch_maps(
             for &(target, flags, _, name) in m.features {
                 let mut scratch = [0; 512];
                 let name = mapping_name(&mut scratch, m.prefix, name, b"");
-                if let Some(p) = find(props, name).filter(|p| p.kind != Type::Reference) {
-                    let mut enabled = p.value_int != 0;
-                    if flags & FEATURE_INVERTED != 0 {
-                        enabled = !enabled;
+                for name in bound_names(bindings, name) {
+                    if let Some(p) = find(props, name).filter(|p| p.kind != Type::Reference) {
+                        let mut enabled = p.value_int != 0;
+                        if flags & FEATURE_INVERTED != 0 {
+                            enabled = !enabled;
+                        }
+                        if flags & FEATURE_IF_AROUND_1 != 0 {
+                            enabled = (0.5..=1.5).contains(&p.value_real[0]);
+                        }
+                        features[feature(target)] = (enabled, true);
                     }
-                    if flags & FEATURE_IF_AROUND_1 != 0 {
-                        enabled = (0.5..=1.5).contains(&p.value_real[0]);
-                    }
-                    features[feature(target)] = (enabled, true);
                 }
             }
         }
@@ -1144,8 +1380,175 @@ fn maps_obj(names: &[&'static str], maps: &[Map]) -> V {
     V::Obj(o)
 }
 
+// ufbxi_shader_texture_find_prefix / ufbxi_finalize_shader_texture,
+// ufbx.c:20430-20492, 20560-20684 (unknown procedural shader branch).
+type ShaderInput<'a, 'p> = (
+    &'a AuthoredProperty<'p>,
+    Option<&'a AuthoredProperty<'p>>,
+    Option<&'a AuthoredProperty<'p>>,
+);
+fn shader_texture(
+    it: &Item<'_>,
+    env: &Env<'_, '_>,
+    a: &Budget,
+) -> Result<(Option<Obj>, Vec<usize>), Error> {
+    let props = &it.props;
+    let authored = &props.authored;
+    let mut prefix = Vec::new();
+    let named = find(props, b"3dsMax|params|OSLShaderName").map_or(&b""[..], |p| p.value_str);
+    for suffix in [
+        b" Parameters/Connections".as_slice(),
+        named,
+        b"3dsMax|parameters".as_slice(),
+    ] {
+        if suffix.is_empty() {
+            continue;
+        }
+        if let Some(p) = authored
+            .iter()
+            .find(|p| p.kind == Type::Compound && p.name.ends_with(suffix))
+        {
+            prefix = a.bytes(p.name)?;
+            if !prefix.ends_with(b"|") {
+                a.push(&mut prefix, b'|')?;
+            }
+            break;
+        }
+    }
+    if prefix.is_empty() {
+        for suffix in [
+            b" Parameters/Connections".as_slice(),
+            named,
+            b"3dsMax|parameters".as_slice(),
+        ] {
+            if suffix.is_empty() {
+                continue;
+            }
+            if let Some(name) = authored
+                .iter()
+                .filter_map(|p| {
+                    p.name
+                        .iter()
+                        .rposition(|&b| b == b'|')
+                        .map(|i| (&p.name[..i], &p.name[i + 1..]))
+                })
+                .map(|(n, _)| n)
+                .find(|n| n.ends_with(suffix))
+            {
+                prefix = a.bytes(name)?;
+                a.push(&mut prefix, b'|')?;
+                break;
+            }
+        }
+    }
+    if prefix.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+    let derived = prefix
+        .strip_suffix(b" Parameters/Connections|")
+        .map(|n| n.rsplit(|&b| b == b'|').next().unwrap_or(n));
+    let name = if !named.is_empty() {
+        named
+    } else {
+        derived
+            .unwrap_or_else(|| find(props, b"3dsMax|MaxTexture").map_or(&b""[..], |p| p.value_str))
+    };
+    let mut inputs: Vec<ShaderInput<'_, '_>> = Vec::new();
+    for p in authored.iter().filter(|p| p.name.starts_with(&prefix)) {
+        let name = &p.name[prefix.len()..];
+        let modifier = [
+            (b"_map".as_slice(), false),
+            (b".shader".as_slice(), false),
+            (b".connected".as_slice(), true),
+            (b"Enabled".as_slice(), true),
+        ]
+        .iter()
+        .find_map(|(suffix, enabled)| name.strip_suffix(*suffix).map(|base| (base, *enabled)));
+        if let Some((base, enabled)) = modifier {
+            if let Ok(i) = inputs.binary_search_by(|p| p.0.name[prefix.len()..].cmp(base)) {
+                let input = &mut inputs[i];
+                if enabled {
+                    input.2 = Some(p);
+                } else {
+                    input.1 = Some(p);
+                }
+                continue;
+            }
+        }
+        a.push(&mut inputs, (p, None, None))?;
+    }
+    let texture = |p: &AuthoredProperty<'_>| {
+        let first = it.dst.partition_point(|(_, name)| name.as_slice() < p.name);
+        it.dst[first..]
+            .iter()
+            .take_while(|(_, name)| name.as_slice() == p.name)
+            .find(|(s, _)| env.types[*s] == ElementType::Texture)
+            .map(|(s, _)| *s)
+    };
+    let mut deps = Vec::new();
+    for (p, tp, _) in &inputs {
+        if let Some(tex) = tp.and_then(texture).or_else(|| texture(p)) {
+            a.push(&mut deps, tex)?;
+        }
+    }
+    if env.lean {
+        return Ok((Some(Obj::new()), deps));
+    }
+    let records = a.try_collect(inputs.iter().map(|(p, tp, ep)| {
+        let tex = tp.and_then(texture).or_else(|| texture(p));
+        Ok(V::Obj(
+            Obj::new()
+                .with("name", s(&p.name[prefix.len()..]))
+                .with("prop", crate::canon_scene::prop_obj(p))
+                .with(
+                    "texture_prop",
+                    tp.map_or(V::Null, crate::canon_scene::prop_obj),
+                )
+                .with(
+                    "texture_enabled_prop",
+                    ep.map_or(V::Null, crate::canon_scene::prop_obj),
+                )
+                .with("value_vec4", V::Vec(p.value_real.to_vec()))
+                .with("value_int", V::I(p.value_int))
+                .with("value_str", s(p.value_str))
+                .with("value_blob", s(p.value_blob))
+                .with("texture", V::Ref(tex))
+                .with(
+                    "texture_enabled",
+                    V::Bool(ep.map_or(tex.is_some(), |p| p.value_int != 0)),
+                ),
+        ))
+    }))?;
+    let classid = u64::from(crate::numeric::low_word(find_int(
+        props,
+        b"3dsMax|ClassIDa",
+        0,
+    ))) << 32
+        | u64::from(crate::numeric::low_word(find_int(
+            props,
+            b"3dsMax|ClassIDb",
+            0,
+        )));
+    let source = find(props, b"3dsMax|params|OSLCode");
+    Ok((
+        Some(
+            Obj::new()
+                .with("type", V::I(0))
+                .with("shader_name", s(name))
+                .with("shader_type_id", V::U(classid))
+                .with("shader_source", s(source.map_or(&[], |p| p.value_str)))
+                .with("raw_shader_source", s(source.map_or(&[], |p| p.value_blob)))
+                .with("prop_prefix", s(&prefix))
+                .with("inputs", V::Obj(Obj::new().with("data", V::List(records)))),
+        ),
+        deps,
+    ))
+}
+
 /// `ufbx_texture` state during finalization.
 struct Texture {
+    shader: Option<Obj>,
+    shader_dependencies: Vec<usize>,
     item: usize,
     layered: bool,
     names: Names,
@@ -1167,6 +1570,7 @@ pub fn project(
     let budget = crate::api_alloc::Budget::new(allocation_limit);
     let mut out = Output {
         records: Vec::new(),
+        num_shader_textures: 0,
         texture_files: Vec::new(),
         materials: Vec::new(),
         textures: Vec::new(),
@@ -1178,6 +1582,17 @@ pub fn project(
         let mut v: Vec<usize> = a.collect((0..items.len()).filter(|&i| items[i].ty == ty))?;
         a.stable_sort(&mut v, |&i, &j| items[i].node.cmp(&items[j].node))?;
         Ok(v)
+    };
+    let mut item_slots = a.filled(env.types.len(), None)?;
+    for (i, item) in items.iter().enumerate() {
+        item_slots[item.element] = Some(i);
+    }
+    let item = |element: usize| -> Result<&Item<'_>, Error> {
+        item_slots
+            .get(element)
+            .and_then(|s| *s)
+            .and_then(|i| items.get(i))
+            .ok_or(Error::InvalidData("missing material shader element"))
     };
     let videos = typed(ElementType::Video)?;
     let textures = typed(ElementType::Texture)?;
@@ -1201,11 +1616,16 @@ pub fn project(
             .iter()
             .copied()
             .find(|&d| env.types[d] == ElementType::Shader);
-        if shader.is_some() {
-            a.push(
-                &mut out.warnings,
-                a.format(format_args!("{}: shader elements are not ported", key(m)?))?,
-            )?;
+        let mut bindings: Bindings = Vec::new();
+        if let Some(shader) = shader {
+            shader_type = implementation_type(&item(shader)?.props);
+            for &(table, _) in &item(shader)?.dst {
+                if env.types[table] != ElementType::ShaderBinding {
+                    continue;
+                }
+                let entries = read_bindings(env, item(table)?.node, a)?;
+                a.push(&mut bindings, entries)?;
+            }
         } else if shader_type == SHADER_UNKNOWN {
             let a = crate::numeric::low_word(find_int(&it.props, b"3dsMax|ClassIDa", 0));
             let b = crate::numeric::low_word(find_int(&it.props, b"3dsMax|ClassIDb", 0));
@@ -1245,7 +1665,14 @@ pub fn project(
         )?;
         a.push(
             &mut mats,
-            (m, shading_model, shader_type, a.bytes(prefix)?, tex),
+            (
+                m,
+                shading_model,
+                shader_type,
+                a.bytes(prefix)?,
+                tex,
+                bindings,
+            ),
         )?;
     }
 
@@ -1308,31 +1735,43 @@ pub fn project(
             .map(|k| a.bytes(&vids[k].1))
             .transpose()?
             .unwrap_or_default();
-        // ufbxi_finalize_shader_texture: only the detection is ported.
-        let classid = (u64::from(crate::numeric::low_word(find_int(
+        let classid = u64::from(crate::numeric::low_word(find_int(
             &it.props,
             b"3dsMax|ClassIDa",
             0,
-        )))) << 32
+        ))) << 32
             | u64::from(crate::numeric::low_word(find_int(
                 &it.props,
                 b"3dsMax|ClassIDb",
                 0,
             )));
         let max_texture = find(&it.props, b"3dsMax|MaxTexture").map_or(&b""[..], |p| p.value_str);
-        if max_texture == b"MULTIOUTPUT_TO_OSLMap"
-            || classid == 0x896e_f2fc_44bd_743f
-            || max_texture == b"OSLMap"
-            || classid == 0x7f9a_7b9d_6fcd_f00d
-            || (!layered
-                && names.relative.is_empty()
-                && names.absolute.is_empty()
-                && video.is_none())
-        {
+        let known_shader = matches!(max_texture, b"MULTIOUTPUT_TO_OSLMap" | b"OSLMap")
+            || matches!(classid, 0x896e_f2fc_44bd_743f | 0x7f9a_7b9d_6fcd_f00d);
+        if known_shader {
             a.push(
                 &mut out.warnings,
-                a.format(format_args!("{}: shader textures are not ported", key(t)?))?,
+                a.format(format_args!(
+                    "{}: OSL/select-output shader textures are not ported",
+                    key(t)?
+                ))?,
             )?;
+        }
+        let (shader, shader_dependencies) = if !known_shader
+            && !layered
+            && names.relative.is_empty()
+            && names.absolute.is_empty()
+            && video.is_none()
+        {
+            shader_texture(it, env, a)?
+        } else {
+            (None, Vec::new())
+        };
+        if shader.is_some() {
+            out.num_shader_textures = out
+                .num_shader_textures
+                .checked_add(1)
+                .ok_or(Error::ResourceLimit("shader textures"))?;
         }
         env.resolve(&mut names)?;
         let mut layers = Vec::new();
@@ -1366,6 +1805,8 @@ pub fn project(
         }
         // ufbxi_insert_texture_file.
         let mut tx = Texture {
+            shader,
+            shader_dependencies,
             item: t,
             layered,
             names,
@@ -1411,11 +1852,28 @@ pub fn project(
     }
 
     // Second material pass: sort textures, fetch maps.
-    for (m, shading_model, shader_type, prefix, mut tex) in mats {
+    for (m, shading_model, shader_type, prefix, mut tex, bindings) in mats {
         a.stable_sort(&mut tex, |a, b| a.material_prop.cmp(&b.material_prop))?;
         let it = &items[m];
-        let (fbx_maps, pbr_maps, features) =
-            fetch_maps(&key(m)?, shader_type, &it.props, &tex, &mut out.warnings, a)?;
+        let (fbx_maps, pbr_maps, features) = fetch_maps(
+            &key(m)?,
+            shader_type,
+            &it.props,
+            &tex,
+            &bindings,
+            &mut out.warnings,
+            a,
+        )?;
+        for table in &bindings {
+            for (shader, material) in table {
+                for t in tex.iter_mut().skip_while(|t| t.material_prop < *material) {
+                    if t.shader_prop != *material {
+                        break;
+                    }
+                    t.shader_prop = a.bytes(shader)?;
+                }
+            }
+        }
         if env.lean {
             budget.push(
                 &mut out.materials,
@@ -1481,6 +1939,15 @@ pub fn project(
             .with("pbr", maps_obj(&PBR_MAPS, &pbr_maps))
             .with("features", feature_obj)
             .with("shader_type", V::I(shader_type))
+            .with(
+                "shader",
+                V::Ref(
+                    it.src
+                        .iter()
+                        .copied()
+                        .find(|&d| env.types[d] == ElementType::Shader),
+                ),
+            )
             .with("shading_model_name", s(&shading_model))
             .with("shader_prop_prefix", s(&prefix))
             .with(
@@ -1525,8 +1992,15 @@ pub fn project(
         if states[t] == STARTED {
             states[t] = FINISHED;
             let mut deps = Vec::new();
-            if !texs[t].layered {
+            if !texs[t].layered && texs[t].shader.is_none() {
                 budget.push(&mut deps, t)?;
+            }
+            for &element in &texs[t].shader_dependencies {
+                if let Some(l) = tex_of(element) {
+                    if !texs[l].file_textures.is_empty() {
+                        budget.push(&mut deps, l)?;
+                    }
+                }
             }
             for &(l, _, _) in &texs[t].layers {
                 if !texs[l].file_textures.is_empty() {
@@ -1545,13 +2019,18 @@ pub fn project(
                 )?
             };
         } else {
-            if !texs[t].layered {
+            if !texs[t].layered && texs[t].shader.is_none() {
                 texs[t].file_textures = budget.collect([t])?;
                 states[t] = FINISHED;
                 continue;
             }
             states[t] = STARTED;
             budget.push(&mut stack, t)?;
+            for &element in &texs[t].shader_dependencies {
+                if let Some(child) = tex_of(element) {
+                    budget.push(&mut stack, child)?;
+                }
+            }
             for &(child, _, _) in &texs[t].layers {
                 budget.push(&mut stack, child)?;
             }
@@ -1595,7 +2074,17 @@ pub fn project(
     }
     for tx in &texs {
         let it = &items[tx.item];
-        let mut obj = Obj::new().with("type", V::I(i64::from(tx.layered)));
+        let mut obj = Obj::new().with(
+            "type",
+            V::I(if tx.shader.is_some() {
+                3
+            } else {
+                i64::from(tx.layered)
+            }),
+        );
+        if let Some(shader) = &tx.shader {
+            obj.set("shader", V::Obj(shader.clone()));
+        }
         tx.names.set(&mut obj);
         let uv = texture_transform(&it.props);
         let (has_uv, to_uv, to_tex) = if sn::is_transform_identity(&uv) {
@@ -1643,6 +2132,66 @@ pub fn project(
         let mut obj = Obj::new().with("content", s(content));
         names.set(&mut obj);
         out.records.push((items[v].element, obj));
+    }
+
+    if !env.lean {
+        // ufbxi_update_display_layer, ufbx.c:23393-23398.
+        for layer in typed(ElementType::DisplayLayer)? {
+            let it = &items[layer];
+            let nodes = a.collect(
+                it.dst
+                    .iter()
+                    .filter(|(s, _)| env.types[*s] == ElementType::Node)
+                    .map(|(s, _)| V::Ref(Some(*s))),
+            )?;
+            let obj = Obj::new()
+                .with("visible", V::Bool(find_int(&it.props, b"Show", 1) != 0))
+                .with("frozen", V::Bool(find_int(&it.props, b"Freeze", 1) != 0))
+                .with(
+                    "ui_color",
+                    crate::canon::v3(find_vec3(&it.props, b"Color", [f64::from(0.8f32); 3])),
+                )
+                .with("nodes", V::Obj(Obj::new().with("data", V::List(nodes))));
+            out.records.push((it.element, obj));
+        }
+    }
+    if !env.lean {
+        for shader in typed(ElementType::Shader)? {
+            let it = &items[shader];
+            let bindings = a.collect(
+                it.dst
+                    .iter()
+                    .filter(|(d, _)| env.types[*d] == ElementType::ShaderBinding)
+                    .map(|(d, _)| V::Ref(Some(*d))),
+            )?;
+            out.records.push((
+                it.element,
+                Obj::new()
+                    .with("type", V::I(implementation_type(&it.props)))
+                    .with(
+                        "bindings",
+                        V::Obj(Obj::new().with("data", V::List(bindings))),
+                    ),
+            ));
+        }
+        for table in typed(ElementType::ShaderBinding)? {
+            let it = &items[table];
+            let entries = read_bindings(env, it.node, a)?;
+            let props = a.collect(entries.iter().map(|(shader, material)| {
+                V::Obj(
+                    Obj::new()
+                        .with("shader_prop", s(shader))
+                        .with("material_prop", s(material)),
+                )
+            }))?;
+            out.records.push((
+                it.element,
+                Obj::new().with(
+                    "prop_bindings",
+                    V::Obj(Obj::new().with("data", V::List(props))),
+                ),
+            ));
+        }
     }
 
     out.texture_files = files

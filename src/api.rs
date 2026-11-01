@@ -1,8 +1,8 @@
 //! The public loading API: [`load`] converts an FBX file into an owned
 //! [`Scene`] under one import profile ([`LoadOptions`]).
 //!
-//! Every value is the one ufbx 0.23.1 produces for the same file and options
-//! (proved field by field on the static corpus, see `docs/VERIFICATION.md`).
+//! Conversion targets ufbx 0.23.1 with the same file and options.
+//! Qualified file sets and remaining differences are in `docs/VERIFICATION.md`.
 
 use crate::canon::V;
 use crate::canon_scene::{self, CanonScene, DumpLimits, ElementType};
@@ -34,7 +34,7 @@ pub enum Error {
     /// default profile is); names the first unsupported option.
     UnsupportedOptions(&'static str),
     /// The file is not a supported FBX file (bad syntax, unsupported version
-    /// such as 6.1 and older, or a limit exceeded while parsing).
+    /// such as versions older than 5.8, or a limit exceeded while parsing).
     Parse(String),
     /// The file parsed but its object graph or geometry is invalid, or a
     /// conversion limit was exceeded.
@@ -441,7 +441,7 @@ impl LoadOptions {
     }
 }
 
-/// Load an FBX file (binary or ASCII, versions 7100 to 7700) with the
+/// Load an FBX file (binary or ASCII, FBX 5.8/6.x and 7.1–7.7) with the
 /// default [`Limits`].
 ///
 /// # Errors
@@ -844,8 +844,8 @@ pub struct MaterialMap {
 /// PBR mappings cover FBX Lambert/Phong (also the unknown-shader fallback),
 /// 3ds Max Physical Material, 3ds Max PBR Metal/Rough and Spec/Gloss, glTF
 /// Material, and OpenPBR Material identified by their 3ds Max class IDs.
-/// Shader-element bindings (including Arnold, OSL and ShaderFX/Stingray)
-/// and Blender-specific Phong mapping are not implemented.
+/// Arnold and OSL standard surface maps resolve shader-element semantic bindings.
+/// ShaderFX/Stingray and Blender-specific Phong mapping are not implemented.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Material {
     pub(crate) base: ElementInfo,
@@ -1200,7 +1200,7 @@ impl SceneSettings {
     pub fn ambient_color(&self) -> [f64; 3] {
         self.ambient_color
     }
-    /// FBX version (7100 to 7700).
+    /// FBX version (5800–6999 or 7100–7700).
     pub fn version(&self) -> u32 {
         self.version
     }
@@ -1228,7 +1228,7 @@ impl SceneSettings {
 pub struct Unsupported {
     /// What kind of content.
     pub kind: UnsupportedKind,
-    /// FBX object ID (the owning geometry for legacy shapes).
+    /// FBX numeric object ID, or zero for name-based legacy objects.
     pub source_id: i64,
 }
 
@@ -1627,8 +1627,8 @@ impl Scene {
         let mut mesh_instances =
             budget.try_collect(c.elements.iter().map(|e| refs(&e.instances)))?;
 
-        // Meshes: typed conversion results plus ufbx triangulation of the
-        // source faces (corner order is shared; reversed winding mirrors it).
+        // Triangulate the loaded coordinate space and corner order, as
+        // ufbx_catch_triangulate_face (0.23.1, ufbx.c:32416-32488).
         let index = scene::index(&c.doc, &limits.index).map_err(scene_error)?;
         let sources = scene_mesh::extract(&c.doc, &index, mesh_limits).map_err(scene_error)?;
         let mut sources_by_node = budget.collect(sources.meshes.iter().map(|s| (s.node, s)))?;
@@ -1847,15 +1847,12 @@ fn triangulate(
             budget.reserve(&mut out, grow)?;
         }
         let written = source
-            .triangulate_with_limits(begin, count, &mut buf, limits)
+            .triangulate_with_limits_positions(begin, count, &mut buf, limits, |c| {
+                m.corner_position(c)
+            })
             .map_err(bad)?;
         for &corner in &buf[..written * 3] {
-            // `flip` keeps a face's first corner and reverses the rest.
-            let c = if m.reversed_winding() && corner != begin {
-                begin + count - (corner - begin)
-            } else {
-                corner
-            };
+            let c = corner;
             out.push(
                 u32::try_from(c)
                     .map_err(|_| Error::InvalidData("triangulation: corner overflow"))?,
@@ -2103,8 +2100,7 @@ Objects: {"#,
 mod tests {
     /// A left-handed source (front axis -Z) is mirrored into the right-handed
     /// target: faces are flipped (first corner kept, the rest reversed), and the
-    /// triangulation of the source quad is remapped onto the flipped corners so
-    /// every triangle still names the same source vertices.
+    /// triangulation reads the converted positions and flipped corner sequence.
     #[test]
     fn reversed_winding_remaps_triangle_corners() {
         let fbx = br#"; FBX 7.4.0 project file
@@ -2141,14 +2137,13 @@ Connections:  {
         let corner_vertex = mesh.positions().indices();
         // Flipped face: corners 0..4 address vertices 0, 3, 2, 1.
         assert_eq!(corner_vertex, &[0, 3, 2, 1]);
-        // ufbx splits the source quad into (0 1 2) (2 3 0); on the flipped
-        // corners those are corners (0 3 2) (2 1 0).
-        assert_eq!(mesh.triangles(), &[0, 3, 2, 2, 1, 0]);
+        // ufbx triangulates the flipped corner sequence itself.
+        assert_eq!(mesh.triangles(), &[0, 1, 2, 2, 3, 0]);
         let vertices: Vec<u32> = mesh
             .triangles()
             .iter()
             .map(|&c| corner_vertex[c as usize])
             .collect();
-        assert_eq!(vertices, [0, 1, 2, 2, 3, 0]);
+        assert_eq!(vertices, [0, 3, 2, 2, 1, 0]);
     }
 }

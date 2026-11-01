@@ -1,0 +1,24 @@
+; FBX 5.8.0 project file
+FBXHeaderExtension: { FBXVersion: 5800 }
+Model: "Model::Triangle" {
+ Vertices: 0,0,0,1,0,0,0,1,0
+ Normals: 0,0,1,0,0,1,0,0,1
+ PolygonVertexIndex: 0,1,-3
+ MaterialAssignation: "AllSame"
+ Materials: 0
+ GeometryUVInfo: {
+  MappingInformationType: "ByPolygonVertex"
+  TextureUV: 0,0,1,0,0,1
+  TextureUVVerticeIndex: 0,1,2
+ }
+}
+Takes: {
+ Take: "Static" {
+  LocalTime: 0,46186158000
+  Model: "Model::Triangle" {
+   Channel: "Transform" {
+    Channel: "T" { Channel: "X" { Default: 2 } }
+   }
+  }
+ }
+}

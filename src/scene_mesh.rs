@@ -44,25 +44,34 @@ pub enum LayerKind {
     Smoothing,
 }
 #[derive(Debug, Clone, Copy)]
-pub struct NumericArray<'a>(pub &'a Property<'a>);
+pub enum NumericArray<'a> {
+    Property(&'a Property<'a>),
+    Scalars(&'a [Property<'a>]),
+}
 impl NumericArray<'_> {
     pub fn len(&self) -> usize {
-        match self.0 {
-            Property::Array { count, .. } => *count,
-            Property::AsciiArray(v) => v.len(),
-            _ => 0,
+        match self {
+            Self::Scalars(v) => v.len(),
+            Self::Property(p) => match p {
+                Property::Array { count, .. } => *count,
+                Property::AsciiArray(v) => v.len(),
+                _ => 0,
+            },
         }
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
     fn word(&self, index: usize) -> Option<(u8, u64)> {
+        let Self::Property(p) = self else {
+            return None;
+        };
         let Property::Array {
             kind,
             count,
             big_endian,
             bytes,
-        } = self.0
+        } = p
         else {
             return None;
         };
@@ -102,7 +111,21 @@ impl NumericArray<'_> {
         Some((*kind, value))
     }
     pub fn f64(&self, index: usize) -> Option<f64> {
-        match self.0 {
+        let p = match self {
+            Self::Scalars(v) => {
+                return match v.get(index)? {
+                    Property::I16(v) => Some(f64::from(*v)),
+                    Property::I32(v) => Some(f64::from(*v)),
+                    Property::I64(v) => Some(*v as f64),
+                    Property::F32(v) => Some(f64::from(f32::from_bits(*v))),
+                    Property::F64(v) => Some(f64::from_bits(*v)),
+                    Property::AsciiNegativeZero => Some(-0.0),
+                    _ => None,
+                }
+            }
+            Self::Property(p) => p,
+        };
+        match p {
             Property::AsciiArray(a) => match a.get(index)? {
                 AsciiValue::I64(v) => Some(*v as f64),
                 AsciiValue::F64(v) => Some(f64::from_bits(*v)),
@@ -122,7 +145,18 @@ impl NumericArray<'_> {
         }
     }
     pub fn i64(&self, index: usize) -> Option<i64> {
-        match self.0 {
+        let p = match self {
+            Self::Scalars(v) => {
+                return match v.get(index)? {
+                    Property::I16(v) => Some(i64::from(*v)),
+                    Property::I32(v) => Some(i64::from(*v)),
+                    Property::I64(v) => Some(*v),
+                    _ => None,
+                }
+            }
+            Self::Property(p) => p,
+        };
+        match p {
             Property::AsciiArray(a) => match a.get(index)? {
                 AsciiValue::I64(v) => Some(*v),
                 AsciiValue::NegativeZero => Some(0),
@@ -225,14 +259,18 @@ fn array<'a>(doc: &'a Document<'a>, node: usize) -> Option<NumericArray<'a>> {
     if let Some(p @ (Property::Array { .. } | Property::AsciiArray(_))) =
         doc.properties.get(n.properties.clone())?.first()
     {
-        return Some(NumericArray(p));
+        return Some(NumericArray::Property(p));
+    }
+    let values = doc.properties.get(n.properties.clone())?;
+    if doc.version < 7000 && !values.is_empty() {
+        return Some(NumericArray::Scalars(values));
     }
     let child = doc.nodes.get(node.checked_add(1)?)?;
     if child.parent != Some(node) || child.name != b"a" {
         return None;
     }
     match doc.properties.get(child.properties.clone())?.first()? {
-        p @ (Property::Array { .. } | Property::AsciiArray(_)) => Some(NumericArray(p)),
+        p @ (Property::Array { .. } | Property::AsciiArray(_)) => Some(NumericArray::Property(p)),
         _ => None,
     }
 }
@@ -295,8 +333,19 @@ pub fn extract<'a>(
             .properties
             .get(n.properties.clone())
             .ok_or(Error::InvalidDom)?;
-        if n.name == b"Geometry"
-            && p.get(2).and_then(bytes).map(crate::scene::fbx_subtype) == Some(b"Mesh")
+        if (n.name == b"Geometry" || (doc.version < 7000 && n.name == b"Model"))
+            && (p
+                .get(if doc.version < 7000 { 1 } else { 2 })
+                .and_then(bytes)
+                .map(crate::scene::fbx_subtype)
+                == Some(b"Mesh")
+                || (doc.version < 7000
+                    && doc
+                        .nodes
+                        .iter()
+                        .skip(obj.node + 1)
+                        .take_while(|c| c.parent.is_some_and(|p| p >= obj.node))
+                        .any(|c| c.parent == Some(obj.node) && c.name == b"Vertices")))
         {
             mesh_count += 1;
         }
@@ -334,8 +383,19 @@ pub fn extract<'a>(
             .properties
             .get(n.properties.clone())
             .ok_or(Error::InvalidDom)?;
-        if n.name == b"Geometry"
-            && p.get(2).and_then(bytes).map(crate::scene::fbx_subtype) == Some(b"Mesh")
+        if (n.name == b"Geometry" || (doc.version < 7000 && n.name == b"Model"))
+            && (p
+                .get(if doc.version < 7000 { 1 } else { 2 })
+                .and_then(bytes)
+                .map(crate::scene::fbx_subtype)
+                == Some(b"Mesh")
+                || (doc.version < 7000
+                    && doc
+                        .nodes
+                        .iter()
+                        .skip(obj.node + 1)
+                        .take_while(|c| c.parent.is_some_and(|p| p >= obj.node))
+                        .any(|c| c.parent == Some(obj.node) && c.name == b"Vertices")))
         {
             meshes.push(Mesh {
                 object,
@@ -528,7 +588,7 @@ fn normalized(a: [f64; 3]) -> [f64; 3] {
     }
 }
 impl Mesh<'_> {
-    fn corner_position(&self, corner: usize) -> Option<[f64; 3]> {
+    pub(crate) fn corner_position(&self, corner: usize) -> Option<[f64; 3]> {
         let v = self.polygon_indices?.i64(corner)?;
         let index = usize::try_from(if v < 0 { !v } else { v })
             .ok()?
@@ -550,6 +610,16 @@ impl Mesh<'_> {
         count: usize,
         output: &mut [usize],
     ) -> Result<usize, Error> {
+        self.triangulate_face_into_positions(begin, count, output, |c| self.corner_position(c))
+    }
+
+    pub(crate) fn triangulate_face_into_positions(
+        &self,
+        begin: usize,
+        count: usize,
+        output: &mut [usize],
+        position: impl Fn(usize) -> Option<[f64; 3]>,
+    ) -> Result<usize, Error> {
         let invalid = || Error::InvalidMesh { node: self.node };
         let corners = self.polygon_indices.ok_or_else(invalid)?;
         let end = begin.checked_add(count).ok_or_else(invalid)?;
@@ -568,16 +638,16 @@ impl Mesh<'_> {
         }
         if count == 3 {
             for corner in begin..end {
-                self.corner_position(corner).ok_or_else(invalid)?;
+                position(corner).ok_or_else(invalid)?;
             }
             output[..3].copy_from_slice(&[begin, begin + 1, begin + 2]);
             return Ok(1);
         }
         let [v0, v1, v2, v3] = [
-            self.corner_position(begin).ok_or_else(invalid)?,
-            self.corner_position(begin + 1).ok_or_else(invalid)?,
-            self.corner_position(begin + 2).ok_or_else(invalid)?,
-            self.corner_position(begin + 3).ok_or_else(invalid)?,
+            position(begin).ok_or_else(invalid)?,
+            position(begin + 1).ok_or_else(invalid)?,
+            position(begin + 2).ok_or_else(invalid)?,
+            position(begin + 3).ok_or_else(invalid)?,
         ];
         let a = sub(v2, v0);
         let b = sub(v3, v1);
@@ -651,8 +721,21 @@ impl Mesh<'_> {
         output: &mut [usize],
         limits: &TriangulationLimits,
     ) -> Result<usize, Error> {
+        self.triangulate_with_limits_positions(begin, count, output, limits, |c| {
+            self.corner_position(c)
+        })
+    }
+
+    pub(crate) fn triangulate_with_limits_positions(
+        &self,
+        begin: usize,
+        count: usize,
+        output: &mut [usize],
+        limits: &TriangulationLimits,
+        position: impl Fn(usize) -> Option<[f64; 3]>,
+    ) -> Result<usize, Error> {
         if count <= 4 {
-            return self.triangulate_face_into(begin, count, output);
+            return self.triangulate_face_into_positions(begin, count, output, position);
         }
         let invalid = || Error::InvalidMesh { node: self.node };
         if count > limits.max_face_vertices || count >= (1usize << 31) {
@@ -703,10 +786,8 @@ impl Mesh<'_> {
         let mut normal = [0.0; 3];
         charge(count)?;
         for i in 0..count {
-            let a = self.corner_position(begin + i).ok_or_else(invalid)?;
-            let b = self
-                .corner_position(begin + if i + 1 < count { i + 1 } else { 0 })
-                .ok_or_else(invalid)?;
+            let a = position(begin + i).ok_or_else(invalid)?;
+            let b = position(begin + if i + 1 < count { i + 1 } else { 0 }).ok_or_else(invalid)?;
             if a.iter().chain(b.iter()).any(|v| !v.is_finite()) {
                 return Err(invalid());
             }
@@ -730,7 +811,7 @@ impl Mesh<'_> {
         let y = normalized(cross(normal, x));
         charge(count)?;
         for i in 0..count {
-            let p = self.corner_position(begin + i).ok_or_else(invalid)?;
+            let p = position(begin + i).ok_or_else(invalid)?;
             points.push([dot(x, p), dot(y, p)]);
             edges.push([
                 if i > 0 { i - 1 } else { count - 1 },

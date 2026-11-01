@@ -33,7 +33,7 @@ fn add(samples: &mut Vec<Sample>, s: Sample) -> io::Result<()> {
     samples.push(s);
     Ok(())
 }
-fn curve_samples(samples: &mut Vec<Sample>, c: &AnimationCurve) -> io::Result<()> {
+fn curve_samples(samples: &mut Vec<Sample>, c: &AnimationCurve, ticks: bool) -> io::Result<()> {
     for (i, k) in c.keys.iter().enumerate() {
         let mut put = |time, kind, num, den| {
             add(
@@ -51,7 +51,7 @@ fn curve_samples(samples: &mut Vec<Sample>, c: &AnimationCurve) -> io::Result<()
         put(k.time, "key", 0, 1)?;
         put(next_after(k.time, false), "seconds-before-key", -1, 0)?;
         put(next_after(k.time, true), "seconds-after-key", 1, 0)?;
-        if k.ticks > i64::MIN {
+        if ticks && k.ticks > i64::MIN {
             put(
                 (k.ticks - 1) as f64 / KTIME,
                 "tick-before-key",
@@ -59,7 +59,7 @@ fn curve_samples(samples: &mut Vec<Sample>, c: &AnimationCurve) -> io::Result<()
                 46_186_158_000,
             )?;
         }
-        if k.ticks < i64::MAX {
+        if ticks && k.ticks < i64::MAX {
             put(
                 (k.ticks + 1) as f64 / KTIME,
                 "tick-after-key",
@@ -210,7 +210,7 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
     for c in ordered {
         let base = em.push(&scene.elements[c.element].key);
         let mut samples = Vec::new();
-        curve_samples(&mut samples, c)?;
+        curve_samples(&mut samples, c, scene.doc.version >= 7000)?;
         take_samples(&mut samples, default.0, default.1)?;
         em.count("length", samples.len())?;
         for (i, s) in samples.iter().enumerate() {
@@ -246,7 +246,7 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
         for &ix in layers {
             for &v in &a.layers[ix].values {
                 for c in a.values[v].curves.iter().flatten() {
-                    curve_samples(&mut samples, &a.curves[*c])?;
+                    curve_samples(&mut samples, &a.curves[*c], scene.doc.version >= 7000)?;
                 }
             }
         }

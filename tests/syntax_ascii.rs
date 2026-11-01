@@ -3,7 +3,7 @@ use std::borrow::Cow;
 
 #[test]
 fn scalar_nodes_and_entities() {
-    let input = b"; fake FBXVersion: 6100\nFBXHeaderExtension: {\n FBXVersion: 7500\n}\nThing: -2, -0.0, \"a&quot;b\\c\"\n";
+    let input = b"; fake FBXVersion: 5700\nFBXHeaderExtension: {\n FBXVersion: 7500\n}\nThing: -2, -0.0, \"a&quot;b\\c\"\n";
     let doc = parse(input, &Limits::default()).unwrap();
     assert_eq!(doc.version, 7500);
     assert_eq!(doc.nodes[2].name, b"Thing");
@@ -34,10 +34,10 @@ fn array_and_unsupported_version() {
     );
     let input = b"FBXHeaderExtension: { FBXVersion: 7300\n}\n";
     assert_eq!(parse(input, &Limits::default()).unwrap().version, 7300);
-    let input = b"FBXHeaderExtension: { FBXVersion: 6100\n}\n";
+    let input = b"FBXHeaderExtension: { FBXVersion: 5700\n}\n";
     assert_eq!(
         parse(input, &Limits::default()).unwrap_err(),
-        Error::UnsupportedVersion { v: 6100 }
+        Error::UnsupportedVersion { v: 5700 }
     );
 }
 
@@ -47,10 +47,10 @@ fn magic_comment_version_takes_precedence() {
     assert_eq!(parse(input, &Limits::default()).unwrap().version, 7300);
     let input = b"\n;FBX\t7.7.0 project file\nA: 1\n";
     assert_eq!(parse(input, &Limits::default()).unwrap().version, 7700);
-    let input = b"; FBX 6.1.0 project file\nFBXHeaderExtension: { FBXVersion: 7500\n}\n";
+    let input = b"; FBX 5.7.0 project file\nFBXHeaderExtension: { FBXVersion: 7500\n}\n";
     assert_eq!(
         parse(input, &Limits::default()).unwrap_err(),
-        Error::UnsupportedVersion { v: 6100 }
+        Error::UnsupportedVersion { v: 5700 }
     );
 }
 

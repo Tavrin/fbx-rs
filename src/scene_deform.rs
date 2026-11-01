@@ -342,6 +342,31 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             }
         }
     }
+    let mut by_name = a.collect(
+        s.elements
+            .iter()
+            .enumerate()
+            .take(if s.doc.version < 7000 {
+                s.elements.len()
+            } else {
+                0
+            })
+            .filter_map(|(i, e)| {
+                if e.ty != T::Node {
+                    return None;
+                }
+                e.node.map(|n| {
+                    (
+                        crate::legacy::string(
+                            s.doc.properties[s.doc.nodes[n].properties.clone()].first(),
+                        ),
+                        i,
+                    )
+                })
+            }),
+    )?;
+    r.sort_work(by_name.len())?;
+    by_name.sort_unstable();
     // Memoize parent depth once. Each node is walked at most twice, even
     // for deep chains and multiple poses; sorting never walks ancestors.
     let mut depths: Vec<Option<usize>> = a.filled(s.elements.len(), None)?;
@@ -388,7 +413,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         let e = &s.elements[i];
         let n = e.node.ok_or("pose: missing source")?;
         let props = &s.doc.properties[s.doc.nodes[n].properties.clone()];
-        let bind = matches!(props.get(2),Some(crate::syntax::Property::String(v)) if v.as_ref()==b"BindPose");
+        let bind = matches!(props.get(if s.doc.version < 7000 { 1 } else { 2 }),Some(crate::syntax::Property::String(v)) if v.as_ref()==b"BindPose");
         let mut bones = Vec::new();
         r.charge(r.children[n].len(), std::mem::size_of::<BonePose>() * 3)?;
         r.work(r.children[n].len())?;
@@ -396,15 +421,27 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             if s.doc.nodes[pn].name != b"PoseNode" {
                 continue;
             }
-            let id = match r.data(pn, b"Node")? {
-                Some(NodeData::Values(v)) => match v.first() {
-                    Some(Scalar::Num(x, _)) => *x,
-                    _ => return Err("pose: invalid node".into()),
-                },
-                _ => return Err("pose: missing node".into()),
+            let k = if s.doc.version < 7000 {
+                let c = r.child(pn, b"Node").ok_or("pose: missing node")?;
+                let nm = crate::legacy::string(
+                    s.doc.properties[s.doc.nodes[c].properties.clone()].first(),
+                );
+                r.work((usize::BITS - by_name.len().leading_zeros()) as usize + 1)?;
+                let k = by_name
+                    .binary_search_by(|p| p.0.cmp(nm))
+                    .map_err(|_| "pose: invalid node name")?;
+                by_name[k].1
+            } else {
+                let id = match r.data(pn, b"Node")? {
+                    Some(NodeData::Values(v)) => match v.first() {
+                        Some(Scalar::Num(x, _)) => *x,
+                        _ => return Err("pose: invalid node".into()),
+                    },
+                    _ => return Err("pose: missing node".into()),
+                };
+                r.work((usize::BITS - by_source.len().leading_zeros()) as usize + 1)?;
+                by_source.get(&id).copied().ok_or("pose: invalid node ID")?
             };
-            r.work((usize::BITS - by_source.len().leading_zeros()) as usize + 1)?;
-            let k = by_source.get(&id).copied().ok_or("pose: invalid node ID")?;
             if r.child(pn, b"Matrix").is_none() {
                 return Err("pose: missing matrix".into());
             }

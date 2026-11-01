@@ -456,7 +456,10 @@ pub fn extract<'a>(
             .properties
             .get(n.properties.clone())
             .ok_or(Error::InvalidDom)?;
-        let subtype = p.get(2).and_then(bytes).map(crate::scene::fbx_subtype);
+        let subtype = p
+            .get(if doc.version < 7000 { 1 } else { 2 })
+            .and_then(bytes)
+            .map(crate::scene::fbx_subtype);
         if matches!(
             n.name,
             b"Material" | b"Texture" | b"LayeredTexture" | b"Video"
@@ -586,7 +589,9 @@ pub fn extract<'a>(
             .ok_or(Error::InvalidDom)?;
         let data = match (
             n.name,
-            p.get(2).and_then(bytes).map(crate::scene::fbx_subtype),
+            p.get(if doc.version < 7000 { 1 } else { 2 })
+                .and_then(bytes)
+                .map(crate::scene::fbx_subtype),
         ) {
             (b"Material", _) => Some(Data::Material(Material {
                 shading_model: None,

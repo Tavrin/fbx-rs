@@ -1,0 +1,48 @@
+; FBX 6.1.0 project file
+FBXHeaderExtension: { FBXVersion: 6100 }
+Objects: {
+ Model: "Model::Child", "Mesh" {
+  Properties60: {
+   Property: "Lcl Translation", "Lcl Translation", "A", 0,2,3
+   Property: "Lcl Scaling", "Lcl Scaling", "A", 1,1,1
+   Property: "Visibility", "Visibility", "A", 1
+  }
+  Vertices: 0,0,0,1,0,0,0,1,0
+  PolygonVertexIndex: 0,1,-3
+  LayerElementNormal: 0 {
+   MappingInformationType: "ByPolygonVertex"
+   ReferenceInformationType: "Direct"
+   Normals: 0,0,1,0,0,1,0,0,1
+  }
+ }
+ Model: "Model::Parent", "Null" { }
+ Material: "Material::Red", "" {
+  ShadingModel: "lambert"
+  Properties60: { Property: "DiffuseColor", "ColorRGB", "", 1,0,0 }
+ }
+}
+Connections: {
+ Connect: "OO", "Model::Parent", "Model::Scene"
+ Connect: "OO", "Model::Child", "Model::Parent"
+ Connect: "OO", "Material::Red", "Model::Child"
+}
+Takes: {
+ Take: "Walk" {
+  LocalTime: 0,46186158000
+  ReferenceTime: 0,46186158000
+  Model: "Model::Child" {
+   Channel: "Transform" {
+    Channel: "T" {
+     Channel: "X" {
+      Default: 0
+      KeyVer: 4005
+      KeyCount: 2
+      Key: 0,0,L,46186158000,10,L
+     }
+     Channel: "Y" { Default: 2 }
+     Channel: "Z" { Default: 3 }
+    }
+   }
+  }
+ }
+}
