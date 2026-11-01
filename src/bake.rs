@@ -782,7 +782,7 @@ pub(crate) fn bake(
             baker.to_bake[slot] = true;
         }
     }
-    let mut properties: Vec<(usize, BakedProperty)> = Vec::new();
+    let mut properties: Vec<((usize, usize), BakedProperty)> = Vec::new();
     let mut at = 0;
     while at < bindings.len() {
         let element = bindings[at].element;
@@ -826,10 +826,11 @@ pub(crate) fn bake(
                 }
                 let (keys, constant_value) = c.post(keys);
                 let name = c.budget.bytes(&first.property)?;
+                let original_index = properties.len();
                 c.budget.push(
                     &mut properties,
                     (
-                        rank(element),
+                        (rank(element), original_index),
                         BakedProperty {
                             source_id: first.source_id,
                             name,
@@ -846,7 +847,7 @@ pub(crate) fn bake(
     let mut nodes = std::mem::take(&mut baker.nodes);
     nodes.sort_unstable_by_key(|n| n.node);
     // ufbx sorts baked elements by creation index; ties keep property order.
-    properties.sort_by_key(|p| p.0);
+    properties.sort_unstable_by_key(|p| p.0);
     let properties = c.budget.collect(properties.into_iter().map(|(_, p)| p))?;
     let (key_time_min, key_time_max) = if c.min.get() < c.max.get() {
         (c.min.get(), c.max.get())

@@ -601,7 +601,7 @@ fn project(
             for v in values {
                 ascii_tokens(v, &mut toks, a)?;
             }
-            for t in toks {
+            for t in crate::allocation::Temporary::new(toks)? {
                 a.push(
                     &mut nums,
                     match t {
@@ -626,6 +626,7 @@ fn project(
                 )?;
             }
         }
+        let nums = crate::allocation::Temporary::new(nums)?;
         return a.collect([encode(target, &nums, boolean, a)?]);
     }
     let mut out = Vec::new();
@@ -660,7 +661,11 @@ fn project(
                 let mut toks = Vec::new();
                 ascii_tokens(other, &mut toks, a)?;
                 a.reserve(&mut out, toks.len())?;
-                out.extend(toks.into_iter().map(scalar_from_token));
+                out.extend(
+                    crate::allocation::Temporary::new(toks)?
+                        .into_iter()
+                        .map(scalar_from_token),
+                );
             }
         }
     }
@@ -769,12 +774,12 @@ pub(crate) fn node_data(
             return Ok(data);
         }
     }
-    let values = project(doc, i, state, parent, ascii, a)?;
+    let values = crate::allocation::Temporary::new(project(doc, i, state, parent, ascii, a)?)?;
     if target.is_some() {
         return Ok(match values.into_iter().next() {
             Some(DomValue::Array(ARRAY_F64, _, bytes)) => NodeData::Reals(
                 a.collect(
-                    bytes
+                    a.scratch(bytes)?
                         .as_chunks::<8>()
                         .0
                         .iter()
@@ -783,7 +788,7 @@ pub(crate) fn node_data(
             ),
             Some(DomValue::Array(ARRAY_I32, _, bytes)) => NodeData::Ints(
                 a.collect(
-                    bytes
+                    a.scratch(bytes)?
                         .as_chunks::<4>()
                         .0
                         .iter()
@@ -796,7 +801,12 @@ pub(crate) fn node_data(
     Ok(NodeData::Values(a.collect(
         values.into_iter().filter_map(|v| match v {
             DomValue::Number(i, f) => Some(Scalar::Num(i, f)),
-            DomValue::Str(view, _) => Some(Scalar::Str(view)),
+            DomValue::Str(view, raw) => {
+                let bytes = raw.capacity();
+                drop(raw);
+                crate::allocation::release_live(bytes);
+                Some(Scalar::Str(view))
+            }
             _ => None,
         }),
     )?))
@@ -856,7 +866,10 @@ pub(crate) fn node_string(
     let state = child_state(parent, doc.nodes[i].name);
     let raw_context = raw_string(parent, doc.nodes[i].name, doc.version);
     Ok(
-        match project(doc, i, state, parent, ascii, a)?.into_iter().next() {
+        match crate::allocation::Temporary::new(project(doc, i, state, parent, ascii, a)?)?
+            .into_iter()
+            .next()
+        {
             Some(DomValue::Str(view, raw)) => Some(((!raw_context).then_some(view), raw)),
             _ => None,
         },
@@ -877,7 +890,10 @@ pub(crate) fn node_content(
     }
     let state = child_state(parent, doc.nodes[i].name);
     Ok(
-        match project(doc, i, state, parent, ascii, a)?.into_iter().next() {
+        match crate::allocation::Temporary::new(project(doc, i, state, parent, ascii, a)?)?
+            .into_iter()
+            .next()
+        {
             Some(DomValue::Strings(parts)) => a.collect(parts.into_iter().flatten())?,
             _ => Vec::new(),
         },
@@ -897,8 +913,11 @@ pub(crate) fn node_bools(
     }
     let state = child_state(parent, doc.nodes[i].name);
     Ok(
-        match project(doc, i, state, parent, ascii, a)?.into_iter().next() {
-            Some(DomValue::Bytes(b)) => Some(a.collect(b.iter().map(|&x| x != 0))?),
+        match crate::allocation::Temporary::new(project(doc, i, state, parent, ascii, a)?)?
+            .into_iter()
+            .next()
+        {
+            Some(DomValue::Bytes(b)) => Some(a.collect(a.scratch(b)?.iter().map(|&x| x != 0))?),
             _ => None,
         },
     )
@@ -1104,7 +1123,10 @@ pub(crate) fn animation_array(
     let parent = state_of(doc, doc.nodes[i].parent);
     let state = child_state(parent, doc.nodes[i].name);
     Ok(
-        match project(doc, i, state, parent, ascii, a)?.into_iter().next() {
+        match crate::allocation::Temporary::new(project(doc, i, state, parent, ascii, a)?)?
+            .into_iter()
+            .next()
+        {
             Some(DomValue::Array(kind, _, bytes)) => Some((kind, bytes)),
             _ => None,
         },
@@ -1114,6 +1136,37 @@ pub(crate) fn animation_array(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_array_conversion_refunds_numeric_and_projection_scratch() {
+        let ascii = b"; FBX 7.4.0\nObjects: { AnimationCurve: 1, \"AnimCurve::C\", \"\" {\nKeyTime: *2 { a: 0,46186158000 }\n}\n}\n";
+        let mut doc = crate::syntax::parse(ascii, &Default::default()).unwrap();
+        let node = doc.nodes.iter().position(|n| n.name == b"KeyTime").unwrap();
+        for binary in [false, true] {
+            if binary {
+                doc.properties[doc.nodes[node].properties.start] = Property::Array {
+                    kind: b'l',
+                    count: 2,
+                    big_endian: false,
+                    bytes: [0i64.to_le_bytes(), 46186158000i64.to_le_bytes()]
+                        .concat()
+                        .into(),
+                };
+            }
+            let _scope = crate::allocation::LoadScope::new(1024);
+            let budget = Budget::new(1024);
+            for _ in 0..100 {
+                let (_, bytes) = animation_array(&doc, node, !binary, &budget)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(bytes.len(), 16);
+                drop(crate::allocation::Temporary::new(bytes).unwrap());
+            }
+            // Every iteration freed all of its buffers; almost all allowance
+            // must still be available for the next conversion stage.
+            assert!(budget.collect([0u8; 1000]).is_ok());
+        }
+    }
 
     #[test]
     fn legacy_persistence_scene_info_retains_raw_name_without_utf8_view() {

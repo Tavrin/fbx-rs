@@ -19,6 +19,7 @@ struct Node<K, V> {
 pub(crate) struct Map<K, V> {
     nodes: Vec<Node<K, V>>,
     root: Option<usize>,
+    release: crate::allocation::Release,
 }
 impl<K, V> Default for Map<K, V> {
     fn default() -> Self {
@@ -30,6 +31,7 @@ impl<K, V> Map<K, V> {
         Self {
             nodes: Vec::new(),
             root: None,
+            release: crate::allocation::Release::default(),
         }
     }
     pub fn len(&self) -> usize {
@@ -187,6 +189,7 @@ impl<K: Ord, V> Map<K, V> {
         key: K,
         value: V,
         budget: &Budget,
+        growth_ceiling: usize,
     ) -> Result<(usize, Option<V>), Error> {
         let mut at = self.root;
         let mut parent = None;
@@ -214,16 +217,36 @@ impl<K: Ord, V> Map<K, V> {
             }
         }
         let i = self.nodes.len();
-        budget.push(
-            &mut self.nodes,
-            Node {
-                pair: Some((key, value)),
-                left: None,
-                right: None,
-                parent,
-                height: 1,
-            },
-        )?;
+        if self.nodes.len() == self.nodes.capacity() {
+            let minimum = self
+                .nodes
+                .len()
+                .checked_add(1)
+                .ok_or(Error::LimitExceeded(crate::Limit::Allocation))?;
+            let target = self
+                .nodes
+                .capacity()
+                .checked_mul(2)
+                .unwrap_or(minimum)
+                .max(4)
+                .min(growth_ceiling)
+                .max(minimum);
+            let additional = target - self.nodes.len();
+            budget.reserve(&mut self.nodes, additional)?;
+        }
+        self.nodes.push(Node {
+            pair: Some((key, value)),
+            left: None,
+            right: None,
+            parent,
+            height: 1,
+        });
+        self.release.update(
+            self.nodes
+                .capacity()
+                .checked_mul(std::mem::size_of::<Node<K, V>>())
+                .ok_or(Error::LimitExceeded(crate::Limit::Allocation))?,
+        );
         match parent {
             None => self.root = Some(i),
             Some(p) if left => self.nodes[p].left = Some(i),
@@ -233,7 +256,18 @@ impl<K: Ord, V> Map<K, V> {
         Ok((i, None))
     }
     pub fn try_insert(&mut self, key: K, value: V, budget: &Budget) -> Result<Option<V>, Error> {
-        self.insert_index(key, value, budget).map(|(_, old)| old)
+        self.insert_index(key, value, budget, usize::MAX)
+            .map(|(_, old)| old)
+    }
+    pub fn try_insert_bounded(
+        &mut self,
+        key: K,
+        value: V,
+        budget: &Budget,
+        growth_ceiling: usize,
+    ) -> Result<Option<V>, Error> {
+        self.insert_index(key, value, budget, growth_ceiling)
+            .map(|(_, old)| old)
     }
     pub fn try_get_or_insert_with(
         &mut self,
@@ -243,7 +277,7 @@ impl<K: Ord, V> Map<K, V> {
     ) -> Result<&mut V, Error> {
         let i = match self.find(&key) {
             Some(i) => i,
-            None => self.insert_index(key, make()?, budget)?.0,
+            None => self.insert_index(key, make()?, budget, usize::MAX)?.0,
         };
         Ok(&mut self.nodes[i].pair.as_mut().expect("occupied node").1)
     }
