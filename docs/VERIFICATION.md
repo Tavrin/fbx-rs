@@ -731,3 +731,39 @@ heterogeneous keys.
 The same authored files are regression fixtures. Add these to each target's
 persistent corpus before the separate pre-release fuzz campaign; no new fuzz
 campaign is claimed by this change.
+
+### Legacy pre-release fuzz run (0.1.3)
+
+Targets `binary`, `ascii`, `scene_dom` and `load`, built with debug assertions
+and overflow checks (`cargo +nightly fuzz build -s none -a -O`). Start: 41 seed
+files: the 24 legacy FBX 5.8/6.x corpus files (ASCII, little- and big-endian
+binary, Blender 2.79, Maya and 3ds Max exports), the 7 authored legacy seeds
+from `fuzz/make_legacy_seeds.py` and the 10 files in `tests/fixtures`. No
+earlier corpus was reused. Same rule and flags as the earlier runs
+(`-max_len=262144`, `-timeout=5`, `-rss_limit_mb=512`, `-malloc_limit_mb=512`,
+600-second chunks over one persistent corpus, stop at a chunk that adds no edge
+after at least 600 CPU-seconds, cap 7,200 CPU-seconds), four libFuzzer
+processes in parallel.
+
+Reach, `cargo fuzz coverage` on the `load` target with the 41 seeds alone
+(line coverage): `legacy.rs` 88.9 %, `syntax.rs` 81.3 %, `syntax/ascii.rs`
+70.9 %, `scene.rs` 85.6 %, `scene_animation.rs` 73.1 %, `scene_deform.rs`
+72.3 %, `scene_material.rs` 59.2 %, `scene_geometry.rs` 49.9 %, `bake.rs`
+91.3 %, whole crate 57.0 %. The public face triangulation over converted
+(Y-up) positions, `triangulate_face_into_positions`, ran 142 times from the
+Z-up Blender seeds through `Mesh::triangles`; the `load` harness did not
+change.
+
+| Target | CPU-minutes | Executions | Edge coverage, seeds to final | Crashes | Stop | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `binary` | 120.0 | 1,417.8 M | 376 to 1,022 | 0 | cap reached | 59 MiB |
+| `ascii` | 50.0 | 591.9 M | 376 to 1,045 | 0 | chunk 5 added no coverage | 57 MiB |
+| `scene_dom` | 121.9 | 3.5 M | 9,027 to 15,185 | 0 | cap reached | 132 MiB |
+| `load` | 120.4 | 20.2 M | 8,056 to 15,029 | 0 | cap reached | 204 MiB |
+
+Every chunk of every target exited 0; no crash, timeout, out-of-memory or
+memory-limit failure and no artifact file. `ascii` met the flat-chunk rule
+(chunk 5 added none). `binary`, `scene_dom` and `load` ran to the 7,200
+CPU-second cap: their last full 600-second chunks still added 1, 44 and 37 edges,
+and the short final chunk to the cap added none, so the cap, not a flat 10
+minutes, ended them.
