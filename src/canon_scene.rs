@@ -2350,9 +2350,11 @@ fn project_meshes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         if scene.lean {
             match convert_mesh(&env, node, &links) {
                 Ok(m) => a.push(&mut scene.typed.meshes, (i, m, links.materials))?,
-                Err(e @ (crate::Error::Allocation | crate::Error::ResourceLimit(_))) => {
-                    return Err(e)
-                }
+                Err(
+                    e @ (crate::Error::Allocation
+                    | crate::Error::ResourceLimit(_)
+                    | crate::Error::LimitExceeded(_)),
+                ) => return Err(e),
                 Err(e) => a.push(
                     &mut scene.warnings,
                     a.format(format_args!("{}: {e}", scene.elements[i].key))?,
@@ -2363,9 +2365,15 @@ fn project_meshes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         let obj = &mut scene.elements[i].obj;
         match project_mesh(&env, node, &links, obj) {
             Ok(t) => max_face_triangles = max_face_triangles.max(t),
-            Err(e) => scene
-                .warnings
-                .push(format!("{}: {e}", scene.elements[i].key)),
+            Err(
+                e @ (crate::Error::Allocation
+                | crate::Error::ResourceLimit(_)
+                | crate::Error::LimitExceeded(_)),
+            ) => return Err(e),
+            Err(e) => a.push(
+                &mut scene.warnings,
+                a.format(format_args!("{}: {e}", scene.elements[i].key))?,
+            )?,
         }
     }
     if scene.lean {

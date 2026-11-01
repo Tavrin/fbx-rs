@@ -6,6 +6,14 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Sort baked properties in place without allocator scratch, preserving object
+  and property order.
+- Propagate allocation and resource-limit refusals from mesh conversion instead
+  of returning a scene with an empty mesh. Invalid geometry still loads with
+  conversion warnings, matching ufbx; document this on `load` and `Scene::warnings`.
+
 ## [0.1.4] - 2026-11-01
 
 ### Added

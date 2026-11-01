@@ -721,6 +721,47 @@ configured load allowance. Executable tests establish the
 covered fixtures and allocation points; the full path guarantee also depends on
 the source audit of the remaining pre-reserved pushes, copies and error paths.
 
+### Mesh refusal and bake-sort regressions
+
+The default load/evaluation/bake allocation audit covers stable `sort`/`sort_by*`,
+`to_vec`, iterator `collect` into vectors, vector clones and allocated formatting.
+The remaining unbudgeted stable sort was the final baked-property sort. It now
+carries the insertion ordinal beside each creation rank and sorts in place by
+both, preserving equal-rank property order without scratch allocation. Existing
+conversion stable sorts use checked ordinal buffers. Other matches are budget
+helpers, borrowed ranges and fixed records, tests, or canonical dump value-tree
+and output construction outside the default API allocation contract. No further
+unbudgeted copies or formatting were found on default load/evaluation/bake paths.
+
+Both typed and canonical mesh-conversion warning branches now propagate
+`Allocation`, `ResourceLimit` and `LimitExceeded` unchanged. Their warning storage
+and formatting use the fallible budget helpers. The material warning producers
+already do so and do not catch resource errors. Invalid geometry remains a
+warning with an empty public mesh, including vertex arrays whose length is not
+divisible by three; resource refusals cannot use that fallback.
+
+`out_of_creation_order_bake_sort_allocator_refusals_are_typed` bakes 3,072
+properties across nodes whose hierarchy order differs from creation order,
+checks creation order and all property ties, then refuses the final eight real
+allocator requests, including the final property publication allocation.
+`invalid_vertex_count_loads_with_a_warning` retains the malformed-geometry
+compatibility boundary. `decreasing_limit_envelopes_never_substitute_empty_meshes`
+halves every load limit independently through zero, checks typed refusals and
+compares accepted mesh attributes, triangles and warnings with the default
+load. It always covers repository fixtures; setting `FBX_LIMIT_CORPUS_PATHS` to
+a newline-delimited input manifest adds the full external corpus.
+
+Verification (2026-11-01): the decreasing-envelope test passed 138,155 loads
+across all 340 corpus files and 10 repository fixtures. The six real-allocator
+regressions and five limit/geometry tests pass. Formatting, default/all-feature
+clippy with warnings denied, workspace tests, doctests, rustdoc with warnings
+denied, wasm32, release builds, comparator fault tests and the public-text guard
+all exited 0. Modern order is unchanged on 316/316 files; full comparison is
+340/340 equal, including all 24 legacy files; baking is exact on all 48 streams.
+The initial focused run exited 101 because the new authored bake fixture lacked
+required curve metadata; after correcting that fixture, both the focused rerun
+and the full gate passed.
+
 ### Legacy seed additions
 
 `python3 fuzz/make_legacy_seeds.py OUTPUT` emits seven self-authored seeds:

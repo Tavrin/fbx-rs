@@ -451,6 +451,11 @@ impl LoadOptions {
 /// Load an FBX file (binary or ASCII, FBX 5.8/6.x and 7.1–7.7) with the
 /// default [`Limits`].
 ///
+/// Invalid geometry data, such as a vertex array whose length is not divisible
+/// by three, can load with the affected mesh left empty, matching ufbx.
+/// These files have entries in [`Scene::warnings()`]. Allocation and resource
+/// limit refusals always return an error.
+///
 /// # Errors
 /// See [`Error`]. A failed load publishes no partial scene.
 pub fn load(bytes: &[u8], options: &LoadOptions) -> Result<Scene, Error> {
@@ -1406,7 +1411,9 @@ impl Scene {
     /// Conversion warnings: content that was read but is not converted
     /// (unported shader types, shader textures) or a mesh that failed to
     /// convert and is left empty. The text is for people, not for matching.
-    /// The library never prints them.
+    /// For example, a vertex array whose length is not divisible by three
+    /// leaves an empty mesh and a warning, matching ufbx. Allocation and limit
+    /// refusals return errors instead of warnings. The library never prints them.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
