@@ -813,7 +813,7 @@ pub struct Item<'p> {
 pub struct Env<'a, 'd> {
     pub doc: &'a Document<'d>,
     pub(crate) allocation: &'a Budget,
-    pub children: &'a [Vec<usize>],
+    pub children: &'a crate::scene_property::PropertyIndex,
     pub ascii: bool,
     /// `metadata.original_file_path` (`DocumentUrl`): UTF-8 view and raw bytes.
     pub original_file_path: (Vec<u8>, Vec<u8>),
@@ -865,9 +865,8 @@ pub(crate) struct LeanTexture {
 
 impl Env<'_, '_> {
     fn child(&self, node: usize, name: &[u8]) -> Option<usize> {
-        self.children[node]
-            .iter()
-            .copied()
+        self.children
+            .children(node)
             .find(|&c| self.doc.nodes[c].name == name)
     }
     /// `ufbxi_find_val1(node, name, "S")`: assigns only when present.
@@ -1080,7 +1079,7 @@ fn implementation_type(props: &PropertyLayers<'_>) -> i64 {
 }
 fn read_bindings(env: &Env<'_, '_>, node: usize, a: &Budget) -> Result<BindingTable, Error> {
     let mut entries = Vec::new();
-    for &child in &env.children[node] {
+    for child in env.children.children(node) {
         if env.doc.nodes[child].name != b"Entry" {
             continue;
         }

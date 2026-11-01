@@ -75,24 +75,30 @@ fn auto_edge(t0: f64, t1: f64, v0: f64, v1: f64, bias: f32, flags: u32) -> f32 {
     crate::numeric::round_f32(slope)
 }
 struct Reader<'s, 'd> {
-    s: &'s CanonScene<'d>,
-    children: Vec<Vec<usize>>,
-    budget: Budget,
+    doc: &'s crate::syntax::Document<'d>,
+    ascii: bool,
+    elements: &'s [crate::canon_scene::Element],
+    children: &'s scene_property::PropertyIndex,
+    budget: &'s Budget,
 }
 impl Reader<'_, '_> {
     fn child(&self, n: usize, name: &[u8]) -> Option<usize> {
-        self.children[n]
-            .iter()
-            .copied()
-            .find(|&c| self.s.doc.nodes[c].name == name)
+        self.children
+            .children(n)
+            .find(|&c| self.doc.nodes[c].name == name)
     }
-    fn array(&self, n: usize, name: &[u8], width: usize, limit: usize) -> Result<Vec<u8>, Error> {
+    fn array(
+        &self,
+        n: usize,
+        name: &[u8],
+        width: usize,
+        limit: usize,
+    ) -> Result<crate::api_alloc::Scratch<'_, u8>, Error> {
         let c = self
             .child(n, name)
             .ok_or("animation: missing curve array")?;
-        self.budget
-            .work(crate::canon_dom::data_len(&self.s.doc, c)?)?;
-        for p in &self.s.doc.properties[self.s.doc.nodes[c].properties.clone()] {
+        self.budget.work(crate::canon_dom::data_len(self.doc, c)?)?;
+        for p in &self.doc.properties[self.doc.nodes[c].properties.clone()] {
             let count = match p {
                 crate::syntax::Property::Array { count, .. } => *count,
                 crate::syntax::Property::AsciiArray(v) => v.len(),
@@ -104,7 +110,7 @@ impl Reader<'_, '_> {
         }
         if name == b"KeyTime" {
             use crate::syntax::{AsciiValue, Property};
-            for p in &self.s.doc.properties[self.s.doc.nodes[c].properties.clone()] {
+            for p in &self.doc.properties[self.doc.nodes[c].properties.clone()] {
                 match p {
                     Property::Array { kind, .. } if !matches!(kind, b'l' | b'i') => {
                         return Err("animation: key times require integer storage".into())
@@ -128,13 +134,12 @@ impl Reader<'_, '_> {
             }
         }
 
-        let (_, bytes) =
-            crate::canon_dom::animation_array(&self.s.doc, c, self.s.ascii, &self.budget)?
-                .ok_or("animation: invalid curve array")?;
+        let (_, bytes) = crate::canon_dom::animation_array(self.doc, c, self.ascii, self.budget)?
+            .ok_or("animation: invalid curve array")?;
         if bytes.len() > limit || bytes.len() % width != 0 {
             return Err("animation: array limit or type".into());
         }
-        Ok(bytes)
+        self.budget.scratch(bytes)
     }
     fn ext(&self, n: usize, name: &[u8]) -> Result<Extrapolation, Error> {
         use crate::canon_dom::{node_data, NodeData, Scalar};
@@ -148,15 +153,13 @@ impl Reader<'_, '_> {
         let number = |name| -> Result<Option<i64>, Error> {
             self.child(n, name)
                 .map(|c| {
-                    Ok(
-                        match node_data(&self.s.doc, c, self.s.ascii, &self.budget)? {
-                            NodeData::Values(v) => v.first().and_then(|x| match x {
-                                Scalar::Num(i, _) => Some(*i),
-                                Scalar::Str(_) => None,
-                            }),
-                            _ => None,
-                        },
-                    )
+                    Ok(match node_data(self.doc, c, self.ascii, self.budget)? {
+                        NodeData::Values(v) => v.first().and_then(|x| match x {
+                            Scalar::Num(i, _) => Some(*i),
+                            Scalar::Str(_) => None,
+                        }),
+                        _ => None,
+                    })
                 })
                 .transpose()
                 .map(Option::flatten)
@@ -184,10 +187,10 @@ impl Reader<'_, '_> {
         max_keys: usize,
     ) -> Result<AnimationCurve, Error> {
         let keys = legacy_keys(
-            &self.s.doc,
-            self.s.ascii,
-            &self.children,
-            &self.budget,
+            self.doc,
+            self.ascii,
+            self.children,
+            self.budget,
             n,
             limit,
             max_keys,
@@ -207,7 +210,7 @@ impl Reader<'_, '_> {
         limit: usize,
         max_keys: usize,
     ) -> Result<AnimationCurve, Error> {
-        if self.s.doc.version < 7000 {
+        if self.doc.version < 7000 {
             return self.legacy_curve(i, n, limit, max_keys);
         }
         let ticks = self.array(n, b"KeyTime", 8, limit.min(max_keys.saturating_mul(8)))?;
@@ -233,7 +236,7 @@ impl Reader<'_, '_> {
         {
             return Err("animation: mismatched curve arrays".into());
         }
-        let times: Vec<i64> = self.budget.collect(
+        let times = self.budget.scratch_collect(
             ticks
                 .as_chunks::<8>()
                 .0
@@ -243,7 +246,7 @@ impl Reader<'_, '_> {
         if times.windows(2).any(|p| p[0] > p[1]) {
             return Err("animation: unsorted key times".into());
         }
-        let values: Vec<f64> = self.budget.collect(
+        let values = self.budget.scratch_collect(
             values
                 .as_chunks::<8>()
                 .0
@@ -253,28 +256,28 @@ impl Reader<'_, '_> {
         if values.iter().any(|v| !v.is_finite()) {
             return Err("animation: nonfinite key value".into());
         }
-        let flags: Vec<u32> = self.budget.collect(
+        let flags = self.budget.scratch_collect(
             flags
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .map(|c| u32::from_le_bytes(*c)),
         )?;
-        let attrs: Vec<f32> = self.budget.collect(
+        let attrs = self.budget.scratch_collect(
             attrs
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .map(|c| f32::from_le_bytes(*c)),
         )?;
-        let refs: Vec<i32> = self.budget.collect(
+        let refs = self.budget.scratch_collect(
             refs.as_chunks::<4>()
                 .0
                 .iter()
                 .map(|c| i32::from_le_bytes(*c)),
         )?;
         let mut total = 0usize;
-        for &r in &refs {
+        for &r in refs.iter() {
             if r <= 0 {
                 return Err("animation: invalid attribute repetition".into());
             }
@@ -421,7 +424,7 @@ impl Reader<'_, '_> {
         }
         Ok(AnimationCurve {
             element: i,
-            source_id: self.s.elements[i].source_id.unwrap_or(0),
+            source_id: self.elements[i].source_id.unwrap_or(0),
             keys,
             pre_extrapolation: self.ext(n, b"Pre-Extrapolation")?,
             post_extrapolation: self.ext(n, b"Post-Extrapolation")?,
@@ -432,18 +435,13 @@ impl Reader<'_, '_> {
 fn legacy_keys(
     doc: &crate::syntax::Document<'_>,
     ascii: bool,
-    children: &[Vec<usize>],
+    children: &scene_property::PropertyIndex,
     budget: &Budget,
     n: usize,
     limit: usize,
     max_keys: usize,
 ) -> Result<Vec<Keyframe>, Error> {
-    let child = |n: usize, name: &[u8]| {
-        children[n]
-            .iter()
-            .copied()
-            .find(|&c| doc.nodes[c].name == name)
-    };
+    let child = |n: usize, name: &[u8]| children.children(n).find(|&c| doc.nodes[c].name == name);
     use crate::canon_dom::{node_data, NodeData, Scalar};
     let scalar = |name: &[u8]| -> Result<Option<f64>, Error> {
         child(n, name)
@@ -657,24 +655,13 @@ fn binding_obj(b: &AnimationBinding, a: &Animation) -> Obj {
         .with("prop_name", s(&b.property))
         .with("anim_value", V::Ref(Some(a.values[b.value].element)))
 }
-fn child_index(
-    doc: &crate::syntax::Document<'_>,
-    a: &crate::api_alloc::Budget,
-) -> Result<Vec<Vec<usize>>, Error> {
-    let mut children = a.filled(doc.nodes.len(), Vec::new())?;
-    for (i, n) in doc.nodes.iter().enumerate() {
-        if let Some(p) = n.parent {
-            a.push(&mut children[p], i)?;
-        }
-    }
-    Ok(children)
-}
 // Validate and charge every source array before either helper detection or key
 // reconstruction can decode it. Repeated connections never repeat decoding.
 fn preflight_curves(
     doc: &crate::syntax::Document<'_>,
     elements: &[crate::canon_scene::Element],
-    children: &[Vec<usize>],
+    children: &scene_property::PropertyIndex,
+    deferred: &crate::syntax::DeferredData<'_>,
     limits: &DumpLimits,
     budget: &Budget,
 ) -> Result<(), Error> {
@@ -683,9 +670,21 @@ fn preflight_curves(
             continue;
         }
         let n = e.node.ok_or("animation: curve source")?;
-        budget.work(children[n].len())?;
+        let restored = deferred
+            .restore(n, &limits.syntax)
+            .map_err(crate::canon_scene::syntax_error)?;
+        let index = restored
+            .as_ref()
+            .map(|d| scene_property::PropertyIndex::build(d, limits.max_allocation))
+            .transpose()
+            .map_err(crate::api::property_error)?;
+        let (doc, n, children) = match (&restored, &index) {
+            (Some(d), Some(p)) => (&**d, d.object_node(), p),
+            _ => (doc, n, children),
+        };
+        budget.work(children.children(n).count())?;
         if doc.version < 7000 {
-            for &c in &children[n] {
+            for c in children.children(n) {
                 if doc.nodes[c].name == b"Key" {
                     let count = crate::canon_dom::data_len(doc, c)?;
                     budget.work(count)?;
@@ -695,7 +694,7 @@ fn preflight_curves(
             continue;
         }
         let mut arrays = [None; 5];
-        for &c in &children[n] {
+        for c in children.children(n) {
             let slot = match doc.nodes[c].name {
                 b"KeyTime" => 0,
                 b"KeyValueFloat" => 1,
@@ -743,7 +742,7 @@ fn validate_cycles(elements: &[crate::canon_scene::Element], budget: &Budget) ->
             T::AnimCurve | T::AnimValue | T::AnimLayer | T::AnimStack
         )
     };
-    let mut color = budget.filled(elements.len(), 0u8)?;
+    let mut color = crate::allocation::Temporary::new(budget.filled(elements.len(), 0u8)?)?;
     for start in 0..elements.len() {
         if !anim(start) || color[start] != 0 {
             continue;
@@ -771,23 +770,49 @@ fn validate_cycles(elements: &[crate::canon_scene::Element], budget: &Budget) ->
                 budget.push(&mut stack, (k, 0))?;
             }
         }
+        drop(crate::allocation::Temporary::new(stack)?);
     }
     Ok(())
 }
 /// Element-indexed helper and owner membership, built once per projection.
-type HelperIndex = (Vec<Option<usize>>, Vec<Option<usize>>);
+type HelperIndex = (
+    crate::allocation::Temporary<Option<usize>>,
+    crate::allocation::Temporary<Option<usize>>,
+);
 pub(crate) fn helper_index(
     n: usize,
     pairs: &[(usize, usize)],
     budget: &crate::api_alloc::Budget,
 ) -> Result<HelperIndex, Error> {
-    let mut helper = budget.filled(n, None)?;
-    let mut owner = budget.filled(n, None)?;
+    let mut helper = crate::allocation::Temporary::new(budget.filled(n, None)?)?;
+    let mut owner = crate::allocation::Temporary::new(budget.filled(n, None)?)?;
     for &(o, h) in pairs {
         helper[o] = Some(h);
         owner[h] = Some(o);
     }
     Ok((helper, owner))
+}
+type PropertyMap = BTreeMap<Vec<u8>, EvaluatedProperty>;
+#[derive(Default)]
+struct PropertyMaps {
+    maps: BTreeMap<usize, PropertyMap>,
+    empty: PropertyMap,
+}
+impl std::ops::Index<usize> for PropertyMaps {
+    type Output = PropertyMap;
+    fn index(&self, index: usize) -> &Self::Output {
+        self.maps.get(&index).unwrap_or(&self.empty)
+    }
+}
+impl PropertyMaps {
+    fn ensure(
+        &mut self,
+        index: usize,
+        a: &crate::api_alloc::Budget,
+    ) -> Result<&mut PropertyMap, Error> {
+        self.maps
+            .try_get_or_insert_with(index, a, || Ok(PropertyMap::new()))
+    }
 }
 pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), Error> {
     let budget = Budget::new(
@@ -804,15 +829,22 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             budget.charge(prop.len(), 8)?;
         }
     }
-    let children = child_index(&scn.doc, &budget)?;
-    preflight_curves(&scn.doc, &scn.elements, &children, limits, &budget)?;
+    let children = &scn.props;
+    preflight_curves(
+        &scn.doc,
+        &scn.elements,
+        children,
+        &scn.deferred,
+        limits,
+        &budget,
+    )?;
     validate_cycles(&scn.elements, &budget)?;
     let mut a = std::mem::take(&mut scn.animation);
     a.allocation_limit = limits.max_allocation;
     a.creation = budget.collect((0..scn.elements.len()).map(|i| scn.created(i)))?;
     a.ids = budget.collect(scn.elements.iter().map(|e| e.source_id))?;
-    let mut authored = budget.filled(scn.elements.len(), BTreeMap::new())?;
-    let mut defaults = budget.filled(scn.elements.len(), BTreeMap::new())?;
+    let mut authored = PropertyMaps::default();
+    let mut defaults = PropertyMaps::default();
     let (helper_for, owner_for) = helper_index(scn.elements.len(), &scn.scale_helpers, &budget)?;
     // Animation lists follow ufbx's creation order, not the canonical order.
     let mut by_creation = budget.collect(0..scn.elements.len())?;
@@ -820,12 +852,23 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     budget.stable_sort(&mut by_creation, |&x, &y| {
         scn.created(x).cmp(&scn.created(y))
     })?;
+    let by_creation = crate::allocation::Temporary::new(by_creation)?;
     let r = Reader {
-        s: scn,
+        doc: &scn.doc,
+        ascii: scn.ascii,
+        elements: &scn.elements,
         children,
-        budget,
+        budget: &budget,
     };
     let alloc = &r.budget;
+    alloc.reserve(
+        &mut a.curves,
+        scn.elements.iter().filter(|e| e.ty == T::AnimCurve).count(),
+    )?;
+    alloc.reserve(
+        &mut a.values,
+        scn.elements.iter().filter(|e| e.ty == T::AnimValue).count(),
+    )?;
     let channel_index: BTreeMap<_, _> =
         BTreeMap::try_from_iter(scn.deformers.channels.iter().map(|(k, c)| (*k, c)), alloc)?;
     for &i in &by_creation {
@@ -834,7 +877,19 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             continue;
         };
         if scn.doc.nodes[n].name != b"Shape" {
-            let layers = node_layers(
+            let restored = if e.ty == T::AnimValue {
+                scn.deferred
+                    .restore(n, &limits.syntax)
+                    .map_err(crate::canon_scene::syntax_error)?
+            } else {
+                None
+            };
+            let restored_index = restored
+                .as_ref()
+                .map(|d| scene_property::PropertyIndex::build(d, limits.max_allocation))
+                .transpose()
+                .map_err(crate::api::property_error)?;
+            let mut layers = node_layers(
                 &scn.doc,
                 &scn.props,
                 n,
@@ -843,14 +898,33 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 helper_for[i].is_some(),
                 limits,
             )?;
-            for p in &layers.authored {
-                authored[i].try_insert(alloc.bytes(p.name)?, property(p, alloc)?, alloc)?;
+            if let (Some(doc), Some(index)) = (&restored, &restored_index) {
+                layers.authored = scene_property::authored_indexed(
+                    doc,
+                    index,
+                    doc.object_node(),
+                    limits.max_properties,
+                    limits.max_allocation,
+                )
+                .map_err(crate::api::property_error)?;
             }
-            if let Some(list) = layers.defaults {
-                for p in &list {
-                    defaults[i].try_insert(alloc.bytes(p.name)?, property(p, alloc)?, alloc)?;
+            for p in &layers.authored {
+                authored.ensure(i, alloc)?.try_insert(
+                    alloc.bytes(p.name)?,
+                    property(p, alloc)?,
+                    alloc,
+                )?;
+            }
+            if let Some(list) = &layers.defaults {
+                for p in list {
+                    defaults.ensure(i, alloc)?.try_insert(
+                        alloc.bytes(p.name)?,
+                        property(p, alloc)?,
+                        alloc,
+                    )?;
                 }
             }
+            scene_property::release_layers(layers)?;
         }
         if e.ty == T::BlendChannel {
             let weight = channel_index.get(&i).map_or(0.0, |c| c.weight);
@@ -883,27 +957,50 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             } else {
                 weight * 100.0
             };
-            authored[i].try_get_or_insert_with(alloc.bytes(b"DeformPercent")?, alloc, || {
-                Ok(EvaluatedProperty {
-                    property_type: 3,
-                    flags: if scn.doc.nodes[n].name == b"Shape" && percent != 0.0 {
-                        0x8000
-                    } else {
-                        0
-                    },
-                    components: [percent, 0.0, 0.0, 0.0],
-                    ..EvaluatedProperty::default()
-                })
-            })?;
-        }
-        if e.ty == T::AnimCurve {
-            alloc.push(
-                &mut a.curves,
-                r.curve(i, n, limits.max_allocation, limits.max_keys)?,
+            authored.ensure(i, alloc)?.try_get_or_insert_with(
+                alloc.bytes(b"DeformPercent")?,
+                alloc,
+                || {
+                    Ok(EvaluatedProperty {
+                        property_type: 3,
+                        flags: if scn.doc.nodes[n].name == b"Shape" && percent != 0.0 {
+                            0x8000
+                        } else {
+                            0
+                        },
+                        components: [percent, 0.0, 0.0, 0.0],
+                        ..EvaluatedProperty::default()
+                    })
+                },
             )?;
         }
+        if e.ty == T::AnimCurve {
+            let restored = scn
+                .deferred
+                .restore(n, &limits.syntax)
+                .map_err(crate::canon_scene::syntax_error)?;
+            let curve = if let Some(doc) = restored.as_ref() {
+                let children = scene_property::PropertyIndex::build(doc, limits.max_allocation)
+                    .map_err(crate::api::property_error)?;
+                let reader = Reader {
+                    doc,
+                    ascii: scn.ascii,
+                    elements: &scn.elements,
+                    children: &children,
+                    budget: alloc,
+                };
+                reader.curve(i, doc.object_node(), limits.max_allocation, limits.max_keys)?
+            } else {
+                r.curve(i, n, limits.max_allocation, limits.max_keys)?
+            };
+            alloc.push(&mut a.curves, curve)?;
+        }
     }
-    let mut curve_index = alloc.filled(scn.elements.len(), None)?;
+    drop(helper_for);
+    drop(owner_for);
+    drop(channel_index);
+    let mut curve_index =
+        crate::allocation::Temporary::new(alloc.filled(scn.elements.len(), None)?)?;
     for (k, c) in a.curves.iter().enumerate() {
         curve_index[c.element] = Some(k);
     }
@@ -940,7 +1037,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         r.budget.sort_work(e.dst_conns.len())?;
         let mut conns = alloc.collect(e.dst_conns.iter())?;
         alloc.stable_sort(&mut conns, |a, b| a.1.cmp(&b.1))?;
-        for (src, name) in conns {
+        for (src, name) in crate::allocation::Temporary::new(conns)? {
             if let Some(k) = curve_index[*src] {
                 let c = match name.as_slice() {
                     b"Y" | b"d|Y" => 1,
@@ -955,7 +1052,9 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         }
         alloc.push(&mut a.values, v)?;
     }
-    let mut value_index = alloc.filled(scn.elements.len(), None)?;
+    drop(curve_index);
+    let mut value_index =
+        crate::allocation::Temporary::new(alloc.filled(scn.elements.len(), None)?)?;
     for (k, v) in a.values.iter().enumerate() {
         value_index[v.element] = Some(k);
     }
@@ -966,33 +1065,37 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             if name.is_empty() {
                 continue;
             }
-            let p = authored[*dst].try_get_or_insert_with(alloc.bytes(name)?, alloc, || {
-                let mut p = match defaults[*dst].get(name) {
-                    Some(p) => p.try_clone(alloc)?,
-                    None => EvaluatedProperty {
-                        flags: 0,
-                        components: if name == b"Lcl Scaling" {
-                            [1.0, 1.0, 1.0, 0.0]
-                        } else {
-                            [0.0; 4]
+            let p = authored.ensure(*dst, alloc)?.try_get_or_insert_with(
+                alloc.bytes(name)?,
+                alloc,
+                || {
+                    let mut p = match defaults[*dst].get(name) {
+                        Some(p) => p.try_clone(alloc)?,
+                        None => EvaluatedProperty {
+                            flags: 0,
+                            components: if name == b"Lcl Scaling" {
+                                [1.0, 1.0, 1.0, 0.0]
+                            } else {
+                                [0.0; 4]
+                            },
+                            property_type: match name.as_slice() {
+                                b"Lcl Translation" => 9,
+                                b"Lcl Rotation" => 10,
+                                b"Lcl Scaling" => 11,
+                                _ => 0,
+                            },
+                            ..EvaluatedProperty::default()
                         },
-                        property_type: match name.as_slice() {
-                            b"Lcl Translation" => 9,
-                            b"Lcl Rotation" => 10,
-                            b"Lcl Scaling" => 11,
-                            _ => 0,
-                        },
-                        ..EvaluatedProperty::default()
-                    },
-                };
-                if scn.doc.version < 6000 && defaults[*dst].get(name).is_none() {
-                    p.components[..3].copy_from_slice(&v.default_value);
-                }
-                p.flags |= 0x1001;
-                p.value_str.clear();
-                p.value_blob.clear();
-                Ok(p)
-            })?;
+                    };
+                    if scn.doc.version < 6000 && defaults[*dst].get(name).is_none() {
+                        p.components[..3].copy_from_slice(&v.default_value);
+                    }
+                    p.flags |= 0x1001;
+                    p.value_str.clear();
+                    p.value_blob.clear();
+                    Ok(p)
+                },
+            )?;
             p.flags |= 0x2000;
         }
     }
@@ -1057,7 +1160,9 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         layer.weight_is_animated = get(b"Weight").is_some_and(|p| p.flags & 0x2000 != 0);
         alloc.push(&mut a.layers, layer)?;
     }
-    let mut layer_index = alloc.filled(scn.elements.len(), None)?;
+    drop(value_index);
+    let mut layer_index =
+        crate::allocation::Temporary::new(alloc.filled(scn.elements.len(), None)?)?;
     for (k, l) in a.layers.iter().enumerate() {
         layer_index[l.element] = Some(k);
     }
@@ -1099,28 +1204,68 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             },
         )?;
     }
+    drop(layer_index);
+    drop(by_creation);
     a.default_stack =
         (0..a.stacks.len()).min_by_key(|&i| scn.elements[a.stacks[i].element].ordinal);
-    for (i, (base, def)) in authored.iter().zip(&defaults).enumerate() {
-        for (name, p) in def.iter().chain(base) {
-            a.properties
-                .try_insert((i, alloc.bytes(name)?), p.try_clone(alloc)?, alloc)?;
-        }
+    let mut property_count = a.properties.len();
+    for map in authored.maps.values() {
+        property_count = property_count
+            .checked_add(map.len())
+            .ok_or(Error::LimitExceeded(crate::Limit::Allocation))?;
     }
-    let mut node_element = alloc.filled(scn.doc.nodes.len(), None)?;
-    for (i, e) in scn.elements.iter().enumerate() {
-        if let Some(n) = e.node {
-            if scn.doc.version < 7000 && e.ty == T::Mesh {
-                node_element[n] = Some(i);
-            } else {
-                node_element[n].get_or_insert(i);
+    for (&i, map) in &defaults.maps {
+        for (name, _) in map {
+            if !authored[i].contains_key(name) {
+                property_count = property_count
+                    .checked_add(1)
+                    .ok_or(Error::LimitExceeded(crate::Limit::Allocation))?;
             }
         }
     }
-    let mut node_slot = alloc.filled(scn.elements.len(), None)?;
-    for (k, n) in a.nodes.iter().enumerate() {
-        node_slot[n.element] = Some(k);
+    if scn.lean {
+        for (i, map) in std::mem::take(&mut defaults.maps)
+            .into_iter()
+            .chain(std::mem::take(&mut authored.maps))
+        {
+            for (name, p) in map {
+                a.properties
+                    .try_insert_bounded((i, name), p, alloc, property_count)?;
+            }
+        }
+    } else {
+        for i in 0..scn.elements.len() {
+            for (name, p) in defaults[i].iter().chain(&authored[i]) {
+                a.properties.try_insert_bounded(
+                    (i, alloc.bytes(name)?),
+                    p.try_clone(alloc)?,
+                    alloc,
+                    property_count,
+                )?;
+            }
+        }
     }
+    let shape_links = scn.elements.iter().any(|e| {
+        e.ty == T::BlendChannel && e.node.is_some_and(|n| scn.doc.nodes[n].name == b"Shape")
+    });
+    let mut node_element = alloc.filled(if shape_links { scn.doc.nodes.len() } else { 0 }, None)?;
+    if shape_links {
+        for (i, e) in scn.elements.iter().enumerate() {
+            if let Some(n) = e.node {
+                if scn.doc.version < 7000 && e.ty == T::Mesh {
+                    node_element[n] = Some(i);
+                } else {
+                    node_element[n].get_or_insert(i);
+                }
+            }
+        }
+    }
+    let mut node_slots = if scn.deformers.clusters.is_empty() {
+        Vec::new()
+    } else {
+        alloc.collect(a.nodes.iter().enumerate().map(|(k, n)| (n.element, k)))?
+    };
+    node_slots.sort_unstable_by_key(|&(element, _)| element);
     // Property-to-property links (including generated legacy shape channels).
     for (i, e) in scn.elements.iter().enumerate() {
         if e.ty == T::BlendChannel && e.node.is_some_and(|n| scn.doc.nodes[n].name == b"Shape") {
@@ -1135,7 +1280,11 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                     if let Some(p) = a.properties.get_mut(&(i, alloc.bytes(b"DeformPercent")?)) {
                         p.flags |= 0x8000;
                     }
-                    if let Some(p) = authored[i].get_mut(b"DeformPercent".as_slice()) {
+                    if let Some(p) = authored
+                        .maps
+                        .get_mut(&i)
+                        .and_then(|m| m.get_mut(b"DeformPercent".as_slice()))
+                    {
                         p.flags |= 0x8000;
                     }
                 }
@@ -1154,7 +1303,12 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     })?;
     a.clusters = alloc.collect(clusters.into_iter().map(|(_, c)| {
         (
-            c.bone_node.and_then(|e| node_slot[e]),
+            c.bone_node.and_then(|e| {
+                node_slots
+                    .binary_search_by_key(&e, |&(element, _)| element)
+                    .ok()
+                    .map(|slot| node_slots[slot].1)
+            }),
             if c.bone_node.is_some() {
                 c.geometry_to_bone.0
             } else {
@@ -1296,6 +1450,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
 /// ufbxi_pre_finalize_scene / ufbxi_setup_scale_helper under COMPENSATE.
 pub(crate) fn scale_helpers(
     doc: &crate::syntax::Document<'_>,
+    deferred: &crate::syntax::DeferredData<'_>,
     props: &scene_property::PropertyIndex,
     elements: &mut Vec<crate::canon_scene::Element>,
     connections: &mut Vec<(usize, usize, Vec<u8>)>,
@@ -1310,13 +1465,13 @@ pub(crate) fn scale_helpers(
     budget.charge(doc.nodes.len(), 64)?;
     budget.charge(elements.len(), 512)?;
     budget.work(doc.nodes.len() + elements.len())?;
-    let dom_children = child_index(doc, &budget)?;
-    preflight_curves(doc, elements, &dom_children, limits, &budget)?;
+    let dom_children = props;
+    preflight_curves(doc, elements, dom_children, deferred, limits, &budget)?;
     let n = elements.len();
-    let mut original = budget.filled(n, 0)?;
-    let mut scale = budget.filled(n, [1.0; 3])?;
-    let mut animated = budget.filled(n, false)?;
-    let mut parent = budget.filled(n, None)?;
+    let mut original = crate::allocation::Temporary::new(budget.filled(n, 0)?)?;
+    let mut scale = crate::allocation::Temporary::new(budget.filled(n, [1.0; 3])?)?;
+    let mut animated = crate::allocation::Temporary::new(budget.filled(n, false)?)?;
+    let mut parent = crate::allocation::Temporary::new(budget.filled(n, None)?)?;
     for (i, e) in elements.iter().enumerate() {
         if e.ty != T::Node {
             continue;
@@ -1341,8 +1496,8 @@ pub(crate) fn scale_helpers(
             scale[i].copy_from_slice(&p.value_real[..3]);
         }
     }
-    let mut constant = budget.filled(n, [f64::NAN; 3])?;
-    let mut has_constant = budget.filled(n, true)?;
+    let mut constant = crate::allocation::Temporary::new(budget.filled(n, [f64::NAN; 3])?)?;
+    let mut has_constant = crate::allocation::Temporary::new(budget.filled(n, true)?)?;
     for (i, e) in elements.iter().enumerate() {
         if e.ty == T::AnimValue {
             if let Some(node) = e.node {
@@ -1358,6 +1513,33 @@ pub(crate) fn scale_helpers(
                     constant[i] = crate::legacy::defaults(doc, props, node, ascii, &budget)?;
                     continue;
                 }
+                let restored = deferred
+                    .restore(node, &limits.syntax)
+                    .map_err(crate::canon_scene::syntax_error)?;
+                let restored_index = restored
+                    .as_ref()
+                    .map(|d| scene_property::PropertyIndex::build(d, limits.max_allocation))
+                    .transpose()
+                    .map_err(crate::api::property_error)?;
+                let direct = match (&restored, &restored_index) {
+                    (Some(d), Some(p)) => Some(
+                        scene_property::authored_indexed(
+                            d,
+                            p,
+                            d.object_node(),
+                            limits.max_properties,
+                            limits.max_allocation,
+                        )
+                        .map_err(crate::api::property_error)?,
+                    ),
+                    _ => None,
+                };
+                let find = |name: &[u8]| {
+                    direct
+                        .as_ref()
+                        .and_then(|p| p.binary_search_by(|p| p.name.cmp(name)).ok().map(|i| &p[i]))
+                        .or_else(|| l.find(name))
+                };
                 for (c, (plain, prefixed)) in [
                     (b"X".as_slice(), b"d|X".as_slice()),
                     (b"Y", b"d|Y"),
@@ -1366,25 +1548,36 @@ pub(crate) fn scale_helpers(
                 .into_iter()
                 .enumerate()
                 {
-                    constant[i][c] = l
-                        .find(prefixed)
-                        .or_else(|| l.find(plain))
+                    constant[i][c] = find(prefixed)
+                        .or_else(|| find(plain))
                         .map_or(f64::NAN, |p| p.value_real[0]);
                 }
             }
         }
     }
-    let mut ranges = budget.filled(n, None)?;
+    let mut ranges = crate::allocation::Temporary::new(budget.filled(n, None)?)?;
     for (i, e) in elements.iter().enumerate() {
         if e.ty != T::AnimCurve {
             continue;
         }
         let node = e.node.ok_or("animation: curve source")?;
+        let restored = deferred
+            .restore(node, &limits.syntax)
+            .map_err(crate::canon_scene::syntax_error)?;
+        let restored_index = restored
+            .as_ref()
+            .map(|d| scene_property::PropertyIndex::build(d, limits.max_allocation))
+            .transpose()
+            .map_err(crate::api::property_error)?;
+        let (doc, node, dom_children) = match (&restored, &restored_index) {
+            (Some(d), Some(p)) => (&**d, d.object_node(), p),
+            _ => (doc, node, dom_children),
+        };
         if doc.version < 7000 {
             let keys = legacy_keys(
                 doc,
                 ascii,
-                &dom_children,
+                dom_children,
                 &budget,
                 node,
                 limits.max_allocation,
@@ -1404,15 +1597,15 @@ pub(crate) fn scale_helpers(
             );
             continue;
         }
-        let value_node = dom_children[node]
-            .iter()
-            .copied()
+        let value_node = dom_children
+            .children(node)
             .find(|&c| doc.nodes[c].name == b"KeyValueFloat")
             .ok_or("animation: missing curve array")?;
         budget.work(crate::canon_dom::data_len(doc, value_node)?)?;
         let values = crate::canon_dom::node_data(doc, value_node, ascii, &budget)?;
         ranges[i] = Some(match values {
-            crate::canon_dom::NodeData::Reals(v) => v
+            crate::canon_dom::NodeData::Reals(v) => budget
+                .scratch(v)?
                 .into_iter()
                 .fold(None::<(f64, f64)>, |acc, x| {
                     Some(acc.map_or((x, x), |(a, b)| {
@@ -1462,7 +1655,7 @@ pub(crate) fn scale_helpers(
             parent[*src] = Some(*dst);
         }
     }
-    let mut required = budget.filled(n, false)?;
+    let mut required = crate::allocation::Temporary::new(budget.filled(n, false)?)?;
     for (i, p) in parent.iter().enumerate() {
         if original[i] != 0 {
             if let Some(p) = p.filter(|&p| p != 0) {
@@ -1479,14 +1672,14 @@ pub(crate) fn scale_helpers(
     }
     // ufbxi_pre_finalize_scene recursively carries helpers through a
     // componentwise branch, including ignore-parent-scale descendants.
-    let mut children = budget.filled(n, Vec::new())?;
+    let mut children = crate::allocation::Temporary::new(budget.filled(n, Vec::new())?)?;
     for (i, p) in parent.iter().enumerate() {
         if let Some(p) = p {
             budget.push(&mut children[*p], i)?;
         }
     }
     let initial: Vec<_> = budget.collect((1..n).filter(|&i| required[i]))?;
-    let mut recursive = budget.filled(n, false)?;
+    let mut recursive = crate::allocation::Temporary::new(budget.filled(n, false)?)?;
     for owner in initial {
         let mut pending = budget.collect(children[owner].iter().copied())?;
         while let Some(i) = pending.pop() {
@@ -1499,8 +1692,18 @@ pub(crate) fn scale_helpers(
             }
         }
     }
+    let additional = required.iter().skip(1).filter(|&&v| v).count();
+    if additional != 0
+        && elements
+            .len()
+            .checked_add(additional)
+            .is_none_or(|n| n > limits.index.max_objects)
+    {
+        return Err(Error::LimitExceeded(crate::Limit::Objects));
+    }
+    budget.reserve(elements, additional)?;
     let mut pairs = Vec::new();
-    let mut helpers = budget.filled(n, None)?;
+    let mut helpers = crate::allocation::Temporary::new(budget.filled(n, None)?)?;
     for i in 1..n {
         if required[i] {
             if elements.len() >= limits.index.max_objects {
@@ -1645,6 +1848,7 @@ Connections: {
             let mut connections = Vec::new();
             let error = scale_helpers(
                 &s.doc,
+                &s.deferred,
                 &s.props,
                 &mut s.elements,
                 &mut connections,
@@ -1660,12 +1864,13 @@ Connections: {
             );
         }
         let s = crate::canon_scene::project_with(INPUT, &DumpLimits::default(), true).unwrap();
-        let children = child_index(&s.doc, &crate::api_alloc::Budget::new(usize::MAX)).unwrap();
+        let children = scene_property::PropertyIndex::build(&s.doc, usize::MAX).unwrap();
         let budget = Budget::new(0, usize::MAX, Path::Curves);
         assert!(preflight_curves(
             &s.doc,
             &s.elements,
             &children,
+            &s.deferred,
             &DumpLimits::default(),
             &budget
         )
@@ -1685,6 +1890,7 @@ Connections: {
             &s.doc,
             &elements,
             &children,
+            &s.deferred,
             &DumpLimits::default(),
             &budget
         )

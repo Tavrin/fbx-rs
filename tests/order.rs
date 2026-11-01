@@ -145,3 +145,40 @@ fn baking_a_scale_helper_also_bakes_its_unanimated_siblings() {
     assert_eq!(baked.nodes.len(), 2);
     assert!(baked.nodes.windows(2).all(|w| w[0].node < w[1].node));
 }
+
+#[test]
+fn canonical_count_includes_opaque_and_generated_elements() {
+    let scene = load(UNSORTED_IDS.as_bytes(), &LoadOptions::default()).unwrap();
+    assert_eq!(scene.element_count(), 9); // root + eight authored objects
+    let input = br#"; FBX 7.4.0 project file
+Objects: {
+ Model: 1, "Model::N", "Null" { }
+ Video: 2, "Video::V", "Clip" { }
+ ObjectMetaData: 3, "ObjectMetaData::M", "" { }
+ PrivateObject: 4, "PrivateObject::O", "Unknown" { }
+}
+Connections: { C: "OO",1,0 }
+"#;
+    let scene = load(input, &LoadOptions::default()).unwrap();
+    assert_eq!(scene.nodes().len(), 2);
+    assert_eq!(scene.element_count(), 5);
+    let scene = load(SCALE_HELPER.as_bytes(), &LoadOptions::default()).unwrap();
+    // Six authored objects, the root and one generated scale helper.
+    assert_eq!(scene.element_count(), 8);
+}
+
+#[cfg(feature = "parity")]
+#[test]
+fn canonical_count_matches_projection_including_legacy_synthesis() {
+    use fbx_rs::canon_scene::{project, DumpLimits};
+    for input in [
+        UNSORTED_IDS.as_bytes(),
+        SCALE_HELPER.as_bytes(),
+        include_bytes!("fixtures/legacy-deform.fbx"),
+        include_bytes!("fixtures/legacy-take.fbx"),
+    ] {
+        let canon = project(input, &DumpLimits::default()).unwrap();
+        let public = load(input, &LoadOptions::default()).unwrap();
+        assert_eq!(public.element_count(), canon.elements.len());
+    }
+}

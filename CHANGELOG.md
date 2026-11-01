@@ -6,6 +6,22 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Add `Scene::element_count()`, an exact O(1) canonical-element total after
+  synthesis, including opaque kinds and generated helper/blend-shape objects.
+
+### Changed
+
+- Reduce load memory by retaining validated binary animation-curve and value
+  source ranges, restoring one object at a time, packing binary connections,
+  reusing the compact DOM child index, storing node transforms and adjustments
+  sparsely, reserving exact element/connection capacities, and permuting
+  elements in place. Custom curve children retain the complete syntax subtree.
+- Share the `Limits::max_allocation` buffer envelope across load phases, with
+  charge/refund accounting for scratch buffers and restored data. Document
+  conservative charges and the input/allocator/process-memory exclusions.
+
 ## [0.1.3] - 2026-10-31
 
 ### Added

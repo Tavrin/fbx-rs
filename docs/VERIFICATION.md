@@ -273,34 +273,73 @@ Rust dump now does the same (`src/animation_canon.rs`). The 316 corpus files did
 not show it: re-run over them with the section comparison, 45 are equal in every
 section and 271 differ only in `dom`.
 
-Memory of `load` on `Surveyor.fbx`, measured with a counting global allocator that
-attributes every allocation of 1 MiB or more to its call stack (a scratch probe,
-not in the repository): peak live heap 3,991 MiB, resident high-water mark 3.83
-GiB (4,020,096 kB), 10.8 times the 355 MiB input, in 15.6 s. At the peak:
+Memory was remeasured with the same scratch counting allocator on the original
+and changed release builds. Values below are **phase-local peak live requested
+heap bytes**, in MiB (2^20 bytes), including the input buffer held by the caller.
+Each phase resets the high-water mark to the currently live heap; retained data
+from earlier phases therefore remains included. Reallocation counts the change
+in requested size; allocator-internal transient copies, metadata, fragmentation,
+stacks and code pages are excluded. These are heap measurements, not RSS or
+performance timings. The three inputs were read in place and hash-checked on
+both runs; no external files were opened by either importer.
 
-| Holder (phase that creates it) | MiB |
-| --- | ---: |
-| Input bytes, held by the caller | 355 |
-| `syntax::Property` vector, 14.8 M values (parse) | 640 |
-| `syntax::Node` vector, 7.5 M nodes (parse) | 384 |
-| `Vec<Option<NodeState>>`, one slot per element (projection) | 568 |
-| Element table (projection) | 192 |
-| `Vec<Option<Element>>` (projection) | 162 |
-| Allocations under 1 MiB: names, keys, per-element vectors | 598 |
-| Large allocations made through the allocation budget helper, not attributed to a named frame: decompressed arrays (about 65), the public scene lists and matrices, curves, `Adjust` and property-layer tables | about 1,090 |
+| Phase peak, MiB (before → after) | Surveyor | BistroInterior | BistroInterior_Wine |
+| --- | ---: | ---: | ---: |
+| Parse | 1,411.1 → 610.9 | 236.2 → 229.5 | 260.8 → 255.5 |
+| Element construction | 2,201.3 → 1,020.4 | 241.4 → 231.5 | 266.6 → 257.8 |
+| Graph and transforms | 3,071.8 → 1,093.3 | 252.9 → 243.6 | 280.7 → 272.3 |
+| Meshes | 3,141.5 → 1,087.5 | 442.0 → 432.3 | 494.3 → 485.6 |
+| Deformers | 3,308.4 → 1,217.0 | 438.7 → 429.1 | 490.6 → 482.1 |
+| Materials and attributes | 3,192.6 → 1,107.9 | 443.2 → 430.9 | 495.6 → 483.9 |
+| Animation | 3,955.2 → 1,408.0 | 499.6 → 463.4 | 559.8 → 523.9 |
+| Owned scene publication | 3,272.7 → 1,441.5 | 465.5 → 450.6 | 517.9 → 508.0 |
 
-The DOM is not kept alive after the scene is built: the projection is dropped when
-`Scene::from_projection` returns (live heap 805 MiB afterwards, the scene and
-the caller's input). It cannot be dropped earlier, because that function
-re-reads the DOM arrays to extract the meshes. The one clearly avoidable item is
-the per-element `NodeState` table (568 MiB, 14 % of the peak): only nodes hold a
-state, and a table indexed by node would remove most of it. It touches the node
-transform, animation and deformer stages, which share the table, so it is left as
-follow-up work rather than folded into this change; the output does not change
-either way. `BistroInterior.fbx` peaks at 534 MiB of heap (13 times its 40 MiB).
+| Input | Input MiB | Overall peak MiB (before → after) | Peak/input (before → after) | ufbx peak MiB | After/ufbx |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `Surveyor.fbx` | 355.3 | 3,955.2 → 1,441.5 | 11.13x → 4.06x | 1,014.3 | 1.42x |
+| `BistroInterior.fbx` | 39.9 | 499.6 → 463.4 | 12.53x → 11.62x | 236.8 | 1.96x |
+| `BistroInterior_Wine.fbx` | 46.5 | 559.8 → 523.9 | 12.04x → 11.27x | 261.1 | 2.01x |
 
-Reproduce: `cargo build --release -p fbx-parity`, then
-`python3 reference/compare_large.py ORACLE target/release/fbx-parity WORKDIR FILE...`.
+All six original/changed default Rust loads and all three fresh pinned-ufbx
+loads exited 0. All three changed loads also succeed with an explicit
+`max_allocation = 1536 << 20` (1,536 MiB) internal buffer envelope. The ufbx
+allocator callbacks count temporary and result allocations with the same
+conversion options and `retain_dom = false`, plus the caller's input buffer.
+Surveyor meets the 1,536 MiB heap target; the optional 1.1x-ufbx target remains
+unmet. Its full canonical-stream comparison remains unverified as described
+above; these memory results do not establish that comparison.
+
+The loader now stores node states and adjustments sparsely, permutes elements in
+place, reserves authored element and connection degrees exactly, and shares the
+compact DOM child index. The binary lean parser validates curve/value subtrees
+and then retains borrowed source ranges, restoring one object at a time. It also
+packs binary connection records without retaining their syntax properties.
+Original source ordinals, aggregate node/property/array/decompression limits and
+compression validation are preserved; custom curve children keep the complete
+subtree. The owned scene releases the DOM after publication.
+
+`Scene::element_count()` returns the exact final canonical element total in O(1)
+with no allocation or second parse. It requires a completed load and includes
+root, opaque/unsupported, animation and generated helper/blend-shape elements,
+rather than summing public typed lists. The three totals are 887,693, 2,908 and
+3,457 respectively, equal to the pinned ufbx scene totals. Authored opaque kinds,
+scale helpers and legacy synthesis are also covered by regression fixtures.
+
+`Limits::max_allocation` now spans parsing, conversion and publication. Checked
+reservations charge retained capacity plus old and new buffers during growth;
+owned scratch, restored objects, indices and copied property lists refund their
+charges after use. Some short-lived data remains conservatively charged until
+load returns, so rejection may precede the actual heap peak. Caller input and
+allocator/process overhead need a separate host allowance; the field is not an
+RSS cap. Allocation-failure sweeps and a global-allocation-counter regression
+cover accepted and rejected loads at several byte limits.
+
+The final validation passed formatting, both clippy configurations with warnings
+as errors, workspace tests, doctests, rustdoc, wasm32, the release build and the
+public-text guard. Ordered modern output is unchanged on 316/316 files; the full
+comparison passes 340/340 files (including 24 legacy inputs), and all 48 baked
+streams match. Probe sources, binaries, input hashes, raw phase bytes and each
+run's exit status are retained outside the repository.
 
 ### Curtains converted-space regression
 
@@ -670,10 +709,15 @@ failure scenario.
 The contract covers the default public load/evaluation/bake paths. The unstable
 canonical dump writer's own value trees and output buffers, caller-invoked
 `Clone`/`Debug`/`Display`, test fixtures and allocator internals are outside it.
-Configured limits remain per-stage conservative capacity/work bounds, not a
-process-RSS bound. Conversion growth conservatively charges adopted old vector
-capacity before reserving new storage; no allocator-private metadata or rounding
-is included in these Rust-visible capacities. Executable tests establish the
+Public loading shares one conservative buffer-capacity envelope across parsing,
+conversion and publication, retaining old buffers during growth and refunding
+owned scratch after deallocation. Evaluation and baking keep their separate
+stage limits, and traversal work limits remain per stage. None is a process-RSS
+bound: caller input, allocator-private metadata and fragmentation are excluded.
+The live-allocation regression measures successful and refused loads under
+several byte envelopes, covering ASCII, compressed binary, legacy deformation
+and animation, and a larger node hierarchy; every measured heap peak fits the
+configured load allowance. Executable tests establish the
 covered fixtures and allocation points; the full path guarantee also depends on
 the source audit of the remaining pre-reserved pushes, copies and error paths.
 

@@ -28,6 +28,11 @@ impl Budget {
         }
     }
     pub fn charge(&self, count: usize, width: usize) -> Result<(), crate::Error> {
+        // Public loads charge real reservations to the shared live envelope.
+        // Keep estimates for standalone projections without that load scope.
+        if crate::allocation::load_active() {
+            return Ok(());
+        }
         let used = count
             .checked_mul(width)
             .and_then(|n| self.used.get().checked_add(n))
