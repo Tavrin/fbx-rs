@@ -299,6 +299,31 @@ fn walk(scene: &Scene) {
     std::hint::black_box((scene.settings(), scene.unsupported(), scene.warnings()));
 }
 
+/// `Scene::element_count` is a canonical element count: it covers the root and
+/// every element behind the typed lists, so it is at least their summed length.
+fn check_element_count(scene: &Scene) {
+    let listed = scene.nodes().len()
+        + scene.meshes().len()
+        + scene.materials().len()
+        + scene.textures().len()
+        + scene.cameras().len()
+        + scene.lights().len()
+        + scene.bones().len()
+        + scene.skin_deformers().len()
+        + scene.skin_clusters().len()
+        + scene.blend_deformers().len()
+        + scene.blend_channels().len()
+        + scene.blend_shapes().len()
+        + scene.poses().len();
+    assert!(scene.element_count() >= 1);
+    assert!(
+        scene.element_count() >= listed,
+        "element_count {} below the {} listed elements",
+        scene.element_count(),
+        listed
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
     // Small limits, just large enough for every supported corpus file (skins,
     // blend shapes and animation included) to load, so the seeds reach those paths.
@@ -324,10 +349,35 @@ fuzz_target!(|data: &[u8]| {
         max_face_vertices: 128,
         max_triangulation_work: 256,
     };
-    if let Ok(scene) = load_with_limits(data, &LoadOptions::default(), &limits) {
-        walk(&scene);
-        check_order(&scene);
-        check_materials(&scene);
-        check_bake(&scene, data);
+    let main = load_with_limits(data, &LoadOptions::default(), &limits);
+    if let Ok(scene) = &main {
+        walk(scene);
+        check_order(scene);
+        check_materials(scene);
+        check_bake(scene, data);
+        check_element_count(scene);
+    }
+    // The same input under a small allocation cap picked from the input, so the
+    // charge and release paths and the refusals run. The cap is the only change:
+    // a load that succeeds must agree with the uncapped one, and one that
+    // succeeds under the cap must succeed under the larger one.
+    let mut hash = 0x9e37_79b9_7f4a_7c15u64;
+    for &b in data.iter().take(64) {
+        hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    let caps = [1usize << 9, 1 << 11, 1 << 13, 1 << 15, 1 << 17, 3 << 17];
+    let small = Limits {
+        max_allocation: caps[usize::try_from(hash % caps.len() as u64).unwrap_or(0)],
+        ..limits
+    };
+    if let Ok(capped) = load_with_limits(data, &LoadOptions::default(), &small) {
+        check_element_count(&capped);
+        let full = main.as_ref().expect("a load within a smaller allocation cap fails under a larger one");
+        assert_eq!(capped.element_count(), full.element_count());
+        assert_eq!(capped.nodes().len(), full.nodes().len());
+        assert_eq!(capped.meshes().len(), full.meshes().len());
+        assert_eq!(capped.materials().len(), full.materials().len());
+        assert_eq!(capped.animation_curves().len(), full.animation_curves().len());
+        assert_eq!(capped.warnings(), full.warnings());
     }
 });

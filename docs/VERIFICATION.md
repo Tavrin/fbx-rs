@@ -808,3 +808,46 @@ memory-limit failure and no artifact file. `ascii` met the flat-chunk rule
 CPU-second cap: their last full 600-second chunks still added 1, 44 and 37 edges,
 and the short final chunk to the cap added none, so the cap, not a flat 10
 minutes, ended them.
+
+### Pre-release fuzz run (0.1.4, allocation accounting and compact storage)
+
+New code since 0.1.3: syntax data released during conversion, compact
+property storage, array handling, allocation charge and release accounting,
+`Scene::element_count()`, and the allocation-free bake sort with propagated
+limit errors. Library commit `72a4a76`.
+
+The `load` target now also loads each input under a `max_allocation` of 512 B
+to 384 KiB chosen from a hash of the input, so the charge, release and refusal
+paths run. It asserts that `element_count()` is at least the summed length of
+the typed lists and at least 1, that a load which succeeds under the cap
+succeeds without it, and that the two scenes agree on `element_count()`, node,
+mesh, material and animation-curve counts and warnings. The other three targets
+are unchanged.
+
+Reach, `cargo fuzz coverage` on `load` (line coverage): `allocation.rs` 91.4 %
+with the 41 seeds alone and with the final corpus; the capped load runs on
+every input. Over the final corpus the cap refused 27.3 thousand reservations
+(`reserve_with`, limit branch) and the live-charge counter ran 67.1 million
+times, with 64.9 million charges accepted. Whole-crate line coverage went from
+58.9 % (seeds) to 66.4 % (final corpus). The lines of `allocation.rs` still
+unexecuted are the allocator-growth-after-reserve branches.
+
+Same rule and flags as the earlier runs (`-max_len=262144`, `-timeout=5`,
+`-rss_limit_mb=512`, `-malloc_limit_mb=512`, 600-second chunks, stop at a chunk
+that adds no edge after at least 600 CPU-seconds, cap 7,200 CPU-seconds), four
+libFuzzer processes in parallel, debug assertions and overflow checks on. The
+persistent corpora of an earlier run on `8c0b329` were kept as the start, so
+the chunk-1 starting coverage is already high; the "seeds" column is the 41
+seed files alone.
+
+| Target | CPU-minutes | Executions | Edge coverage, seeds to final | Crashes | Stop | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `binary` | 20.0 | 279.7 M | 410 to 1,042 | 0 | chunk 2 added no coverage | 61 MiB |
+| `ascii` | 89.8 | 1,348.9 M | 410 to 1,058 | 0 | chunk 9 added no coverage | 55 MiB |
+| `scene_dom` | 121.7 | 3.3 M | 9,852 to 16,182 | 0 | cap reached | 145 MiB |
+| `load` | 120.3 | 16.9 M | 9,106 to 17,145 | 0 | cap reached | 219 MiB |
+
+Every chunk of every target exited 0; no crash, timeout, out-of-memory or
+memory-limit failure and no artifact file. `scene_dom` and `load` ran to the
+cap: their last full chunks still added 21 and 43 edges and only the short
+final chunk added none, so the cap, not a flat 10 minutes, ended them.
