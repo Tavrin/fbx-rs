@@ -187,13 +187,19 @@ impl Limit {
 /// [`Error::LimitExceeded`] (naming the field) instead of exhausting memory.
 /// Every limit that can reject a file is a field here.
 ///
-/// The defaults accept production-size scene exports: a 355 MiB file with 7.5
-/// million DOM nodes loads with them. The parsed document and each conversion
-/// stage are charged against [`Limits::max_allocation`] separately, and the
-/// decompressed array data is further capped by `max_decompressed_bytes`; this
-/// is a per-stage bound, not a cap on process memory. Peak resident size
-/// measured 10.9 to 12.2 times the input size on the production files, so
-/// size `max_input_bytes` and `max_allocation` for the memory you can spend.
+/// [`Limits::max_allocation`] is shared by parsing, conversion and publication
+/// of the owned scene. It bounds accounted Rust buffer capacities, including
+/// retained storage from earlier phases and old plus new buffers during growth.
+/// Scratch buffers, restored binary curves and property indices refund their
+/// charges when dropped. Other short-lived storage may remain conservatively
+/// charged until the call returns, so a refusal can precede the actual heap peak.
+///
+/// The caller's input slice, allocator metadata/fragmentation, stacks and code
+/// pages are outside that byte envelope. For a host memory allowance, reserve
+/// the input's storage and allocator/process overhead separately, then pass the
+/// remaining buffer allowance as `max_allocation`. This is not an RSS cap.
+/// `max_decompressed_bytes` additionally bounds total decoded source bytes,
+/// including arrays that are validated and dropped before conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
     /// Maximum input size in bytes (default 1 GiB).
@@ -219,8 +225,9 @@ pub struct Limits {
     pub max_animation_keys: usize,
     /// Maximum FBX connections (default 8,388,608).
     pub max_connections: usize,
-    /// Maximum bytes requested by one conversion stage, and by the parser's
-    /// retained DOM (default 4 GiB; the address space on 32-bit targets).
+    /// Shared conservative buffer-capacity envelope for the entire load
+    /// (default 4 GiB; the address space on 32-bit targets). See the accounting
+    /// and host-memory exclusions on [`Limits`].
     pub max_allocation: usize,
     /// Maximum deformer traversal, lookup and sorting work units (default
     /// 268,435,456).
@@ -444,6 +451,11 @@ impl LoadOptions {
 /// Load an FBX file (binary or ASCII, FBX 5.8/6.x and 7.1–7.7) with the
 /// default [`Limits`].
 ///
+/// Invalid geometry data, such as a vertex array whose length is not divisible
+/// by three, can load with the affected mesh left empty, matching ufbx.
+/// These files have entries in [`Scene::warnings()`]. Allocation and resource
+/// limit refusals always return an error.
+///
 /// # Errors
 /// See [`Error`]. A failed load publishes no partial scene.
 pub fn load(bytes: &[u8], options: &LoadOptions) -> Result<Scene, Error> {
@@ -466,6 +478,7 @@ pub fn load_with_limits(
             limit: limits.max_input_bytes,
         });
     }
+    let _allocation_scope = crate::allocation::LoadScope::new(limits.max_allocation);
     let dump = limits.dump_limits();
     let canon = canon_scene::project_with(bytes, &dump, true)?;
     Scene::from_projection(
@@ -1235,6 +1248,7 @@ pub struct Unsupported {
 /// A loaded scene. Objects refer to each other by index into the slices.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
+    element_count: usize,
     animation: crate::animation::Animation,
     nodes: Vec<Node>,
     meshes: Vec<Mesh>,
@@ -1255,6 +1269,17 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// Exact number of canonical elements after all load-time synthesis.
+    ///
+    /// Includes the root, opaque and unsupported element kinds, animation
+    /// objects, and generated scale helpers and legacy blend-shape objects.
+    /// This is neither a syntax-node count nor the sum of the public typed
+    /// slices. Reading it costs O(1), allocates nothing, and requires a
+    /// completed load; it does not perform a second parse or a pre-scan.
+    pub fn element_count(&self) -> usize {
+        self.element_count
+    }
+
     /// Bake a stack into independently reduced linear transform/property channels.
     /// `None` selects the default stack. Candidate keys and allocation/work
     /// are bounded by `options`; see `docs/VERIFICATION.md` for compatibility.
@@ -1386,7 +1411,9 @@ impl Scene {
     /// Conversion warnings: content that was read but is not converted
     /// (unported shader types, shader textures) or a mesh that failed to
     /// convert and is left empty. The text is for people, not for matching.
-    /// The library never prints them.
+    /// For example, a vertex array whose length is not divisible by three
+    /// leaves an empty mesh and a warning, matching ufbx. Allocation and limit
+    /// refusals return errors instead of warnings. The library never prints them.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
@@ -1492,7 +1519,7 @@ impl Scene {
         budget.reserve(&mut nodes, counts[0])?;
         for &i in list_of(T::Node) {
             let e = &c.elements[i];
-            let Some(Some(state)) = c.node_states.get(i) else {
+            let Some(state) = c.node_states.get(i) else {
                 return Err(Error::InvalidData("node without transform"));
             };
             let first = t.attribs.get(i).and_then(|a| a.first().copied());
@@ -1629,7 +1656,8 @@ impl Scene {
 
         // Triangulate the loaded coordinate space and corner order, as
         // ufbx_catch_triangulate_face (0.23.1, ufbx.c:32416-32488).
-        let index = scene::index(&c.doc, &limits.index).map_err(scene_error)?;
+        let index =
+            scene::index_with(&c.doc, &limits.index, Some(&c.deferred)).map_err(scene_error)?;
         let sources = scene_mesh::extract(&c.doc, &index, mesh_limits).map_err(scene_error)?;
         let mut sources_by_node = budget.collect(sources.meshes.iter().map(|s| (s.node, s)))?;
         sources_by_node.sort_unstable_by_key(|s| s.0);
@@ -1788,6 +1816,7 @@ impl Scene {
                 .map(|&(kind, source_id)| Unsupported { kind, source_id }),
         )?;
         Ok(Scene {
+            element_count: n,
             animation: std::mem::take(&mut c.animation),
             nodes,
             meshes,

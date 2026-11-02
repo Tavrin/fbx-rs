@@ -22,7 +22,7 @@ pub(crate) struct Deformers {
 struct Reader<'a, 'd> {
     s: &'a CanonScene<'d>,
     allocation: crate::api_alloc::Budget,
-    children: Vec<Vec<usize>>,
+    children: &'a crate::scene_property::PropertyIndex,
     used: std::cell::Cell<usize>,
     limit: usize,
     work: std::cell::Cell<usize>,
@@ -31,26 +31,19 @@ struct Reader<'a, 'd> {
 }
 impl Reader<'_, '_> {
     fn new<'a, 'd>(s: &'a CanonScene<'d>, limits: &DumpLimits) -> Result<Reader<'a, 'd>, Error> {
-        let mut r = Reader {
+        let r = Reader {
             s,
             allocation: crate::api_alloc::Budget::new(limits.max_allocation),
-            children: Vec::new(),
+            children: &s.props,
             used: std::cell::Cell::new(0),
             limit: limits.max_allocation,
             work: std::cell::Cell::new(0),
             work_limit: limits.max_deformer_work,
             path: std::cell::Cell::new(crate::conversion_budget::Path::Deformers),
         };
-        // Outer adjacency, child counts, and at most twice the child entries
-        // for Vec growth, before constructing any of the adjacency table.
-        r.charge(s.doc.nodes.len(), std::mem::size_of::<Vec<usize>>() + 32)?;
+        // The shared index is already allocated and validated. Charge only
+        // work here; decoded array scratch is charged before materialization.
         r.work(s.doc.nodes.len())?;
-        r.children = r.allocation.filled(s.doc.nodes.len(), Vec::new())?;
-        for (i, n) in s.doc.nodes.iter().enumerate() {
-            if let Some(p) = n.parent {
-                r.allocation.push(&mut r.children[p], i)?;
-            }
-        }
         Ok(r)
     }
     fn work(&self, count: usize) -> Result<(), Error> {
@@ -74,6 +67,11 @@ impl Reader<'_, '_> {
         )
     }
     fn charge(&self, count: usize, width: usize) -> Result<(), Error> {
+        // Public loads charge real reservations to the shared live envelope.
+        // Keep estimates for standalone projections without that load scope.
+        if crate::allocation::load_active() {
+            return Ok(());
+        }
         let used = count
             .checked_mul(width)
             .and_then(|n| self.used.get().checked_add(n))
@@ -85,13 +83,12 @@ impl Reader<'_, '_> {
         Ok(())
     }
     fn child(&self, n: usize, name: &[u8]) -> Option<usize> {
-        self.children[n]
-            .iter()
-            .copied()
+        self.children
+            .children(n)
             .find(|&c| self.s.doc.nodes[c].name == name)
     }
     fn data(&self, n: usize, name: &[u8]) -> Result<Option<NodeData>, Error> {
-        self.work(self.children[n].len())?;
+        self.work(self.children.children(n).count())?;
         let Some(c) = self.child(n, name) else {
             return Ok(None);
         };
@@ -174,7 +171,7 @@ impl Reader<'_, '_> {
         let n = self.s.elements[mesh]
             .node
             .ok_or("deformer: mesh has no source")?;
-        self.work(self.children[n].len())?;
+        self.work(self.children.children(n).count())?;
         // Mesh conversion already validates these values. Count without
         // copying the whole mesh again for every cluster/shape.
         self.child(n, b"Vertices")
@@ -255,7 +252,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
     r.charge(s.elements.len(), 1024)?;
     r.work(s.elements.len())?;
     // Reject deformer-only cycles, including unconnected cycles, without recursion.
-    let mut color = a.filled(s.elements.len(), 0u8)?;
+    let mut color = crate::allocation::Temporary::new(a.filled(s.elements.len(), 0u8)?)?;
     for start in 0..s.elements.len() {
         if !matches!(
             s.elements[start].ty,
@@ -321,7 +318,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         m
     };
     let mut d = Deformers::default();
-    let mut node_bind = a.filled(s.elements.len(), None)?;
+    let mut node_bind = crate::allocation::Temporary::new(a.filled(s.elements.len(), None)?)?;
     // Resolve poses in source order: the first bind pose wins for each node.
     let parent_of =
         |k: usize| {
@@ -369,8 +366,8 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
     by_name.sort_unstable();
     // Memoize parent depth once. Each node is walked at most twice, even
     // for deep chains and multiple poses; sorting never walks ancestors.
-    let mut depths: Vec<Option<usize>> = a.filled(s.elements.len(), None)?;
-    let mut visiting = a.filled(s.elements.len(), false)?;
+    let mut depths = crate::allocation::Temporary::new(a.filled(s.elements.len(), None)?)?;
+    let mut visiting = crate::allocation::Temporary::new(a.filled(s.elements.len(), false)?)?;
     let mut path = Vec::new();
     for start in 0..s.elements.len() {
         if s.elements[start].ty != T::Node || depths[start].is_some() {
@@ -395,8 +392,8 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             visiting[k] = false;
         }
     }
-    let mut first_bind = a.filled(s.elements.len(), None)?;
-    let mut pose_bone = a.filled(s.elements.len(), None)?;
+    let mut first_bind = crate::allocation::Temporary::new(a.filled(s.elements.len(), None)?)?;
+    let mut pose_bone = crate::allocation::Temporary::new(a.filled(s.elements.len(), None)?)?;
     let mut pose_ids: Vec<usize> = a.collect(
         s.elements
             .iter()
@@ -415,9 +412,12 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         let props = &s.doc.properties[s.doc.nodes[n].properties.clone()];
         let bind = matches!(props.get(if s.doc.version < 7000 { 1 } else { 2 }),Some(crate::syntax::Property::String(v)) if v.as_ref()==b"BindPose");
         let mut bones = Vec::new();
-        r.charge(r.children[n].len(), std::mem::size_of::<BonePose>() * 3)?;
-        r.work(r.children[n].len())?;
-        for &pn in &r.children[n] {
+        r.charge(
+            r.children.children(n).count(),
+            std::mem::size_of::<BonePose>() * 3,
+        )?;
+        r.work(r.children.children(n).count())?;
+        for pn in r.children.children(n) {
             if s.doc.nodes[pn].name != b"PoseNode" {
                 continue;
             }
@@ -482,7 +482,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 .and_then(|p| {
                     pose_bone[p]
                         .map(|j| bones[j].bone_to_world.0)
-                        .or_else(|| s.node_states[p].as_ref().map(|st| st.node_to_world))
+                        .or_else(|| s.node_states.get(p).map(|st| st.node_to_world))
                 })
                 .unwrap_or(sn::IDENTITY_MATRIX);
             bones[j].bone_to_parent = Matrix(sn::matrix_mul(
@@ -507,8 +507,8 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         )?;
     }
     r.path.set(crate::conversion_budget::Path::Deformers);
-    let mut cluster_index = a.filled(s.elements.len(), None)?;
-    let mut shape_index = a.filled(s.elements.len(), None)?;
+    let mut cluster_index = crate::allocation::Temporary::new(a.filled(s.elements.len(), None)?)?;
+    let mut shape_index = crate::allocation::Temporary::new(a.filled(s.elements.len(), None)?)?;
     let mut shape_orders = Vec::new();
     for (i, e) in s.elements.iter().enumerate() {
         let Some(n) = e.node else {
@@ -617,8 +617,8 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                         if mesh_mat.iter().all(|&x| x == 0.0) {
                             mesh_mat = sn::matrix_mul(
                                 &sn::matrix_invert(&bind),
-                                &s.node_states[node]
-                                    .as_ref()
+                                &s.node_states
+                                    .get(node)
                                     .ok_or("skin: missing node state")?
                                     .node_to_world,
                             );
@@ -635,7 +635,7 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                     }
                 }
                 let bone_world = bone
-                    .and_then(|k| s.node_states[k].as_ref().map(|n| n.node_to_world))
+                    .and_then(|k| s.node_states.get(k).map(|n| n.node_to_world))
                     .unwrap_or(bind);
                 let world = sn::matrix_mul(&bone_world, &geom);
                 cluster_index[i] = Some(d.clusters.len());
@@ -1115,15 +1115,23 @@ mod tests {
     }
 
     #[test]
-    fn adjacency_and_arrays_are_charged_before_materializing() {
+    fn shared_index_is_reused_and_arrays_are_precharged() {
         let mut s = crate::canon_scene::project(INPUT, &DumpLimits::default()).unwrap();
         let limits = DumpLimits {
             max_allocation: 0,
             ..Default::default()
         };
-        assert!(
-            matches!(Reader::new(&s, &limits), Err(e) if e.to_string().contains("allocation limit"))
-        );
+        let r = Reader::new(&s, &limits).unwrap();
+        let owner = s
+            .doc
+            .nodes
+            .iter()
+            .position(|n| n.name == b"Deformer")
+            .unwrap();
+        assert!(matches!(
+            r.indices(owner, b"Indexes"),
+            Err(Error::LimitExceeded(crate::Limit::Allocation))
+        ));
         let n = s
             .doc
             .nodes

@@ -6,6 +6,32 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Sort baked properties in place without allocator scratch, preserving object
+  and property order.
+- Propagate allocation and resource-limit refusals from mesh conversion instead
+  of returning a scene with an empty mesh. Invalid geometry still loads with
+  conversion warnings, matching ufbx; document this on `load` and `Scene::warnings`.
+
+## [0.1.4] - 2026-11-01
+
+### Added
+
+- Add `Scene::element_count()`, an exact O(1) canonical-element total after
+  synthesis, including opaque kinds and generated helper/blend-shape objects.
+
+### Changed
+
+- Reduce load memory by retaining validated binary animation-curve and value
+  source ranges, restoring one object at a time, packing binary connections,
+  reusing the compact DOM child index, storing node transforms and adjustments
+  sparsely, reserving exact element/connection capacities, and permuting
+  elements in place. Custom curve children retain the complete syntax subtree.
+- Share the `Limits::max_allocation` buffer envelope across load phases, with
+  charge/refund accounting for scratch buffers and restored data. Document
+  conservative charges and the input/allocator/process-memory exclusions.
+
 ## [0.1.3] - 2026-10-31
 
 ### Added
@@ -159,7 +185,8 @@ All notable changes to this crate are documented here. The format follows
   preserving each weight's association with its vertex.
 - Reject animation-connection cycles, including disconnected cycles and self-links.
 
-[Unreleased]: https://github.com/Tavrin/fbx-rs/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Tavrin/fbx-rs/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/Tavrin/fbx-rs/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Tavrin/fbx-rs/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Tavrin/fbx-rs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Tavrin/fbx-rs/compare/v0.1.0...v0.1.1

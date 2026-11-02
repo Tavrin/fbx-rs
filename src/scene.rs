@@ -110,6 +110,31 @@ pub struct SceneIndex<'a> {
     pub connections: Vec<Connection<'a>>,
     pub unsupported: Vec<Unsupported>,
 }
+impl SceneIndex<'_> {
+    pub(crate) fn release(self) -> Result<(), Error> {
+        let bytes = self
+            .objects
+            .capacity()
+            .checked_mul(std::mem::size_of::<Object>())
+            .and_then(|n| {
+                self.connections
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<Connection<'_>>())
+                    .and_then(|b| n.checked_add(b))
+            })
+            .and_then(|n| {
+                self.unsupported
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<Unsupported>())
+                    .and_then(|b| n.checked_add(b))
+            })
+            .ok_or(Error::LimitExceeded("allocation"))?;
+        drop(self);
+        crate::allocation::release_live(bytes);
+        Ok(())
+    }
+}
+
 fn bytes<'a>(p: &'a Property<'_>) -> Option<&'a [u8]> {
     match p {
         Property::String(v) => Some(v.as_ref()),
@@ -152,6 +177,13 @@ pub(crate) fn reserve<T>(
 /// Index direct children of Objects and Connections; references borrow the input DOM.
 /// Validates Model hierarchy cycles, not arbitrary non-hierarchy connection cycles.
 pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a>, Error> {
+    index_with(doc, limits, None)
+}
+pub(crate) fn index_with<'a>(
+    doc: &'a Document<'a>,
+    limits: &Limits,
+    deferred: Option<&'a crate::syntax::DeferredData<'a>>,
+) -> Result<SceneIndex<'a>, Error> {
     for (i, node) in doc.nodes.iter().enumerate() {
         if node.parent.is_some_and(|p| p >= i)
             || doc.properties.get(node.properties.clone()).is_none()
@@ -174,7 +206,9 @@ pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a
     let legacy = doc.version < 7000;
     let connection_count = (0..doc.nodes.len())
         .filter(|&i| is_child(i, b"Connections") && matches!(doc.nodes[i].name, b"C" | b"Connect"))
-        .count();
+        .count()
+        .checked_add(deferred.map_or(0, |d| d.connections.len()))
+        .ok_or(Error::LimitExceeded("connections"))?;
     if object_count > limits.max_objects {
         return Err(Error::LimitExceeded("objects"));
     }
@@ -320,27 +354,69 @@ pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a
         Ok(names[i].1)
     };
     colors.resize(objects.len(), 0);
-    for i in 0..doc.nodes.len() {
-        if !is_child(i, b"Connections") || !matches!(doc.nodes[i].name, b"C" | b"Connect") {
-            continue;
-        }
-        let p = props(doc, i)?;
-        let invalid = || Error::InvalidConnection { node: i };
-        let tag = p.first().and_then(bytes).ok_or_else(invalid)?;
-        let source_id = if legacy {
-            legacy_id(p.get(1))?
-        } else {
-            p.get(1).and_then(id).ok_or_else(invalid)?
+    let mut ordinary = (0..doc.nodes.len())
+        .filter(|&i| is_child(i, b"Connections") && matches!(doc.nodes[i].name, b"C" | b"Connect"))
+        .peekable();
+    let compact = deferred.map_or(&[][..], |d| d.connections.as_slice());
+    let mut compact = compact.iter().peekable();
+    loop {
+        let first_node = ordinary.peek().copied();
+        let first_compact = compact.peek().copied();
+        let take_compact = match (first_node, first_compact) {
+            (None, None) => break,
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (Some(i), Some(c)) => {
+                let original = deferred
+                    .ok_or(Error::InvalidDom)?
+                    .ordinal(i)
+                    .map_err(|_| Error::LimitExceeded("nodes"))?
+                    .checked_sub(1)
+                    .ok_or(Error::InvalidDom)?;
+                c.node < original
+            }
         };
-        let dest_id = if legacy {
-            legacy_id(p.get(2))?
+        let (source_id, dest_id, kind) = if take_compact {
+            let c = compact.next().ok_or(Error::InvalidDom)?;
+            let kind = match c.kind {
+                crate::syntax::CompactConnectionKind::Object => ConnectionKind::Object,
+                crate::syntax::CompactConnectionKind::Property => {
+                    ConnectionKind::Property(c.property)
+                }
+                crate::syntax::CompactConnectionKind::Invalid => {
+                    return Err(Error::InvalidConnection { node: c.node })
+                }
+            };
+            (c.source_id, c.destination_id, kind)
         } else {
-            p.get(2).and_then(id).ok_or_else(invalid)?
-        };
-        let kind = match tag {
-            b"OO" => ConnectionKind::Object,
-            b"OP" => ConnectionKind::Property(p.get(3).and_then(bytes).ok_or_else(invalid)?),
-            _ => return Err(invalid()),
+            let i = ordinary.next().ok_or(Error::InvalidDom)?;
+            let p = props(doc, i)?;
+            let original = match deferred {
+                Some(d) => d
+                    .ordinal(i)
+                    .map_err(|_| Error::LimitExceeded("nodes"))?
+                    .checked_sub(1)
+                    .ok_or(Error::InvalidDom)?,
+                None => i,
+            };
+            let invalid = || Error::InvalidConnection { node: original };
+            let tag = p.first().and_then(bytes).ok_or_else(invalid)?;
+            let source_id = if legacy {
+                legacy_id(p.get(1))?
+            } else {
+                p.get(1).and_then(id).ok_or_else(invalid)?
+            };
+            let dest_id = if legacy {
+                legacy_id(p.get(2))?
+            } else {
+                p.get(2).and_then(id).ok_or_else(invalid)?
+            };
+            let kind = match tag {
+                b"OO" => ConnectionKind::Object,
+                b"OP" => ConnectionKind::Property(p.get(3).and_then(bytes).ok_or_else(invalid)?),
+                _ => return Err(invalid()),
+            };
+            (source_id, dest_id, kind)
         };
         let source = resolve(source_id)?;
         let destination = if dest_id == 0 {
@@ -387,6 +463,21 @@ pub fn index<'a>(doc: &'a Document<'a>, limits: &Limits) -> Result<SceneIndex<'a
             at = objects[i].parent;
         }
     }
+    let scratch = lookup
+        .capacity()
+        .checked_mul(std::mem::size_of::<(i64, usize)>())
+        .and_then(|n| n.checked_add(colors.capacity()))
+        .and_then(|n| {
+            names
+                .capacity()
+                .checked_mul(std::mem::size_of::<(&[u8], i64)>())
+                .and_then(|b| n.checked_add(b))
+        })
+        .ok_or(Error::LimitExceeded("allocation"))?;
+    drop(lookup);
+    drop(colors);
+    drop(names);
+    crate::allocation::release_live(scratch);
     Ok(SceneIndex {
         objects,
         connections,

@@ -273,34 +273,73 @@ Rust dump now does the same (`src/animation_canon.rs`). The 316 corpus files did
 not show it: re-run over them with the section comparison, 45 are equal in every
 section and 271 differ only in `dom`.
 
-Memory of `load` on `Surveyor.fbx`, measured with a counting global allocator that
-attributes every allocation of 1 MiB or more to its call stack (a scratch probe,
-not in the repository): peak live heap 3,991 MiB, resident high-water mark 3.83
-GiB (4,020,096 kB), 10.8 times the 355 MiB input, in 15.6 s. At the peak:
+Memory was remeasured with the same scratch counting allocator on the original
+and changed release builds. Values below are **phase-local peak live requested
+heap bytes**, in MiB (2^20 bytes), including the input buffer held by the caller.
+Each phase resets the high-water mark to the currently live heap; retained data
+from earlier phases therefore remains included. Reallocation counts the change
+in requested size; allocator-internal transient copies, metadata, fragmentation,
+stacks and code pages are excluded. These are heap measurements, not RSS or
+performance timings. The three inputs were read in place and hash-checked on
+both runs; no external files were opened by either importer.
 
-| Holder (phase that creates it) | MiB |
-| --- | ---: |
-| Input bytes, held by the caller | 355 |
-| `syntax::Property` vector, 14.8 M values (parse) | 640 |
-| `syntax::Node` vector, 7.5 M nodes (parse) | 384 |
-| `Vec<Option<NodeState>>`, one slot per element (projection) | 568 |
-| Element table (projection) | 192 |
-| `Vec<Option<Element>>` (projection) | 162 |
-| Allocations under 1 MiB: names, keys, per-element vectors | 598 |
-| Large allocations made through the allocation budget helper, not attributed to a named frame: decompressed arrays (about 65), the public scene lists and matrices, curves, `Adjust` and property-layer tables | about 1,090 |
+| Phase peak, MiB (before → after) | Surveyor | BistroInterior | BistroInterior_Wine |
+| --- | ---: | ---: | ---: |
+| Parse | 1,411.1 → 610.9 | 236.2 → 229.5 | 260.8 → 255.5 |
+| Element construction | 2,201.3 → 1,020.4 | 241.4 → 231.5 | 266.6 → 257.8 |
+| Graph and transforms | 3,071.8 → 1,093.3 | 252.9 → 243.6 | 280.7 → 272.3 |
+| Meshes | 3,141.5 → 1,087.5 | 442.0 → 432.3 | 494.3 → 485.6 |
+| Deformers | 3,308.4 → 1,217.0 | 438.7 → 429.1 | 490.6 → 482.1 |
+| Materials and attributes | 3,192.6 → 1,107.9 | 443.2 → 430.9 | 495.6 → 483.9 |
+| Animation | 3,955.2 → 1,408.0 | 499.6 → 463.4 | 559.8 → 523.9 |
+| Owned scene publication | 3,272.7 → 1,441.5 | 465.5 → 450.6 | 517.9 → 508.0 |
 
-The DOM is not kept alive after the scene is built: the projection is dropped when
-`Scene::from_projection` returns (live heap 805 MiB afterwards, the scene and
-the caller's input). It cannot be dropped earlier, because that function
-re-reads the DOM arrays to extract the meshes. The one clearly avoidable item is
-the per-element `NodeState` table (568 MiB, 14 % of the peak): only nodes hold a
-state, and a table indexed by node would remove most of it. It touches the node
-transform, animation and deformer stages, which share the table, so it is left as
-follow-up work rather than folded into this change; the output does not change
-either way. `BistroInterior.fbx` peaks at 534 MiB of heap (13 times its 40 MiB).
+| Input | Input MiB | Overall peak MiB (before → after) | Peak/input (before → after) | ufbx peak MiB | After/ufbx |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `Surveyor.fbx` | 355.3 | 3,955.2 → 1,441.5 | 11.13x → 4.06x | 1,014.3 | 1.42x |
+| `BistroInterior.fbx` | 39.9 | 499.6 → 463.4 | 12.53x → 11.62x | 236.8 | 1.96x |
+| `BistroInterior_Wine.fbx` | 46.5 | 559.8 → 523.9 | 12.04x → 11.27x | 261.1 | 2.01x |
 
-Reproduce: `cargo build --release -p fbx-parity`, then
-`python3 reference/compare_large.py ORACLE target/release/fbx-parity WORKDIR FILE...`.
+All six original/changed default Rust loads and all three fresh pinned-ufbx
+loads exited 0. All three changed loads also succeed with an explicit
+`max_allocation = 1536 << 20` (1,536 MiB) internal buffer envelope. The ufbx
+allocator callbacks count temporary and result allocations with the same
+conversion options and `retain_dom = false`, plus the caller's input buffer.
+Surveyor meets the 1,536 MiB heap target; the optional 1.1x-ufbx target remains
+unmet. Its full canonical-stream comparison remains unverified as described
+above; these memory results do not establish that comparison.
+
+The loader now stores node states and adjustments sparsely, permutes elements in
+place, reserves authored element and connection degrees exactly, and shares the
+compact DOM child index. The binary lean parser validates curve/value subtrees
+and then retains borrowed source ranges, restoring one object at a time. It also
+packs binary connection records without retaining their syntax properties.
+Original source ordinals, aggregate node/property/array/decompression limits and
+compression validation are preserved; custom curve children keep the complete
+subtree. The owned scene releases the DOM after publication.
+
+`Scene::element_count()` returns the exact final canonical element total in O(1)
+with no allocation or second parse. It requires a completed load and includes
+root, opaque/unsupported, animation and generated helper/blend-shape elements,
+rather than summing public typed lists. The three totals are 887,693, 2,908 and
+3,457 respectively, equal to the pinned ufbx scene totals. Authored opaque kinds,
+scale helpers and legacy synthesis are also covered by regression fixtures.
+
+`Limits::max_allocation` now spans parsing, conversion and publication. Checked
+reservations charge retained capacity plus old and new buffers during growth;
+owned scratch, restored objects, indices and copied property lists refund their
+charges after use. Some short-lived data remains conservatively charged until
+load returns, so rejection may precede the actual heap peak. Caller input and
+allocator/process overhead need a separate host allowance; the field is not an
+RSS cap. Allocation-failure sweeps and a global-allocation-counter regression
+cover accepted and rejected loads at several byte limits.
+
+The final validation passed formatting, both clippy configurations with warnings
+as errors, workspace tests, doctests, rustdoc, wasm32, the release build and the
+public-text guard. Ordered modern output is unchanged on 316/316 files; the full
+comparison passes 340/340 files (including 24 legacy inputs), and all 48 baked
+streams match. Probe sources, binaries, input hashes, raw phase bytes and each
+run's exit status are retained outside the repository.
 
 ### Curtains converted-space regression
 
@@ -670,12 +709,58 @@ failure scenario.
 The contract covers the default public load/evaluation/bake paths. The unstable
 canonical dump writer's own value trees and output buffers, caller-invoked
 `Clone`/`Debug`/`Display`, test fixtures and allocator internals are outside it.
-Configured limits remain per-stage conservative capacity/work bounds, not a
-process-RSS bound. Conversion growth conservatively charges adopted old vector
-capacity before reserving new storage; no allocator-private metadata or rounding
-is included in these Rust-visible capacities. Executable tests establish the
+Public loading shares one conservative buffer-capacity envelope across parsing,
+conversion and publication, retaining old buffers during growth and refunding
+owned scratch after deallocation. Evaluation and baking keep their separate
+stage limits, and traversal work limits remain per stage. None is a process-RSS
+bound: caller input, allocator-private metadata and fragmentation are excluded.
+The live-allocation regression measures successful and refused loads under
+several byte envelopes, covering ASCII, compressed binary, legacy deformation
+and animation, and a larger node hierarchy; every measured heap peak fits the
+configured load allowance. Executable tests establish the
 covered fixtures and allocation points; the full path guarantee also depends on
 the source audit of the remaining pre-reserved pushes, copies and error paths.
+
+### Mesh refusal and bake-sort regressions
+
+The default load/evaluation/bake allocation audit covers stable `sort`/`sort_by*`,
+`to_vec`, iterator `collect` into vectors, vector clones and allocated formatting.
+The remaining unbudgeted stable sort was the final baked-property sort. It now
+carries the insertion ordinal beside each creation rank and sorts in place by
+both, preserving equal-rank property order without scratch allocation. Existing
+conversion stable sorts use checked ordinal buffers. Other matches are budget
+helpers, borrowed ranges and fixed records, tests, or canonical dump value-tree
+and output construction outside the default API allocation contract. No further
+unbudgeted copies or formatting were found on default load/evaluation/bake paths.
+
+Both typed and canonical mesh-conversion warning branches now propagate
+`Allocation`, `ResourceLimit` and `LimitExceeded` unchanged. Their warning storage
+and formatting use the fallible budget helpers. The material warning producers
+already do so and do not catch resource errors. Invalid geometry remains a
+warning with an empty public mesh, including vertex arrays whose length is not
+divisible by three; resource refusals cannot use that fallback.
+
+`out_of_creation_order_bake_sort_allocator_refusals_are_typed` bakes 3,072
+properties across nodes whose hierarchy order differs from creation order,
+checks creation order and all property ties, then refuses the final eight real
+allocator requests, including the final property publication allocation.
+`invalid_vertex_count_loads_with_a_warning` retains the malformed-geometry
+compatibility boundary. `decreasing_limit_envelopes_never_substitute_empty_meshes`
+halves every load limit independently through zero, checks typed refusals and
+compares accepted mesh attributes, triangles and warnings with the default
+load. It always covers repository fixtures; setting `FBX_LIMIT_CORPUS_PATHS` to
+a newline-delimited input manifest adds the full external corpus.
+
+Verification (2026-11-01): the decreasing-envelope test passed 138,155 loads
+across all 340 corpus files and 10 repository fixtures. The six real-allocator
+regressions and five limit/geometry tests pass. Formatting, default/all-feature
+clippy with warnings denied, workspace tests, doctests, rustdoc with warnings
+denied, wasm32, release builds, comparator fault tests and the public-text guard
+all exited 0. Modern order is unchanged on 316/316 files; full comparison is
+340/340 equal, including all 24 legacy files; baking is exact on all 48 streams.
+The initial focused run exited 101 because the new authored bake fixture lacked
+required curve metadata; after correcting that fixture, both the focused rerun
+and the full gate passed.
 
 ### Legacy seed additions
 
@@ -723,3 +808,46 @@ memory-limit failure and no artifact file. `ascii` met the flat-chunk rule
 CPU-second cap: their last full 600-second chunks still added 1, 44 and 37 edges,
 and the short final chunk to the cap added none, so the cap, not a flat 10
 minutes, ended them.
+
+### Pre-release fuzz run (0.1.4, allocation accounting and compact storage)
+
+New code since 0.1.3: syntax data released during conversion, compact
+property storage, array handling, allocation charge and release accounting,
+`Scene::element_count()`, and the allocation-free bake sort with propagated
+limit errors. Library commit `72a4a76`.
+
+The `load` target now also loads each input under a `max_allocation` of 512 B
+to 384 KiB chosen from a hash of the input, so the charge, release and refusal
+paths run. It asserts that `element_count()` is at least the summed length of
+the typed lists and at least 1, that a load which succeeds under the cap
+succeeds without it, and that the two scenes agree on `element_count()`, node,
+mesh, material and animation-curve counts and warnings. The other three targets
+are unchanged.
+
+Reach, `cargo fuzz coverage` on `load` (line coverage): `allocation.rs` 91.4 %
+with the 41 seeds alone and with the final corpus; the capped load runs on
+every input. Over the final corpus the cap refused 27.3 thousand reservations
+(`reserve_with`, limit branch) and the live-charge counter ran 67.1 million
+times, with 64.9 million charges accepted. Whole-crate line coverage went from
+58.9 % (seeds) to 66.4 % (final corpus). The lines of `allocation.rs` still
+unexecuted are the allocator-growth-after-reserve branches.
+
+Same rule and flags as the earlier runs (`-max_len=262144`, `-timeout=5`,
+`-rss_limit_mb=512`, `-malloc_limit_mb=512`, 600-second chunks, stop at a chunk
+that adds no edge after at least 600 CPU-seconds, cap 7,200 CPU-seconds), four
+libFuzzer processes in parallel, debug assertions and overflow checks on. The
+persistent corpora of an earlier run on `8c0b329` were kept as the start, so
+the chunk-1 starting coverage is already high; the "seeds" column is the 41
+seed files alone.
+
+| Target | CPU-minutes | Executions | Edge coverage, seeds to final | Crashes | Stop | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `binary` | 20.0 | 279.7 M | 410 to 1,042 | 0 | chunk 2 added no coverage | 61 MiB |
+| `ascii` | 89.8 | 1,348.9 M | 410 to 1,058 | 0 | chunk 9 added no coverage | 55 MiB |
+| `scene_dom` | 121.7 | 3.3 M | 9,852 to 16,182 | 0 | cap reached | 145 MiB |
+| `load` | 120.3 | 16.9 M | 9,106 to 17,145 | 0 | cap reached | 219 MiB |
+
+Every chunk of every target exited 0; no crash, timeout, out-of-memory or
+memory-limit failure and no artifact file. `scene_dom` and `load` ran to the
+cap: their last full chunks still added 21 and 43 edges and only the short
+final chunk added none, so the cap, not a flat 10 minutes, ended them.

@@ -60,6 +60,20 @@ pub struct PropertyLayers<'a> {
     pub defaults: Option<Vec<AuthoredProperty<'a>>>,
 }
 
+/// Consume temporary decoded lists after their last use. The property values
+/// borrow the DOM; only these two vector buffers are owned here.
+pub(crate) fn release_layers(layers: PropertyLayers<'_>) -> Result<(), crate::Error> {
+    let bytes = layers
+        .authored
+        .capacity()
+        .checked_add(layers.defaults.as_ref().map_or(0, Vec::capacity))
+        .and_then(|n| n.checked_mul(size_of::<AuthoredProperty<'_>>()))
+        .ok_or(crate::Error::LimitExceeded(crate::Limit::Allocation))?;
+    drop(layers);
+    crate::allocation::release_live(bytes);
+    Ok(())
+}
+
 impl<'a> PropertyLayers<'a> {
     pub fn find(&self, name: &[u8]) -> Option<&AuthoredProperty<'a>> {
         fn lookup<'a, 'b>(
@@ -153,6 +167,7 @@ pub struct PropertyIndex {
     children: Vec<u32>,
     /// Top-level `Definitions` > `ObjectType` nodes in document order.
     object_types: Vec<u32>,
+    _release: crate::allocation::Release,
 }
 
 impl PropertyIndex {
@@ -208,10 +223,23 @@ impl PropertyIndex {
                 }
             }
         }
+        let retained = child_start
+            .capacity()
+            .checked_add(children.capacity())
+            .and_then(|n| n.checked_add(object_types.capacity()))
+            .and_then(|n| n.checked_mul(size_of::<u32>()))
+            .ok_or(Error::LimitExceeded)?;
+        crate::allocation::release_live(
+            cursor
+                .capacity()
+                .checked_mul(size_of::<u32>())
+                .ok_or(Error::LimitExceeded)?,
+        );
         Ok(Self {
             child_start,
             children,
             object_types,
+            _release: crate::allocation::Release::new(retained),
         })
     }
     /// The children of node `p` in document order.

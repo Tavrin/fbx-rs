@@ -177,3 +177,72 @@ fn legacy_load_and_take_refusals_are_typed() {
         scene.bake_animation(Some(0), &fbx_rs::BakeOptions::default())
     });
 }
+
+#[test]
+fn out_of_creation_order_bake_sort_allocator_refusals_are_typed() {
+    let _serial = SERIAL.lock().unwrap();
+    let mut input = String::from("; FBX 7.4.0\nObjects: {\n");
+    // Creation order is parent-before-child; public breadth order moves the
+    // second root ahead of the first root's child. Each has many properties
+    // with equal creation rank, so the final sort must also preserve ties.
+    for id in 1..=3 {
+        writeln!(
+            input,
+            "Model: {id}, \"Model::N{id}\", \"Null\" {{\nProperties70: {{"
+        )
+        .unwrap();
+        for prop in 0..1024 {
+            writeln!(input, "P: \"Custom{prop:04}\", \"Number\", \"\", \"A\", 0").unwrap();
+        }
+        input.push_str("}\n}\n");
+    }
+    input.push_str("AnimationCurve: 10, \"AnimCurve::C\", \"\" {\nKeyTime: *2 { a: 0,46186158000 }\nKeyValueFloat: *2 { a: 0,1 }\nKeyAttrFlags: *1 { a: 4 }\nKeyAttrDataFloat: *4 { a: 0,0,0,0 }\nKeyAttrRefCount: *1 { a: 2 }\n}\nAnimationCurveNode: 11, \"AnimCurveNode::C\", \"\" {}\nAnimationLayer: 12, \"AnimLayer::L\", \"\" {}\nAnimationStack: 13, \"AnimStack::S\", \"\" {}\n}\nConnections: {\nC: \"OO\",1,0\nC: \"OO\",2,1\nC: \"OO\",3,0\nC: \"OP\",10,11,\"d|X\"\nC: \"OO\",11,12\nC: \"OO\",12,13\n");
+    for id in 1..=3 {
+        for prop in (0..1024).rev() {
+            writeln!(input, "C: \"OP\",11,{id},\"Custom{prop:04}\"").unwrap();
+        }
+    }
+    input.push_str("}\n");
+    let scene = fbx_rs::load(input.as_bytes(), &Default::default()).unwrap();
+    let options = fbx_rs::BakeOptions::default();
+    SWEEP.with(|s| s.set(Some((0, usize::MAX))));
+    let baseline = scene.bake_animation(None, &options);
+    let total = SWEEP.with(|s| s.replace(None).unwrap().0);
+    let baseline = baseline.unwrap();
+    assert_eq!(baseline.properties.len(), 3072);
+    for (i, prop) in baseline.properties.iter().enumerate() {
+        assert_eq!(prop.source_id, i64::try_from(i / 1024 + 1).unwrap());
+        assert_eq!(prop.name, format!("Custom{:04}", i % 1024).as_bytes());
+    }
+    // The final allocation is the public property buffer. Refuse it and the
+    // preceding tail (including stable-sort scratch in the old implementation).
+    // Thousands of entries force the old stable sort past its stack buffer.
+    for n in total.saturating_sub(8)..total {
+        SWEEP.with(|s| s.set(Some((0, n))));
+        let result = scene.bake_animation(None, &options);
+        SWEEP.with(|s| s.set(None));
+        assert!(
+            matches!(result, Err(fbx_rs::Error::Allocation)),
+            "refusal {n}/{total}"
+        );
+    }
+}
+
+#[test]
+fn invalid_mesh_warning_allocator_refusals_are_typed() {
+    let _serial = SERIAL.lock().unwrap();
+    let input = br#"; FBX 7.4.0
+Objects: {
+ Geometry: 1, "Geometry::Invalid", "Mesh" {
+  Vertices: *4 { a: 0,0,0,1 }
+  PolygonVertexIndex: *3 { a: 0,0,-1 }
+ }
+}
+"#;
+    let options = fbx_rs::LoadOptions::default();
+    let baseline = fbx_rs::load(input, &options).unwrap();
+    assert!(!baseline.warnings().is_empty());
+    sweep("invalid mesh warnings", true, || {
+        fbx_rs::load(input, &options)
+    });
+}

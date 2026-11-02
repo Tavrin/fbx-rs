@@ -196,3 +196,118 @@ fn unknown_reference_label_is_ignored_like_ufbx() {
         unknown_direct.meshes()[0].normals()
     );
 }
+
+#[test]
+fn invalid_vertex_count_loads_with_a_warning() {
+    let valid = mesh_doc(3, "");
+    let input = String::from_utf8(valid)
+        .unwrap()
+        .replace("Vertices: *9", "Vertices: *8");
+    // Keep the declared count and data consistent, but not a multiple of three.
+    let start = input.find("{ a: ").unwrap() + 5;
+    let end = input[start..].find(" }").unwrap() + start;
+    let values = input[start..end]
+        .split(',')
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(",");
+    let input = format!("{}{}{}", &input[..start], values, &input[end..]);
+    let scene = load(input.as_bytes(), &Limits::default()).unwrap();
+    assert_eq!(scene.meshes().len(), 1);
+    assert!(scene.meshes()[0].positions().values().is_empty());
+    assert!(scene.warnings().iter().any(|w| w.contains("vertex count")));
+}
+
+#[test]
+fn decreasing_limit_envelopes_never_substitute_empty_meshes() {
+    let mut paths = std::fs::read_dir("tests/fixtures")
+        .unwrap()
+        .map(|p| p.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "fbx"))
+        .collect::<Vec<_>>();
+    if let Some(manifest) = std::env::var_os("FBX_LIMIT_CORPUS_PATHS") {
+        paths.extend(
+            std::fs::read_to_string(manifest)
+                .unwrap()
+                .lines()
+                .map(std::path::PathBuf::from),
+        );
+    }
+    let edits: [fn(&mut Limits) -> &mut usize; 17] = [
+        |l| &mut l.max_input_bytes,
+        |l| &mut l.max_depth,
+        |l| &mut l.max_nodes,
+        |l| &mut l.max_properties,
+        |l| &mut l.max_array_elements,
+        |l| &mut l.max_decompressed_bytes,
+        |l| &mut l.max_string_length,
+        |l| &mut l.max_objects,
+        |l| &mut l.max_animation_keys,
+        |l| &mut l.max_connections,
+        |l| &mut l.max_allocation,
+        |l| &mut l.max_deformer_work,
+        |l| &mut l.max_animation_work,
+        |l| &mut l.max_meshes,
+        |l| &mut l.max_layers,
+        |l| &mut l.max_face_vertices,
+        |l| &mut l.max_triangulation_work,
+    ];
+    let mut loads = 0;
+    for (fixture, path) in paths.iter().enumerate() {
+        let bytes = std::fs::read(path).unwrap();
+        let baseline = load(&bytes, &Limits::default()).unwrap();
+        for edit in edits {
+            let mut limits = Limits::default();
+            // Start near the fixture's size for count/byte limits, avoiding
+            // repeated loads at enormous defaults that cannot constrain it.
+            let mut value = (*edit(&mut limits)).min(bytes.len().saturating_mul(256).max(1));
+            let mut refused = false;
+            loop {
+                *edit(&mut limits) = value;
+                loads += 1;
+                match load(&bytes, &limits) {
+                    Ok(scene) => {
+                        assert!(
+                            !refused,
+                            "non-monotonic refusal: {} at {value}",
+                            path.display()
+                        );
+                        assert_eq!(
+                            scene.warnings(),
+                            baseline.warnings(),
+                            "{} at {value}",
+                            path.display()
+                        );
+                        assert_eq!(scene.meshes().len(), baseline.meshes().len());
+                        for (mesh, expected) in scene.meshes().iter().zip(baseline.meshes()) {
+                            assert_eq!(
+                                mesh.positions(),
+                                expected.positions(),
+                                "{} at {value}",
+                                path.display()
+                            );
+                            assert_eq!(mesh.triangles(), expected.triangles());
+                        }
+                    }
+                    Err(Error::LimitExceeded(_) | Error::InputTooLarge { .. }) => refused = true,
+                    Err(e) => panic!("{} at {value}: {e:?}", path.display()),
+                }
+                if value == 0 {
+                    break;
+                }
+                value /= 2;
+            }
+        }
+        if (fixture + 1) % 25 == 0 {
+            eprintln!(
+                "decreasing envelopes: {}/{}, {loads} loads",
+                fixture + 1,
+                paths.len()
+            );
+        }
+    }
+    eprintln!(
+        "decreasing envelopes: {} fixtures, {loads} loads",
+        paths.len()
+    );
+}
