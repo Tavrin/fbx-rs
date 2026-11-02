@@ -137,6 +137,21 @@ static GENERATION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 pub(crate) struct LoadScope {
     previous_limit: Option<usize>,
 }
+/// Returns the previous generation and advances it; 0 once the counter is exhausted.
+fn next_generation() -> usize {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut current = GENERATION.load(Relaxed);
+    loop {
+        let Some(next) = current.checked_add(1) else {
+            return 0;
+        };
+        match GENERATION.compare_exchange_weak(current, next, Relaxed, Relaxed) {
+            Ok(previous) => return previous,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 impl LoadScope {
     pub(crate) fn new(limit: usize) -> Self {
         let previous_limit = LIVE.with(|cell| {
@@ -149,13 +164,7 @@ impl LoadScope {
                 None => Live {
                     bytes: 0,
                     limit,
-                    generation: GENERATION
-                        .fetch_update(
-                            std::sync::atomic::Ordering::Relaxed,
-                            std::sync::atomic::Ordering::Relaxed,
-                            |n| n.checked_add(1),
-                        )
-                        .unwrap_or(0),
+                    generation: next_generation(),
                 },
             };
             cell.set(Some(live));
