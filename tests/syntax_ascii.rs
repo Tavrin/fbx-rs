@@ -223,6 +223,87 @@ fn overflowing_integer_is_not_silently_retyped_as_float() {
 }
 
 #[test]
+fn integer_tokens_match_standard_parsing_at_digit_count_boundaries() {
+    // 18 digits take the short-integer path, 19 the general one; both
+    // must agree with `str::parse::<i64>` for signs and leading zeros.
+    let tokens = [
+        "0",
+        "+0",
+        "-000",
+        "+42",
+        "-42",
+        "007",
+        "999999999999999999",
+        "-999999999999999999",
+        "1000000000000000000",
+        "9223372036854775807",
+        "-9223372036854775808",
+    ];
+    let array = tokens.join(",");
+    let input = format!(
+        "FBXHeaderExtension: {{ FBXVersion: 7500\n}}\nData: *{} {{ a: {array} }}\n",
+        tokens.len()
+    );
+    let doc = parse(input.as_bytes(), &Limits::default()).unwrap();
+    let expected: Vec<AsciiValue> = tokens
+        .iter()
+        .map(|t| match t.parse::<i64>().unwrap() {
+            0 if t.starts_with('-') => AsciiValue::NegativeZero,
+            n => AsciiValue::I64(n),
+        })
+        .collect();
+    assert_eq!(doc.properties[1], Property::AsciiArray(expected));
+    for t in ["-", "+", "1-2", "--1"] {
+        let input = format!("FBXHeaderExtension: {{ FBXVersion: 7500\n}}\nValue: {t}\n");
+        assert_eq!(
+            parse(input.as_bytes(), &Limits::default()).unwrap_err(),
+            Error::InvalidFormat,
+            "{t}"
+        );
+    }
+}
+
+#[test]
+fn float_tokens_match_standard_parsing_bit_for_bit() {
+    // Inside and outside the exact one-operation range: 2^53 mantissas,
+    // 19/20 significant digits, powers of ten 22/23, signed zeros, exponents.
+    let tokens = [
+        "0.0",
+        "-0.0",
+        "-0.000",
+        "1.5",
+        "-2.25e-3",
+        "0.1",
+        "0.30000000000000004",
+        "9007199254740992.0",
+        "9007199254740993.0",
+        "1234567890123456789.0",
+        "12345678901234567890.0",
+        "1e22",
+        "1e23",
+        "1.0E-22",
+        "1.0e-23",
+        "7e+2",
+        "0e999",
+        "123.456e-7",
+        "0.000000000000000000000000001",
+        "5.",
+        ".5",
+    ];
+    let array = tokens.join(",");
+    let input = format!(
+        "FBXHeaderExtension: {{ FBXVersion: 7500\n}}\nData: *{} {{ a: {array} }}\n",
+        tokens.len()
+    );
+    let doc = parse(input.as_bytes(), &Limits::default()).unwrap();
+    let expected: Vec<AsciiValue> = tokens
+        .iter()
+        .map(|t| AsciiValue::F64(t.parse::<f64>().unwrap().to_bits()))
+        .collect();
+    assert_eq!(doc.properties[1], Property::AsciiArray(expected));
+}
+
+#[test]
 fn preserves_bare_words_inside_arrays() {
     let input = b"FBXHeaderExtension: { FBXVersion: 7500\n}\nFlags: *2 { a: T,F }\n";
     let doc = parse(input, &Limits::default()).unwrap();

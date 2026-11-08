@@ -413,6 +413,12 @@ pub(crate) struct Animation {
     pub stacks: Vec<AnimationStack>,
     pub default_stack: Option<usize>,
     pub properties: BTreeMap<(usize, Vec<u8>), EvaluatedProperty>,
+    /// Template default lists shared by several elements; see
+    /// [`Animation::stored_property`].
+    pub templates: Vec<BTreeMap<Vec<u8>, EvaluatedProperty>>,
+    /// Shared template list of each element, consulted after `properties`.
+    /// Empty when every list is stored in `properties`.
+    pub template_of: Vec<Option<usize>>,
     pub nodes: Vec<NodeEval>,
     pub node_order: Vec<usize>,
     /// ufbx creation index (`element_id`) of each element, to order baked
@@ -528,6 +534,18 @@ fn finite_time(time: f64) -> Result<(), Error> {
     }
 }
 impl Animation {
+    /// The stored property `name` of `element`: its own entry, else the entry
+    /// of its shared template list.
+    pub(crate) fn stored_property(
+        &self,
+        element: usize,
+        name: &[u8],
+    ) -> Option<&EvaluatedProperty> {
+        lookup(&self.properties, element, name).or_else(|| {
+            let t = self.template_of.get(element).copied().flatten()?;
+            self.templates.get(t)?.get(name)
+        })
+    }
     pub fn stack_layers(&self, stack: Option<usize>) -> Result<&[usize], Error> {
         match stack {
             Some(i) => self
@@ -610,7 +628,7 @@ impl Animation {
         } = *ctx;
         (ctx.work)(1)?;
         let budget = crate::api_alloc::Budget::new(self.allocation_limit);
-        let mut p = if let Some(p) = lookup(&self.properties, element, name) {
+        let mut p = if let Some(p) = self.stored_property(element, name) {
             EvaluatedProperty {
                 property_type: p.property_type,
                 flags: p.flags,
@@ -731,7 +749,7 @@ impl Animation {
         };
         for (ix, name) in NODE_INPUTS.iter().enumerate() {
             work(1)?;
-            if let Some(p) = lookup(&self.properties, node.element, name) {
+            if let Some(p) = self.stored_property(node.element, name) {
                 if p.flags & 0xa000 != 0 {
                     input.animated |= 1 << ix;
                 }

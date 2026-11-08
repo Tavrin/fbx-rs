@@ -168,6 +168,125 @@ pub struct PropertyIndex {
     /// Top-level `Definitions` > `ObjectType` nodes in document order.
     object_types: Vec<u32>,
     _release: crate::allocation::Release,
+    /// Decoded property lists by owner node. Template lists are read once per
+    /// object that uses them and element lists by several conversion stages;
+    /// the cache makes every read after the first a copy.
+    cache: std::cell::RefCell<PropertyCache>,
+}
+
+/// One decoded property of a cached list. The name and string value are
+/// re-borrowed from the document on use.
+#[derive(Debug, Clone, Copy)]
+struct CachedProperty {
+    source_node: usize,
+    kind: Type,
+    flags: u32,
+    value_int: i64,
+    value_real: [f64; 4],
+    /// Index in `Document::properties` of the string value, if any.
+    value_at: Option<usize>,
+}
+
+/// Decoded lists (or the decoding error) by owner node, sorted by owner. All
+/// capacities are charged to the live allocation envelope.
+type CachedList = Result<Vec<CachedProperty>, Error>;
+
+#[derive(Debug, Default)]
+struct PropertyCache {
+    owners: Vec<(usize, Option<CachedList>)>,
+    initialized: bool,
+    bytes: usize,
+    release: crate::allocation::Release,
+}
+
+impl PropertyCache {
+    fn find(&self, owner: usize) -> Result<usize, usize> {
+        self.owners.binary_search_by_key(&owner, |(o, _)| *o)
+    }
+    /// Index all lists once, so reads in arbitrary object order never shift
+    /// a growing table once per object. Refusing this optional index disables
+    /// caching for this document without repeating the document scan.
+    fn initialize(&mut self, doc: &Document<'_>, max_allocation: usize) {
+        self.initialized = true;
+        let owners = || {
+            doc.nodes.iter().filter_map(|n| {
+                matches!(n.name, b"Properties70" | b"Properties60")
+                    .then_some(n.parent)
+                    .flatten()
+            })
+        };
+        if crate::allocation::reserve(
+            &mut self.owners,
+            owners().count(),
+            &mut self.bytes,
+            max_allocation,
+        )
+        .is_err()
+        {
+            return;
+        }
+        self.owners.extend(owners().map(|owner| (owner, None)));
+        self.owners.sort_unstable_by_key(|(owner, _)| *owner);
+        self.owners.dedup_by_key(|(owner, _)| *owner);
+        self.release.update(self.bytes);
+    }
+    /// Store the outcome of decoding `owner`. Caching is best effort: a list
+    /// that does not fit the allocation envelope is simply not cached.
+    fn store(
+        &mut self,
+        doc: &Document<'_>,
+        owner: usize,
+        value_offset: usize,
+        result: &Result<Vec<AuthoredProperty<'_>>, Error>,
+        max_allocation: usize,
+    ) {
+        if !self.initialized {
+            self.initialize(doc, max_allocation);
+        }
+        let Ok(slot) = self.find(owner) else {
+            return;
+        };
+        if self.owners[slot].1.is_some() {
+            return;
+        }
+        let mut used = self.bytes;
+        let entry = match result {
+            // Envelope refusals depend on the caller's limits; decode again.
+            Err(Error::LimitExceeded | Error::AllocationFailed) => return,
+            Err(e) => Err(*e),
+            Ok(list) => {
+                let mut cached = Vec::new();
+                if crate::allocation::reserve(&mut cached, list.len(), &mut used, max_allocation)
+                    .is_err()
+                {
+                    return;
+                }
+                for p in list {
+                    let value_at = (p.flags & 0x2000000 != 0)
+                        .then(|| {
+                            let range = doc.nodes.get(p.source_node)?.properties.clone();
+                            let values = doc.properties.get(range.clone())?;
+                            let offset = value_offset
+                                + usize::from(values.get(value_offset).and_then(string).is_none());
+                            Some(range.start + offset)
+                        })
+                        .flatten();
+                    cached.push(CachedProperty {
+                        source_node: p.source_node,
+                        kind: p.kind,
+                        flags: p.flags,
+                        value_int: p.value_int,
+                        value_real: p.value_real,
+                        value_at,
+                    });
+                }
+                Ok(cached)
+            }
+        };
+        self.owners[slot].1 = Some(entry);
+        self.bytes = used;
+        self.release.update(used);
+    }
 }
 
 impl PropertyIndex {
@@ -248,6 +367,7 @@ impl PropertyIndex {
             children,
             object_types,
             _release: crate::allocation::Release::new(retained),
+            cache: std::cell::RefCell::default(),
         })
     }
     /// The children of node `p` in document order.
@@ -482,7 +602,6 @@ pub fn authored_indexed<'a>(
     if count == 0 {
         return Ok(Vec::new());
     }
-    let mut work = Work::default();
     if count > max_properties
         || count
             .checked_mul(size_of::<AuthoredProperty<'_>>())
@@ -490,6 +609,69 @@ pub fn authored_indexed<'a>(
     {
         return Err(Error::LimitExceeded);
     }
+    {
+        let cache = index.cache.borrow();
+        if let Some(result) = cache
+            .find(owner)
+            .ok()
+            .and_then(|slot| cache.owners[slot].1.as_ref())
+        {
+            let list = result.as_ref().map_err(|e| *e)?;
+            let mut out = Vec::new();
+            let mut used = 0;
+            crate::allocation::reserve(&mut out, count, &mut used, max_allocation).map_err(
+                |e| match e {
+                    crate::allocation::Error::Limit => Error::LimitExceeded,
+                    crate::allocation::Error::Failed => Error::AllocationFailed,
+                },
+            )?;
+            for c in list {
+                let node = doc.nodes.get(c.source_node).ok_or(Error::InvalidDom)?;
+                let name = doc
+                    .properties
+                    .get(node.properties.start)
+                    .and_then(string)
+                    .ok_or(Error::InvalidDom)?;
+                let value = match c.value_at {
+                    Some(at) => doc
+                        .properties
+                        .get(at)
+                        .and_then(string)
+                        .ok_or(Error::InvalidDom)?,
+                    None => b"",
+                };
+                out.push(AuthoredProperty {
+                    source_node: c.source_node,
+                    name,
+                    kind: c.kind,
+                    flags: c.flags,
+                    value_int: c.value_int,
+                    value_real: c.value_real,
+                    value_str: value,
+                    value_blob: value,
+                });
+            }
+            return Ok(out);
+        }
+    }
+    let result = decode_authored(doc, index, container, value_offset, count, max_allocation);
+    index
+        .cache
+        .borrow_mut()
+        .store(doc, owner, value_offset, &result, max_allocation);
+    result
+}
+
+/// Decode, sort and deduplicate the `count` property nodes of `container`.
+fn decode_authored<'a>(
+    doc: &'a Document<'a>,
+    index: &PropertyIndex,
+    container: usize,
+    value_offset: usize,
+    count: usize,
+    max_allocation: usize,
+) -> Result<Vec<AuthoredProperty<'a>>, Error> {
+    let mut work = Work::default();
     // Locate the earliest property with a direct BinaryData child once. Using
     // its index preserves validation order (and errors before it), without a
     // document scan per property or any additional allocation. This also works
@@ -688,6 +870,55 @@ mod hardening_tests {
             nodes,
             properties,
         }
+    }
+    #[test]
+    fn cached_decoding_errors_do_not_allocate_an_output_list() {
+        let input = b"; FBX 7.4.0 project file\nModel: 1, \"Model::A\", \"Null\" {\n\
+            Properties70: {\nP: \"Blob\", \"Blob\", \"\", \"\" { BinaryData: \"data\" }\n}\n}\n";
+        let doc = crate::syntax::parse(input, &crate::syntax::Limits::default()).unwrap();
+        let index = PropertyIndex::build(&doc, 16 << 20).unwrap();
+        assert_eq!(
+            authored_indexed(&doc, &index, 0, 16, 16 << 20),
+            Err(Error::UnsupportedBlob)
+        );
+        crate::api_alloc::FAIL_AFTER.with(|f| f.set(Some(0)));
+        let result = authored_indexed(&doc, &index, 0, 16, 16 << 20);
+        crate::api_alloc::FAIL_AFTER.with(|f| f.set(None));
+        assert_eq!(result, Err(Error::UnsupportedBlob));
+    }
+    #[test]
+    fn repeated_reads_copy_the_decoded_list_and_keep_per_call_limits() {
+        let input = b"; FBX 7.4.0 project file\nModel: 1, \"Model::A\", \"Null\" {\n\
+            Properties70: {\n\
+            P: \"Zeta\", \"KString\", \"\", \"\", \"text\"\n\
+            P: \"Alpha\", \"double\", \"Number\", \"A\", 2.5\n\
+            P: \"Zeta\", \"KString\", \"\", \"\", \"later\"\n}\n}\n";
+        let doc = crate::syntax::parse(input, &crate::syntax::Limits::default()).unwrap();
+        let index = PropertyIndex::build(&doc, 16 << 20).unwrap();
+        PROPERTY_WORK.with(|c| c.set(0));
+        let first = authored_indexed(&doc, &index, 0, 16, 16 << 20).unwrap();
+        let decoded = PROPERTY_WORK.with(|c| c.get());
+        let second = authored_indexed(&doc, &index, 0, 16, 16 << 20).unwrap();
+        assert!(decoded > 0);
+        assert_eq!(
+            PROPERTY_WORK.with(|c| c.get()),
+            decoded,
+            "second read decoded"
+        );
+        assert_eq!(first, second);
+        assert_eq!(
+            second.iter().map(|p| p.name).collect::<Vec<_>>(),
+            [&b"Alpha"[..], b"Zeta"]
+        );
+        assert_eq!(
+            (second[0].value_real[0], second[1].value_str),
+            (2.5, &b"later"[..])
+        );
+        assert_eq!(second[1].value_blob, b"later");
+        assert_eq!(
+            authored_indexed(&doc, &index, 0, 2, 16 << 20),
+            Err(Error::LimitExceeded)
+        );
     }
     #[test]
     fn shared_property_scaling() {

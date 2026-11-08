@@ -816,6 +816,68 @@ impl PropertyMaps {
             .try_get_or_insert_with(index, a, || Ok(PropertyMap::new()))
     }
 }
+/// Template default lists of the elements. FBX 7 objects of one type share
+/// one template, so its decoded list is stored once (`shared`, keyed by the
+/// template's property container) instead of once per object; other lists
+/// (FBX 6 takes and channels) stay per element.
+#[derive(Default)]
+struct DefaultMaps {
+    per_element: PropertyMaps,
+    shared: Vec<PropertyMap>,
+    /// `(container node, index in shared)`, sorted by container.
+    by_container: Vec<(usize, usize)>,
+    shared_of: Vec<Option<usize>>,
+}
+impl std::ops::Index<usize> for DefaultMaps {
+    type Output = PropertyMap;
+    fn index(&self, index: usize) -> &Self::Output {
+        match self.shared_of.get(index).copied().flatten() {
+            Some(k) => &self.shared[k],
+            None => &self.per_element[index],
+        }
+    }
+}
+impl DefaultMaps {
+    fn set(
+        &mut self,
+        doc: &crate::syntax::Document<'_>,
+        element: usize,
+        list: &[scene_property::AuthoredProperty<'_>],
+        a: &crate::api_alloc::Budget,
+    ) -> Result<(), Error> {
+        let container = list
+            .first()
+            .filter(|_| doc.version >= 7000)
+            .and_then(|p| doc.nodes.get(p.source_node))
+            .and_then(|n| n.parent);
+        let (Some(container), Some(slot)) = (container, self.shared_of.get_mut(element)) else {
+            let map = self.per_element.ensure(element, a)?;
+            for p in list {
+                map.try_insert(a.bytes(p.name)?, property(p, a)?, a)?;
+            }
+            return Ok(());
+        };
+        let k = match self
+            .by_container
+            .binary_search_by_key(&container, |&(c, _)| c)
+        {
+            Ok(pos) => self.by_container[pos].1,
+            Err(pos) => {
+                let mut map = PropertyMap::new();
+                for p in list {
+                    map.try_insert(a.bytes(p.name)?, property(p, a)?, a)?;
+                }
+                let k = self.shared.len();
+                a.push(&mut self.shared, map)?;
+                a.reserve(&mut self.by_container, 1)?;
+                self.by_container.insert(pos, (container, k));
+                k
+            }
+        };
+        *slot = Some(k);
+        Ok(())
+    }
+}
 pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), Error> {
     let budget = Budget::new(
         limits.max_allocation,
@@ -847,7 +909,15 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     a.creation = budget.collect((0..scn.elements.len()).map(|i| scn.created(i)))?;
     a.ids = budget.collect(scn.elements.iter().map(|e| e.source_id))?;
     let mut authored = PropertyMaps::default();
-    let mut defaults = PropertyMaps::default();
+    let mut defaults = DefaultMaps {
+        // The parity path writes every element's defaults into its records.
+        shared_of: if scn.lean {
+            budget.filled(scn.elements.len(), None)?
+        } else {
+            Vec::new()
+        },
+        ..DefaultMaps::default()
+    };
     let (helper_for, owner_for) = helper_index(scn.elements.len(), &scn.scale_helpers, &budget)?;
     // Animation lists follow ufbx's creation order, not the canonical order.
     let mut by_creation = budget.collect(0..scn.elements.len())?;
@@ -919,13 +989,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 )?;
             }
             if let Some(list) = &layers.defaults {
-                for p in list {
-                    defaults.ensure(i, alloc)?.try_insert(
-                        alloc.bytes(p.name)?,
-                        property(p, alloc)?,
-                        alloc,
-                    )?;
-                }
+                defaults.set(&scn.doc, i, list, alloc)?;
             }
             scene_property::release_layers(layers)?;
         }
@@ -1222,7 +1286,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             .checked_add(map.len())
             .ok_or(Error::LimitExceeded(crate::Limit::Allocation))?;
     }
-    for (&i, map) in &defaults.maps {
+    // Shared template lists are not copied into the table (see below).
+    for (&i, map) in &defaults.per_element.maps {
         for (name, _) in map {
             if !authored[i].contains_key(name) {
                 property_count = property_count
@@ -1232,7 +1297,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         }
     }
     if scn.lean {
-        for (i, map) in std::mem::take(&mut defaults.maps)
+        for (i, map) in std::mem::take(&mut defaults.per_element.maps)
             .into_iter()
             .chain(std::mem::take(&mut authored.maps))
         {
@@ -1241,6 +1306,11 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                     .try_insert_bounded((i, name), p, alloc, property_count)?;
             }
         }
+        // Shared template defaults stay one list per template; lookups fall
+        // back to them after the element's own entries (as the merged table
+        // did, where authored entries replaced defaults of the same name).
+        a.template_of = std::mem::take(&mut defaults.shared_of);
+        a.templates = std::mem::take(&mut defaults.shared);
     } else {
         for i in 0..scn.elements.len() {
             for (name, p) in defaults[i].iter().chain(&authored[i]) {
@@ -1279,7 +1349,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         if e.ty == T::BlendChannel && e.node.is_some_and(|n| scn.doc.nodes[n].name == b"Shape") {
             let owner = scn.doc.nodes[e.node.unwrap()].parent;
             if let Some(owner) = owner.and_then(|n| node_element[n]) {
-                if a.properties.contains_key(&(owner, alloc.bytes(&e.name)?)) {
+                if a.stored_property(owner, &e.name).is_some() {
                     a.connections.try_insert(
                         (i, alloc.bytes(b"DeformPercent")?),
                         (owner, alloc.bytes(&e.name)?),

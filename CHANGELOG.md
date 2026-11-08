@@ -29,6 +29,15 @@ All notable changes to this crate are documented here. The format follows
   kept in one shared table, element keys are formatted on demand, and the DOM
   and node projections are freed as soon as publication no longer reads them.
   Output is unchanged.
+- Faster loading with unchanged output: each property list is decoded once
+  per load and later reads copy it; template defaults used by animation
+  evaluation are stored once per template instead of once per object; ASCII
+  integers and short decimals skip the general number parser when the result
+  is provably identical; binary words are read as fixed-width integers; one
+  decompressor is reused per document.
+- The fixed-corpus load benchmark uses 23.6% fewer instructions; see
+  [the performance report](docs/LOAD-PERFORMANCE.md) for stage attribution,
+  reference comparisons and remaining performance limits.
 
 ### Fixed
 
