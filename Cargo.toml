@@ -21,6 +21,13 @@ include = [
 [lib]
 name = "fbx_rs"
 
+[[example]]
+name = "meshopt_lod"
+required-features = ["meshoptimizer"]
+
+[package.metadata.docs.rs]
+features = ["meshoptimizer"]
+
 [features]
 default = []
 # Unstable: exposes the internal converter modules (syntax DOM projections,
@@ -28,8 +35,11 @@ default = []
 # `fbx-parity` workspace crate, its tests and the fuzz targets. Not covered by
 # semver; do not depend on it.
 parity = ["dep:serde", "dep:serde_json", "dep:sha2"]
+# Adds `Mesh::to_meshopt`: welded, validated meshoptimizer-rs inputs.
+meshoptimizer = ["dep:meshoptimizer-rs"]
 
 [dependencies]
+meshoptimizer-rs = { version = "0.2.19", optional = true, default-features = false, features = ["std"] }
 miniz_oxide = "0.8.9"
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
