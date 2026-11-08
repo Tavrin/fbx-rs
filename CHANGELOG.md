@@ -6,6 +6,16 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `cache` module and `Scene::write_cache`: a versioned, disposable binary
+  sidecar (`fbx-rs-scene-cache/1`) of a loaded scene. `cache::read` returns the
+  scene only when the key (format version, crate version, load options, limits
+  and a caller-supplied digest of the source file) matches byte for byte; any
+  other key is a typed miss, and truncated or malformed bytes are `Corrupt`.
+  Reads are bounded by `Limits::max_allocation`. Writing a read scene back
+  reproduces the sidecar bit for bit.
+
 ### Fixed
 
 - Sort baked properties in place without allocator scratch, preserving object
