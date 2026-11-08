@@ -270,6 +270,8 @@ impl std::error::Error for ReadError {}
 
 type R<T> = Result<T, ReadError>;
 
+mod validate;
+
 fn alloc_error(e: Error) -> ReadError {
     match e {
         Error::Allocation => ReadError::Allocation,
@@ -280,6 +282,8 @@ fn alloc_error(e: Error) -> ReadError {
 
 /// Read a scene written by [`Scene::write_cache`] under `key`.
 ///
+/// Cross-references, mesh/deformation array lengths and animation dependency
+/// ordering are validated before returning the scene.
 /// Allocations are charged to `limits.max_allocation`, as during a load.
 ///
 /// # Errors
@@ -289,6 +293,15 @@ fn alloc_error(e: Error) -> ReadError {
 /// when the scene does not fit the allocation envelope. No partial scene is
 /// returned.
 pub fn read(bytes: &[u8], key: &CacheKey, limits: &Limits) -> Result<Scene, ReadError> {
+    read_validated(bytes, key, limits, validate::validate)
+}
+
+fn read_validated(
+    bytes: &[u8],
+    key: &CacheKey,
+    limits: &Limits,
+    validate: impl FnOnce(&Scene, &Budget) -> R<()>,
+) -> R<Scene> {
     if bytes.get(..MAGIC.len()) != Some(&MAGIC[..]) {
         return Err(ReadError::Miss(MissReason::NotACache));
     }
@@ -368,7 +381,7 @@ pub fn read(bytes: &[u8], key: &CacheKey, limits: &Limits) -> Result<Scene, Read
     let animation = whole(section()?, &a, get_animation)?;
     let unsupported = whole(section()?, &a, Codec::get)?;
     let warnings = whole(section()?, &a, Codec::get)?;
-    Ok(Scene {
+    let scene = Scene {
         element_count,
         animation,
         nodes,
@@ -387,7 +400,9 @@ pub fn read(bytes: &[u8], key: &CacheKey, limits: &Limits) -> Result<Scene, Read
         settings,
         unsupported,
         warnings,
-    })
+    };
+    validate(&scene, &a)?;
+    Ok(scene)
 }
 
 type Encode = fn(&mut Out<'_>, &Scene) -> io::Result<()>;

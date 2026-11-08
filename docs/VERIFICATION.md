@@ -851,3 +851,34 @@ Every chunk of every target exited 0; no crash, timeout, out-of-memory or
 memory-limit failure and no artifact file. `scene_dom` and `load` ran to the
 cap: their last full chunks still added 21 and 43 edges and only the short
 final chunk added none, so the cap, not a flat 10 minutes, ended them.
+
+### Scene cache structural validation
+
+A matching key and checksum are followed by structural validation before
+`cache::read` returns a scene. Invalid cross-references, hierarchy or scale
+dependency cycles, inconsistent mesh/deformation arrays, and animation
+lookup ordering return `ReadError::Corrupt`. Scratch storage is charged to
+the same allocation envelope as decoding. The invariant list lives beside
+the validator in `src/cache/validate.rs`.
+
+The corruption tests start with a valid sidecar, derive field patches using
+the encoder, update section offsets for resized fields, and recompute the
+Adler-32 trailer. Thus structural rejection is tested independently of
+checksum rejection. Existing fixture round trips also compare evaluation
+and baking, and re-encoding remains byte-identical.
+
+The format stays at version 1: validation changes acceptance, not encoding.
+A separate format revision or a public unchecked reader was rejected; the
+paired timing test bypasses validation only through a private decoding
+helper. Reversal would remove the validation call without migrating caches.
+
+To reproduce paired release timings, set `FBX_CACHE_BENCH_INPUT` to an input
+and run the following command:
+
+```sh
+cargo test -p fbx-rs --release --lib cache::validate::tests::read_validation_cost -- --ignored --nocapture
+```
+
+The
+test alternates seven reads per mode and reports median decode times with
+and without validation, excluding scene destruction.
