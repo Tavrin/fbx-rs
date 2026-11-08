@@ -41,3 +41,10 @@ path = "fuzz_targets/load.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cache_read"
+path = "fuzz_targets/cache_read.rs"
+test = false
+doc = false
+bench = false

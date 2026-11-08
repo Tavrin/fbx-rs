@@ -541,8 +541,8 @@ pub(crate) struct ElementInfo {
 /// (one index per polygon corner), as in the file.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct VertexAttribute<const N: usize> {
-    values: Vec<f64>,
-    indices: Vec<u32>,
+    pub(crate) values: Vec<f64>,
+    pub(crate) indices: Vec<u32>,
 }
 
 impl<const N: usize> VertexAttribute<N> {
@@ -1252,24 +1252,24 @@ pub struct Unsupported {
 /// A loaded scene. Objects refer to each other by index into the slices.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
-    element_count: usize,
-    animation: crate::animation::Animation,
-    nodes: Vec<Node>,
-    meshes: Vec<Mesh>,
-    materials: Vec<Material>,
-    textures: Vec<Texture>,
-    cameras: Vec<Camera>,
-    lights: Vec<Light>,
-    bones: Vec<crate::Bone>,
-    skin_deformers: Vec<crate::SkinDeformer>,
-    skin_clusters: Vec<crate::SkinCluster>,
-    blend_deformers: Vec<crate::BlendDeformer>,
-    blend_channels: Vec<crate::BlendChannel>,
-    blend_shapes: Vec<crate::BlendShape>,
-    poses: Vec<crate::Pose>,
-    settings: SceneSettings,
-    unsupported: Vec<Unsupported>,
-    warnings: Vec<String>,
+    pub(crate) element_count: usize,
+    pub(crate) animation: crate::animation::Animation,
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) meshes: Vec<Mesh>,
+    pub(crate) materials: Vec<Material>,
+    pub(crate) textures: Vec<Texture>,
+    pub(crate) cameras: Vec<Camera>,
+    pub(crate) lights: Vec<Light>,
+    pub(crate) bones: Vec<crate::Bone>,
+    pub(crate) skin_deformers: Vec<crate::SkinDeformer>,
+    pub(crate) skin_clusters: Vec<crate::SkinCluster>,
+    pub(crate) blend_deformers: Vec<crate::BlendDeformer>,
+    pub(crate) blend_channels: Vec<crate::BlendChannel>,
+    pub(crate) blend_shapes: Vec<crate::BlendShape>,
+    pub(crate) poses: Vec<crate::Pose>,
+    pub(crate) settings: SceneSettings,
+    pub(crate) unsupported: Vec<Unsupported>,
+    pub(crate) warnings: Vec<String>,
     pub(crate) bakes: crate::report::LoadBakes,
 }
 

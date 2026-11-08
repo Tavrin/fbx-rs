@@ -125,3 +125,36 @@ fn report_on_fixtures() {
     }
     assert!(loaded > 0);
 }
+
+#[test]
+fn cached_reports_preserve_helpers_and_space_conversions() {
+    use fbx_rs::cache::{self, CacheKey};
+    use fbx_rs::Limits;
+
+    for asset in [
+        ASSET.to_owned(),
+        ASSET.replace(
+            "P: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1",
+            "P: \"CoordAxisSign\", \"int\", \"Integer\", \"\",-1",
+        ),
+        ASSET.replace(
+            "P: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1",
+            "P: \"UnitScaleFactor\", \"double\", \"Number\", \"\",100",
+        ),
+    ] {
+        let options = LoadOptions::default();
+        let scene = load(asset.as_bytes(), &options).unwrap();
+        let report = scene.import_report().unwrap();
+        assert!(!report.scale_helpers.is_empty());
+        assert!(!report.baked_geometry_transforms.is_empty());
+        let limits = Limits::default();
+        let key = CacheKey::new(b"report-conversions", &options, &limits).unwrap();
+        let mut bytes = Vec::new();
+        scene.write_cache(&key, &mut bytes).unwrap();
+        let cached = cache::read(&bytes, &key, &limits).unwrap();
+        assert_eq!(cached.import_report().unwrap(), report);
+        let mut rewritten = Vec::new();
+        cached.write_cache(&key, &mut rewritten).unwrap();
+        assert_eq!(rewritten, bytes);
+    }
+}

@@ -113,6 +113,7 @@ mod animation;
 #[cfg(feature = "parity")]
 mod animation_canon;
 mod api;
+pub mod cache;
 mod conn_table;
 mod conversion_budget;
 mod numeric;
