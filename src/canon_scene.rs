@@ -542,6 +542,9 @@ pub struct CanonScene<'a> {
     pub anim: Obj,
     pub(crate) animation: crate::animation::Animation,
     pub(crate) scale_helpers: Vec<(usize, usize)>,
+    /// Axes declared by `GlobalSettings` (coord, up, front) in ufbx axis
+    /// codes, 6 when missing; kept for the import report.
+    pub(crate) source_axes: [i64; 3],
     /// Creation index (ufbx `element_id`) of each element, by canonical
     /// element index: root first, then objects in file order, then synthetic
     /// elements. Canonical order is by source ID; ufbx's lists follow this.
@@ -1026,6 +1029,7 @@ pub(crate) fn project_with<'a>(
         anim: Obj::new(),
         animation: Default::default(),
         scale_helpers,
+        source_axes: [6; 3],
         creation: Vec::new(),
         node_order: Vec::new(),
         lean,
@@ -2726,6 +2730,7 @@ fn project_globals(
         find_axis(b"UpAxis", b"UpAxisSign"),
         find_axis(b"FrontAxis", b"FrontAxisSign"),
     ];
+    scene.source_axes = source_axes;
     let axes = if crate::scene_node::axes_valid(source_axes) {
         [0, 2, 4]
     } else {

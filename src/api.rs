@@ -39,6 +39,9 @@ pub enum Error {
     /// The file parsed but its object graph or geometry is invalid, or a
     /// conversion limit was exceeded.
     Convert(String),
+    /// A converted mesh has inconsistent data; returned by
+    /// [`Scene::import_report`].
+    MeshData(crate::MeshDataError),
 }
 
 impl std::fmt::Display for Error {
@@ -62,6 +65,7 @@ impl std::fmt::Display for Error {
             Error::UnsupportedOptions(name) => write!(f, "unsupported load option: {name}"),
             Error::Parse(m) => write!(f, "parse error: {m}"),
             Error::Convert(m) => write!(f, "conversion error: {m}"),
+            Error::MeshData(e) => write!(f, "mesh data error: {e}"),
         }
     }
 }
@@ -1266,6 +1270,7 @@ pub struct Scene {
     settings: SceneSettings,
     unsupported: Vec<Unsupported>,
     warnings: Vec<String>,
+    pub(crate) bakes: crate::report::LoadBakes,
 }
 
 impl Scene {
@@ -1455,6 +1460,20 @@ impl Scene {
     /// surfaces, caches, constraints, audio).
     pub fn unsupported(&self) -> &[Unsupported] {
         &self.unsupported
+    }
+    /// What the loader converted, baked and found in this asset: the axis
+    /// and unit conversion, generated scale helpers, baked geometric
+    /// transforms, per-mesh topology checks and the material texture links.
+    ///
+    /// The report is computed on each call, in time linear in the mesh
+    /// corners plus a sort of the triangle edges.
+    ///
+    /// # Errors
+    /// [`Error::MeshData`] for a mesh whose index data is inconsistent or
+    /// when a work buffer cannot be reserved, and [`Error::InvalidData`] for
+    /// a material texture link past [`Scene::textures`].
+    pub fn import_report(&self) -> Result<crate::ImportReport, Error> {
+        crate::report::build(self)
     }
 
     fn from_projection(
@@ -1832,6 +1851,45 @@ impl Scene {
                 .iter()
                 .map(|&(kind, source_id)| Unsupported { kind, source_id }),
         )?;
+        let [coord, up, front] = c.source_axes;
+        let source_axes = match (
+            Axis::from_ufbx(coord),
+            Axis::from_ufbx(up),
+            Axis::from_ufbx(front),
+        ) {
+            (Some(right), Some(up), Some(front))
+                if crate::scene_node::axes_valid(c.source_axes) =>
+            {
+                Some(CoordinateAxes { right, up, front })
+            }
+            _ => None,
+        };
+        // Only the default profile loads (`LoadOptions::check`).
+        let target = LoadOptions::default();
+        let space = crate::report::SpaceReport {
+            source_axes,
+            target_axes: target.target_axes,
+            source_unit_meters: settings.unit_meters,
+            target_unit_meters: target.target_unit_meters,
+            geometry_scale: md.get("geometry_scale").map_or(1.0, |v| real(Some(v))),
+            root_rotation: arr(md.get("root_rotation"), [0.0, 0.0, 0.0, 1.0]),
+            mirror_axis: match int(md.get("mirror_axis")) {
+                1 => Some(Axis::PositiveX),
+                2 => Some(Axis::PositiveY),
+                3 => Some(Axis::PositiveZ),
+                _ => None,
+            },
+        };
+        let bakes = crate::report::LoadBakes {
+            space,
+            scale_helpers: budget.collect(
+                c.scale_helpers
+                    .iter()
+                    .filter_map(|&(owner, helper)| Some((r(owner)?, r(helper)?))),
+            )?,
+            geometry_transforms: budget
+                .collect(c.geometry_modify.iter().filter_map(|&(i, _)| r(i)))?,
+        };
         Ok(Scene {
             element_count: n,
             animation: std::mem::take(&mut c.animation),
@@ -1851,6 +1909,7 @@ impl Scene {
             settings,
             unsupported,
             warnings: std::mem::take(&mut c.warnings),
+            bakes,
         })
     }
 }
