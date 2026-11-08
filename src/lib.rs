@@ -102,6 +102,7 @@ mod animation;
 #[cfg(feature = "parity")]
 mod animation_canon;
 mod api;
+mod conn_table;
 mod conversion_budget;
 mod numeric;
 #[cfg(test)]

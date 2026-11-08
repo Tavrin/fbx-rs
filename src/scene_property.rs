@@ -171,6 +171,14 @@ pub struct PropertyIndex {
 }
 
 impl PropertyIndex {
+    /// Frees the tables once no stage reads the document any more. The
+    /// allocation ledger keeps their charge until the index is dropped, so
+    /// limit decisions do not depend on when this runs.
+    pub(crate) fn free_tables(&mut self) {
+        self.child_start = Vec::new();
+        self.children = Vec::new();
+        self.object_types = Vec::new();
+    }
     /// Index `doc`; the tables are charged against `max_allocation`.
     pub fn build(doc: &Document<'_>, max_allocation: usize) -> Result<Self, Error> {
         let n = doc.nodes.len();

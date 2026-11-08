@@ -1,7 +1,6 @@
 //! FBX 5.8/6.x scene construction, following ufbx 0.23.1 (MIT):
 //! `ufbxi_read_object`, `ufbxi_read_synthetic_attribute`, `ufbxi_read_take*`.
 use crate::api_alloc::Budget;
-use crate::canon::Obj;
 use crate::canon_scene::{DumpLimits, Element, ElementType as T};
 use crate::scene_property::{AuthoredProperty, PropertyIndex, PropertyLayers, Type};
 use crate::syntax::{Document, Property};
@@ -77,22 +76,12 @@ fn push(
         return Err(Error::LimitExceeded(crate::Limit::Objects));
     }
     let i = elements.len();
+    let ordinal = node
+        .checked_add(1)
+        .ok_or(Error::LimitExceeded(crate::Limit::Allocation))?;
     a.push(
         elements,
-        Element {
-            key,
-            ordinal: node
-                .checked_add(1)
-                .ok_or(Error::LimitExceeded(crate::Limit::Allocation))?,
-            source_id: None,
-            ty,
-            node: Some(node),
-            name: a.bytes(name)?,
-            src_conns: Vec::new(),
-            dst_conns: Vec::new(),
-            instances: Vec::new(),
-            obj: Obj::new(),
-        },
+        Element::new(ordinal, None, ty, Some(node), a.bytes(name)?).with_key(key),
     )?;
     Ok(i)
 }
@@ -149,7 +138,8 @@ pub(crate) fn elements(
         let nm = a.bytes(nm)?;
         let k = a.format(format_args!(
             "synthetic:{}:role:attachment:type:{}:ordinal:0",
-            elements[owner].key, ty as u8
+            elements[owner].key_display(),
+            ty as u8
         ))?;
         let at = push(elements, n, ty, &nm, k, &a, limits.index.max_objects)?;
         attrs[owner] = Some(at);
@@ -194,7 +184,7 @@ pub(crate) fn elements(
         )?;
         let k = a.format(format_args!(
             "synthetic:{}:role:take-layer:type:30:ordinal:0",
-            elements[stack].key
+            elements[stack].key_display()
         ))?;
         let layer = push(
             elements,
@@ -353,7 +343,7 @@ fn channel_elements(
         let k = if c == n {
             a.format(format_args!(
                 "synthetic:{}:role:component-curve:type:32:ordinal:0",
-                es[v].key
+                es[v].key_display()
             ))?
         } else {
             key(doc, c, a)?
@@ -670,18 +660,19 @@ pub(crate) fn material_textures(
             // `ufbxi_fetch_dst_elements` preserves connection order for the
             // same destination/property, even when source creation differs.
             let list = a.collect(
-                scene.elements[owner]
-                    .dst_conns
+                scene
+                    .conns
+                    .dst(owner)
                     .iter()
                     .filter(|(s, p)| p.is_empty() && scene.elements[*s].ty == ty)
-                    .map(|(s, _)| *s),
+                    .map(|(s, _)| s),
             )?;
             Ok(list)
         };
         let mut materials = Vec::new();
         let mut textures = Vec::new();
         for owner in groups.into_iter().flatten() {
-            charge(&mut work, scene.elements[owner].dst_conns.len())?;
+            charge(&mut work, scene.conns.dst(owner).len())?;
             if materials.is_empty() {
                 materials = fetch(owner, T::Material)?;
             }

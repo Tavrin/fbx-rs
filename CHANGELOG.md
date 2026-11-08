@@ -6,6 +6,13 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Lower peak memory of `load` on node-heavy files: element connections are
+  kept in one shared table, element keys are formatted on demand, and the DOM
+  and node projections are freed as soon as publication no longer reads them.
+  Output is unchanged.
+
 ### Fixed
 
 - Sort baked properties in place without allocator scratch, preserving object

@@ -232,9 +232,11 @@ fn element_type(name: &[u8], sub: &[u8]) -> Option<ElementType> {
 }
 
 /// One canonical element: identity, typed projection and source binding.
+/// Its connections live in [`CanonScene::conns`].
 #[derive(Debug, Clone)]
 pub struct Element {
-    pub key: String,
+    /// Stored key text; `None` derives the key (see [`Element::key`]).
+    pub(crate) key_text: Option<String>,
     pub ordinal: usize,
     pub source_id: Option<i64>,
     pub ty: ElementType,
@@ -242,14 +244,105 @@ pub struct Element {
     pub node: Option<usize>,
     /// Object name (`ufbxi_split_type_and_name`); empty for the root.
     pub name: Vec<u8>,
-    /// `connections_src` in file order: (destination element, dst prop).
-    pub(crate) src_conns: Vec<(usize, Vec<u8>)>,
-    /// `connections_dst` in file order: (source element, dst prop).
-    pub(crate) dst_conns: Vec<(usize, Vec<u8>)>,
     /// `ufbx_element.instances`: nodes using this attribute.
     pub(crate) instances: Vec<usize>,
     /// Canonical record (empty in a lean projection).
     pub obj: Obj,
+}
+/// Room for the longest derived key, `id:{i64}:ordinal:{usize}`.
+type KeyBuf = [u8; 64];
+impl Element {
+    /// Element with a derived key: `id:{source_id}:ordinal:{ordinal}` with a
+    /// source ID, else `root`.
+    pub(crate) fn new(
+        ordinal: usize,
+        source_id: Option<i64>,
+        ty: ElementType,
+        node: Option<usize>,
+        name: Vec<u8>,
+    ) -> Self {
+        Self {
+            key_text: None,
+            ordinal,
+            source_id,
+            ty,
+            node,
+            name,
+            instances: Vec::new(),
+            obj: Obj::new(),
+        }
+    }
+    /// The same element with a stored key.
+    pub(crate) fn with_key(mut self, key: String) -> Self {
+        self.key_text = Some(key);
+        self
+    }
+    /// The key text when it needs no formatting.
+    fn stored_key(&self) -> Option<&str> {
+        match (&self.key_text, self.source_id) {
+            (Some(k), _) => Some(k),
+            (None, None) => Some("root"),
+            (None, Some(_)) => None,
+        }
+    }
+    /// Canonical element key (`reference/canon.c` identity). Allocates for a
+    /// derived key; load paths use [`Element::key_display`] instead.
+    pub fn key(&self) -> std::borrow::Cow<'_, str> {
+        match self.stored_key() {
+            Some(k) => std::borrow::Cow::Borrowed(k),
+            None => std::borrow::Cow::Owned(self.key_display().to_string()),
+        }
+    }
+    /// The canonical key for formatting, without allocating.
+    pub(crate) fn key_display(&self) -> KeyDisplay<'_> {
+        KeyDisplay(self)
+    }
+    /// The canonical key, formatted into `buf` when it is derived.
+    fn key_in<'b>(&'b self, buf: &'b mut KeyBuf) -> &'b str {
+        if let Some(k) = self.stored_key() {
+            return k;
+        }
+        struct Cursor<'c> {
+            buf: &'c mut KeyBuf,
+            len: usize,
+        }
+        impl std::fmt::Write for Cursor<'_> {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                let end = self.len.checked_add(s.len()).ok_or(std::fmt::Error)?;
+                self.buf
+                    .get_mut(self.len..end)
+                    .ok_or(std::fmt::Error)?
+                    .copy_from_slice(s.as_bytes());
+                self.len = end;
+                Ok(())
+            }
+        }
+        let mut cursor = Cursor { buf, len: 0 };
+        // Cannot fail: the longest derived key is 52 bytes.
+        let _ = std::fmt::write(&mut cursor, format_args!("{}", KeyDisplay(self)));
+        let len = cursor.len;
+        std::str::from_utf8(&buf[..len]).unwrap_or("")
+    }
+    /// The root element's key.
+    pub(crate) fn is_root(&self) -> bool {
+        self.stored_key() == Some("root")
+    }
+    /// Canonical key order, without allocating.
+    fn key_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let (mut a, mut b) = ([0; 64], [0; 64]);
+        self.key_in(&mut a).cmp(other.key_in(&mut b))
+    }
+}
+/// [`Element::key_display`].
+pub(crate) struct KeyDisplay<'a>(&'a Element);
+impl std::fmt::Display for KeyDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let e = self.0;
+        match (e.stored_key(), e.source_id) {
+            (Some(k), _) => f.write_str(k),
+            (None, id) => write!(f, "id:{}:ordinal:{}", id.unwrap_or(0), e.ordinal),
+        }
+    }
 }
 
 /// Typed results of a lean projection (public `load`), by element index.
@@ -417,6 +510,8 @@ pub struct CanonScene<'a> {
     /// Lookup tables of `doc` for reading object properties.
     pub(crate) props: scene_property::PropertyIndex,
     pub elements: Vec<Element>,
+    /// Element connections in both directions, by element index.
+    pub(crate) conns: crate::conn_table::Connections,
     pub connections: Vec<V>,
     pub settings: Obj,
     pub metadata: Obj,
@@ -494,7 +589,7 @@ fn project_takes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), 
         }
         e.obj.set("time_begin", V::F(t0));
         e.obj.set("time_end", V::F(t1));
-        takes.push((e.key.clone(), t0, t1));
+        takes.push((e.key().into_owned(), t0, t1));
     }
     if takes.is_empty() {
         takes.push(("default".to_string(), 0.0, 0.0));
@@ -531,7 +626,7 @@ fn project_anim_structure(
         |scene: &CanonScene<'_>, i: usize, ty: ElementType| -> Result<Vec<usize>, crate::Error> {
             let mut out: Vec<usize> = Vec::new();
             for (src, prop) in dst_connections(
-                &scene.elements[i],
+                scene.conns.dst(i),
                 &crate::api_alloc::Budget::new(limits.max_allocation),
             )? {
                 if prop.is_empty() && scene.elements[src].ty == ty && !out.contains(&src) {
@@ -579,7 +674,7 @@ fn project_anim_structure(
                 };
                 // The ANIMATED flag marks a property an anim value drives.
                 let weight_animated = dst_connections(
-                    &scene.elements[i],
+                    scene.conns.dst(i),
                     &crate::api_alloc::Budget::new(limits.max_allocation),
                 )?
                 .iter()
@@ -691,18 +786,13 @@ pub(crate) fn project_with<'a>(
             .ok_or(crate::Error::LimitExceeded(crate::Limit::Allocation))?;
         let mut elements = Vec::new();
         allocation.reserve(&mut elements, count)?;
-        elements.push(Element {
-            key: allocation.text(b"root")?,
-            ordinal: usize::MAX,
-            source_id: None,
-            ty: ElementType::Node,
-            node: None,
-            name: Vec::new(),
-            src_conns: Vec::new(),
-            dst_conns: Vec::new(),
-            instances: Vec::new(),
-            obj: Obj::new(),
-        });
+        elements.push(Element::new(
+            usize::MAX,
+            None,
+            ElementType::Node,
+            None,
+            Vec::new(),
+        ));
         // Object index -> element index.
         let mut by_object =
             crate::allocation::Temporary::new(allocation.filled(index.objects.len(), None)?)?;
@@ -717,27 +807,17 @@ pub(crate) fn project_with<'a>(
             };
             let ordinal = deferred.ordinal(o.node).map_err(syntax_error)?;
             by_object[oi] = Some(elements.len());
-            allocation.push(
-                &mut elements,
-                Element {
-                    key: if doc.version < 7000 {
-                        crate::legacy::key(&doc, o.node, &allocation)?
-                    } else {
-                        allocation.format(format_args!("id:{}:ordinal:{ordinal}", o.id))?
-                    },
-                    ordinal,
-                    source_id: if doc.version < 7000 { None } else { Some(o.id) },
-                    ty,
-                    node: Some(o.node),
-                    name: allocation.bytes(object_name(string_of(
-                        p.get(usize::from(doc.version >= 7000)),
-                    )))?,
-                    src_conns: Vec::new(),
-                    dst_conns: Vec::new(),
-                    instances: Vec::new(),
-                    obj: Obj::new(),
-                },
-            )?;
+            let name = allocation.bytes(object_name(string_of(
+                p.get(usize::from(doc.version >= 7000)),
+            )))?;
+            let element =
+                if doc.version < 7000 {
+                    Element::new(ordinal, None, ty, Some(o.node), name)
+                        .with_key(crate::legacy::key(&doc, o.node, &allocation)?)
+                } else {
+                    Element::new(ordinal, Some(o.id), ty, Some(o.node), name)
+                };
+            allocation.push(&mut elements, element)?;
         }
         let mut connections = Vec::new();
         for c in &index.connections {
@@ -826,28 +906,18 @@ pub(crate) fn project_with<'a>(
             if deformer.is_none() {
                 let k = elements.len();
                 deformer = Some(k);
-                allocation.push(
-                    &mut elements,
-                    Element {
-                        key: if doc.version < 7000 {
-                            crate::legacy::key(&doc, shape, &allocation)?
-                        } else {
-                            allocation.format(format_args!(
-                                "id:0:ordinal:{}",
-                                deferred.ordinal(shape).map_err(syntax_error)?
-                            ))?
-                        },
-                        ordinal: deferred.ordinal(shape).map_err(syntax_error)?,
-                        source_id: Some(0),
-                        ty: ElementType::BlendDeformer,
-                        node: Some(shape),
-                        name: allocation.bytes(&name)?,
-                        src_conns: Vec::new(),
-                        dst_conns: Vec::new(),
-                        instances: Vec::new(),
-                        obj: Obj::new(),
-                    },
-                )?;
+                let ordinal = deferred.ordinal(shape).map_err(syntax_error)?;
+                let mut element = Element::new(
+                    ordinal,
+                    Some(0),
+                    ElementType::BlendDeformer,
+                    Some(shape),
+                    allocation.bytes(&name)?,
+                );
+                if doc.version < 7000 {
+                    element = element.with_key(crate::legacy::key(&doc, shape, &allocation)?);
+                }
+                allocation.push(&mut elements, element)?;
                 allocation.push(&mut connections, (k, base, Vec::new()))?;
             }
             let channel = elements.len();
@@ -856,14 +926,12 @@ pub(crate) fn project_with<'a>(
                 .enumerate()
             {
                 let shared = deformer.is_some_and(|k| elements[k].node == Some(shape));
+                // `None`: the derived `id:0:ordinal:{ordinal}` key.
                 let key = if offset == 0 && !shared {
                     if doc.version < 7000 {
-                        crate::legacy::key(&doc, shape, &allocation)?
+                        Some(crate::legacy::key(&doc, shape, &allocation)?)
                     } else {
-                        allocation.format(format_args!(
-                            "id:0:ordinal:{}",
-                            deferred.ordinal(shape).map_err(syntax_error)?
-                        ))?
+                        None
                     }
                 } else {
                     let count = &mut synthetic_counts[offset + 1];
@@ -872,23 +940,19 @@ pub(crate) fn project_with<'a>(
                         ty as i64, *count
                     ))?;
                     *count += 1;
-                    key
+                    Some(key)
                 };
-                allocation.push(
-                    &mut elements,
-                    Element {
-                        key,
-                        ordinal: deferred.ordinal(shape).map_err(syntax_error)?,
-                        source_id: Some(0),
-                        ty,
-                        node: Some(shape),
-                        name: allocation.bytes(&name)?,
-                        src_conns: Vec::new(),
-                        dst_conns: Vec::new(),
-                        instances: Vec::new(),
-                        obj: Obj::new(),
-                    },
-                )?;
+                let mut element = Element::new(
+                    deferred.ordinal(shape).map_err(syntax_error)?,
+                    Some(0),
+                    ty,
+                    Some(shape),
+                    allocation.bytes(&name)?,
+                );
+                if let Some(key) = key {
+                    element = element.with_key(key);
+                }
+                allocation.push(&mut elements, element)?;
             }
             let owner_props = scene_property::layers_indexed(
                 &doc,
@@ -928,12 +992,17 @@ pub(crate) fn project_with<'a>(
         for &(src, dst, ref prop) in &connections {
             if prop.is_empty()
                 && (ElementType::Mesh..=ElementType::LodGroup).contains(&elements[src].ty)
-                && elements[src].key.contains(":role:attachment:")
+                && elements[src]
+                    .key_text
+                    .as_deref()
+                    .is_some_and(|k| k.contains(":role:attachment:"))
             {
-                elements[src].key = allocation.format(format_args!(
+                let key = allocation.format(format_args!(
                     "synthetic:{}:role:attachment:type:{}:ordinal:0",
-                    elements[dst].key, elements[src].ty as u8
+                    elements[dst].key_display(),
+                    elements[src].ty as u8
                 ))?;
+                elements[src].key_text = Some(key);
             }
         }
     }
@@ -942,6 +1011,7 @@ pub(crate) fn project_with<'a>(
         deferred,
         props,
         elements,
+        conns: Default::default(),
         connections: Vec::new(),
         settings: Obj::new(),
         metadata: Obj::new(),
@@ -969,15 +1039,16 @@ pub(crate) fn project_with<'a>(
         let a = &scene.elements[a];
         let b = &scene.elements[b];
         if scene.doc.version < 7000 {
-            return (a.key != "root")
-                .cmp(&(b.key != "root"))
-                .then_with(|| crate::legacy::order(&a.key, &b.key));
+            return (!a.is_root()).cmp(&!b.is_root()).then_with(|| {
+                let (mut x, mut y) = ([0; 64], [0; 64]);
+                crate::legacy::order(a.key_in(&mut x), b.key_in(&mut y))
+            });
         }
         a.source_id
             .unwrap_or(i64::MIN)
             .cmp(&b.source_id.unwrap_or(i64::MIN))
             .then(a.ordinal.cmp(&b.ordinal))
-            .then(a.key.cmp(&b.key))
+            .then_with(|| a.key_cmp(b))
     });
     let mut remap = crate::allocation::Temporary::new(allocation.filled(order.len(), 0usize)?)?;
     for (new, &old) in order.iter().enumerate() {
@@ -1010,7 +1081,7 @@ pub(crate) fn project_with<'a>(
         ids.sort_unstable_by_key(|&i| {
             let e = &scene.elements[i];
             (
-                if e.key == "root" {
+                if e.is_root() {
                     0
                 } else if helpers[i] {
                     usize::MAX
@@ -1033,31 +1104,21 @@ pub(crate) fn project_with<'a>(
     } else {
         order
     };
-    // Reserve each list from its actual degree, including generated property
-    // links. Most animation elements have one edge, not four spare slots.
-    let mut degrees = allocation.filled(scene.elements.len(), (0usize, 0usize))?;
-    for &(src, dst, _) in connections.iter().chain(property_links.iter()) {
-        let src = remap[src];
-        let dst = remap[dst];
-        degrees[src].0 = degrees[src]
-            .0
-            .checked_add(1)
-            .ok_or(crate::Error::LimitExceeded(crate::Limit::Allocation))?;
-        degrees[dst].1 = degrees[dst]
-            .1
-            .checked_add(1)
-            .ok_or(crate::Error::LimitExceeded(crate::Limit::Allocation))?;
-    }
-    for (e, &(src, dst)) in scene.elements.iter_mut().zip(&degrees) {
-        allocation.reserve(&mut e.src_conns, src)?;
-        allocation.reserve(&mut e.dst_conns, dst)?;
-    }
-    let bytes = degrees
-        .capacity()
-        .checked_mul(std::mem::size_of::<(usize, usize)>())
-        .ok_or(crate::Error::LimitExceeded(crate::Limit::Allocation))?;
-    drop(degrees);
-    crate::allocation::release_live(bytes);
+    // Both directions of every connection, generated property links last.
+    scene.conns = crate::conn_table::Connections::build(
+        scene.elements.len(),
+        || {
+            connections
+                .iter()
+                .map(|(src, dst, prop)| (remap[*src], remap[*dst], prop.as_slice()))
+                .chain(
+                    property_links
+                        .iter()
+                        .map(|&(src, dst, _)| (remap[src], remap[dst], &b"DeformPercent"[..])),
+                )
+        },
+        &allocation,
+    )?;
     let conn = |src: usize, dst: usize, prop: &[u8]| {
         V::Obj(
             Obj::new()
@@ -1083,17 +1144,11 @@ pub(crate) fn project_with<'a>(
             dst_lists[dst].push(c.clone());
             scene.connections.push(c);
         }
-        allocation.push(
-            &mut scene.elements[src].src_conns,
-            (dst, allocation.bytes(&prop)?),
-        )?;
-        allocation.push(&mut scene.elements[dst].dst_conns, (src, prop))?;
     }
     for (src, dst, name) in crate::allocation::Temporary::new(property_links)? {
-        let (src, dst) = (remap[src], remap[dst]);
-        let prop = allocation.bytes(b"DeformPercent")?;
         if !lean {
-            let mut c = conn(src, dst, &prop);
+            let (src, dst) = (remap[src], remap[dst]);
+            let mut c = conn(src, dst, b"DeformPercent");
             if let V::Obj(o) = &mut c {
                 o.set("src_prop", s(&name));
             }
@@ -1101,11 +1156,6 @@ pub(crate) fn project_with<'a>(
             dst_lists[dst].push(c.clone());
             scene.connections.push(c);
         }
-        allocation.push(
-            &mut scene.elements[src].src_conns,
-            (dst, allocation.bytes(&prop)?),
-        )?;
-        allocation.push(&mut scene.elements[dst].dst_conns, (src, prop))?;
     }
     if lean {
         drop(remap);
@@ -1394,14 +1444,14 @@ fn project_attributes(
 /// Destination elements of `e`'s object-object source connections, in ufbx
 /// `connections_src` order (`ufbxi_find_src_connections(element, NULL)`).
 fn src_object_connections(
-    e: &Element,
+    conns: crate::conn_table::List<'_>,
     a: &crate::api_alloc::Budget,
 ) -> Result<Vec<usize>, crate::Error> {
     a.collect(
-        e.src_conns
+        conns
             .iter()
             .filter(|(_, prop)| prop.is_empty())
-            .map(|&(dst, _)| dst),
+            .map(|(dst, _)| dst),
     )
 }
 
@@ -1434,8 +1484,8 @@ fn project_materials(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<
                 ty: e.ty,
                 node,
                 props,
-                dst: dst_connections(e, &a)?,
-                src: src_object_connections(e, &a)?,
+                dst: dst_connections(scene.conns.dst(i), &a)?,
+                src: src_object_connections(scene.conns.src(i), &a)?,
             },
         )?;
     }
@@ -1791,24 +1841,25 @@ fn project_transforms(
     if scene.doc.version < 6000 {
         // `ufbxi_add_connections_to_elements`: pre-6000 defaults live only in the
         // take channels. Install missing transform props before node updates.
-        for e in scene
+        for (i, e) in scene
             .elements
             .iter()
-            .filter(|e| e.ty == ElementType::AnimValue)
+            .enumerate()
+            .filter(|(_, e)| e.ty == ElementType::AnimValue)
         {
             let Some(source) = e.node else {
                 continue;
             };
             let defaults =
                 crate::legacy::defaults(&scene.doc, &scene.props, source, scene.ascii, &a)?;
-            for (dst, name) in &e.src_conns {
-                let (nm, kind): (&[u8], scene_property::Type) = match name.as_slice() {
+            for (dst, name) in scene.conns.src(i) {
+                let (nm, kind): (&[u8], scene_property::Type) = match name {
                     b"Lcl Translation" => (b"Lcl Translation", scene_property::Type::Translation),
                     b"Lcl Rotation" => (b"Lcl Rotation", scene_property::Type::Rotation),
                     b"Lcl Scaling" => (b"Lcl Scaling", scene_property::Type::Scaling),
                     _ => continue,
                 };
-                if let Some(l) = layers.get_mut(dst) {
+                if let Some(l) = layers.get_mut(&dst) {
                     if l.find(nm).is_none() {
                         a.push(
                             &mut l.authored,
@@ -2245,10 +2296,10 @@ fn reset_baked_properties(scene: &mut CanonScene<'_>) {
 
 /// `connections_dst` of an element in ufbx order (stable by `dst_prop`).
 fn dst_connections(
-    e: &Element,
+    conns: crate::conn_table::List<'_>,
     a: &crate::api_alloc::Budget,
 ) -> Result<Vec<(usize, Vec<u8>)>, crate::Error> {
-    let mut out = a.try_collect(e.dst_conns.iter().map(|(i, p)| Ok((*i, a.bytes(p)?))))?;
+    let mut out = a.try_collect(conns.iter().map(|(i, p)| Ok((i, a.bytes(p)?))))?;
     a.stable_sort(&mut out, |a, b| a.1.cmp(&b.1))?;
     Ok(out)
 }
@@ -2280,9 +2331,9 @@ fn project_meshes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         };
         let instances = &e.instances;
         let ty = |k: usize| scene.elements[k].ty;
-        let mut searched = a.collect([dst_connections(e, &a)?])?;
+        let mut searched = a.collect([dst_connections(scene.conns.dst(i), &a)?])?;
         if let Some(&f) = instances.first() {
-            a.push(&mut searched, dst_connections(&scene.elements[f], &a)?)?;
+            a.push(&mut searched, dst_connections(scene.conns.dst(f), &a)?)?;
         }
         let mut links = MeshLinks::default();
         for conns in &searched {
@@ -2357,7 +2408,7 @@ fn project_meshes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
                 ) => return Err(e),
                 Err(e) => a.push(
                     &mut scene.warnings,
-                    a.format(format_args!("{}: {e}", scene.elements[i].key))?,
+                    a.format(format_args!("{}: {e}", scene.elements[i].key_display()))?,
                 )?,
             }
             continue;
@@ -2372,7 +2423,7 @@ fn project_meshes(scene: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             ) => return Err(e),
             Err(e) => a.push(
                 &mut scene.warnings,
-                a.format(format_args!("{}: {e}", scene.elements[i].key))?,
+                a.format(format_args!("{}: {e}", scene.elements[i].key_display()))?,
             )?,
         }
     }
@@ -2885,7 +2936,11 @@ pub fn dump<W: Write>(
     });
     let w = CanonicalWriter::new(out, &receipt, limits.max_line, limits.max_output)
         .map_err(|e| e.to_string())?;
-    let keys: Vec<String> = scene.elements.iter().map(|e| e.key.clone()).collect();
+    let keys: Vec<String> = scene
+        .elements
+        .iter()
+        .map(|e| e.key().into_owned())
+        .collect();
     let mut em = Emitter::new(w, &keys);
     write_all(&mut em, &scene, limits).map_err(|e| e.to_string())?;
     em.w.finish().map_err(|e| e.to_string())?;
@@ -2934,7 +2989,7 @@ fn write_all<W: Write>(
         .map_err(|e| io::Error::other(e.to_string()))?;
     if scene.doc.version < 7000 {
         emitted.sort_unstable_by(|&a, &b| {
-            crate::legacy::order(&scene.elements[a].key, &scene.elements[b].key)
+            crate::legacy::order(&scene.elements[a].key(), &scene.elements[b].key())
         });
     }
     em.begin("elements")?;
@@ -2990,7 +3045,7 @@ fn write_all<W: Write>(
             .map(|&i| &scene.elements[i])
             .filter(|e| e.ty.domain() == domain)
         {
-            let m = em.push(&e.key);
+            let m = em.push(&e.key());
             em.emit_struct(e.ty.schema(), Some(&e.obj))?;
             em.restore(m);
         }
@@ -3062,7 +3117,9 @@ fn write_all<W: Write>(
                 .elements
                 .iter()
                 .filter(|e| e.ty == ElementType::Mesh)
-                .filter_map(|e| e.node.map(|node| (node, e.key.as_str()))),
+                // Read only for pre-7000 files, whose elements all store
+                // their key text.
+                .filter_map(|e| e.node.zip(e.key_text.as_deref())),
         )
         .map_err(|e| io::Error::other(e.to_string()))?;
     keys.sort_unstable_by_key(|p| p.0);

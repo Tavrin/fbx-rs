@@ -44,7 +44,7 @@ Takes: {
         .iter()
         .position(|e| e.ty == ElementType::Node && e.name == b"Child")
         .unwrap();
-    let root = scene.elements.iter().find(|e| e.key == "root").unwrap();
+    let root = scene.elements.iter().find(|e| e.key() == "root").unwrap();
     assert_eq!(
         root.obj.get("children"),
         Some(&V::List(vec![V::Ref(Some(switcher)), V::Ref(Some(child))]))
