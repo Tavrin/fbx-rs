@@ -40,9 +40,9 @@
 //! 0   magic     b"FBXRSSC\0"
 //! 8   format    u32 = 1
 //! 12  key       u32 length + CacheKey bytes
-//! ..  sections  u32 count (17), then per section {tag [u8; 4], offset u64, length u64}
+//! ..  sections  u32 count (18), then per section {tag [u8; 4], offset u64, length u64}
 //! ..  payload   SCEN NODE MESH MATL TEXR CAMR LGHT BONE SKND SKCL BLND BLCH
-//!               BLSH POSE ANIM UNSP WARN, contiguous, in this order
+//!               BLSH POSE ANIM UNSP WARN BAKE, contiguous, in this order
 //! end trailer   u32 Adler-32 of all preceding bytes, b"CSRF"
 //! ```
 //!
@@ -50,6 +50,15 @@
 //! payloads and negative zero survive. A vector is a `u64` count followed by
 //! its elements, a string a `u64` byte length followed by UTF-8, an `Option`
 //! a `u8` tag (0 or 1) followed by the value, and `usize` a `u64`.
+//!
+//! `BAKE` stores the import-report load facts: source axes (`Option`), target
+//! axes, source and target unit sizes, geometry scale, root quaternion,
+//! mirror axis (`Option`), helper (owner, node) pairs, and geometric-transform
+//! node indices, in that order. Scalars use the encodings above; each axes
+//! record is three axis codes and each helper pair is two `usize` values.
+//! In `ANIM`, shared template maps and per-element optional template indices
+//! follow authored properties, before evaluation nodes. Template maps store
+//! byte-string keys and evaluated properties in strictly ascending key order.
 //!
 //! The Adler-32 trailer detects torn and truncated writes, not tampering:
 //! whoever can write the cache can also write the FBX file it stands for.
@@ -61,6 +70,7 @@ use crate::animation::{Animation, NodeEval};
 use crate::api::ElementInfo;
 use crate::api_alloc::Budget;
 use crate::fallible_map::Map;
+use crate::report::{LoadBakes, SpaceReport};
 use crate::scene_node::{Adjust, NodeProps};
 use crate::{
     AnimationBinding, AnimationCurve, AnimationLayer, AnimationStack, AnimationValue, Axis,
@@ -79,10 +89,10 @@ pub const FORMAT_VERSION: u32 = 1;
 
 const MAGIC: [u8; 8] = *b"FBXRSSC\0";
 const TRAILER_TAG: [u8; 4] = *b"CSRF";
-const SECTION_COUNT: usize = 17;
+const SECTION_COUNT: usize = 18;
 const TAGS: [[u8; 4]; SECTION_COUNT] = [
     *b"SCEN", *b"NODE", *b"MESH", *b"MATL", *b"TEXR", *b"CAMR", *b"LGHT", *b"BONE", *b"SKND",
-    *b"SKCL", *b"BLND", *b"BLCH", *b"BLSH", *b"POSE", *b"ANIM", *b"UNSP", *b"WARN",
+    *b"SKCL", *b"BLND", *b"BLCH", *b"BLSH", *b"POSE", *b"ANIM", *b"UNSP", *b"WARN", *b"BAKE",
 ];
 
 /// Literal identity of a cached load, compared byte for byte; no hash
@@ -381,6 +391,7 @@ fn read_validated(
     let animation = whole(section()?, &a, get_animation)?;
     let unsupported = whole(section()?, &a, Codec::get)?;
     let warnings = whole(section()?, &a, Codec::get)?;
+    let bakes = whole(section()?, &a, Codec::get)?;
     let scene = Scene {
         element_count,
         animation,
@@ -400,6 +411,7 @@ fn read_validated(
         settings,
         unsupported,
         warnings,
+        bakes,
     };
     validate(&scene, &a)?;
     Ok(scene)
@@ -430,6 +442,7 @@ const SECTIONS: [Encode; SECTION_COUNT] = [
             settings,
             unsupported: _,
             warnings: _,
+            bakes: _,
         } = s;
         element_count.put(o)?;
         settings.put(o)
@@ -450,6 +463,7 @@ const SECTIONS: [Encode; SECTION_COUNT] = [
     |o, s| put_animation(o, &s.animation),
     |o, s| s.unsupported.put(o),
     |o, s| s.warnings.put(o),
+    |o, s| s.bakes.put(o),
 ];
 
 impl Scene {
@@ -1236,6 +1250,20 @@ struct_codec!(CoordinateAxes {
     up: Axis,
     front: Axis,
 });
+struct_codec!(SpaceReport {
+    source_axes: Option<CoordinateAxes>,
+    target_axes: CoordinateAxes,
+    source_unit_meters: f64,
+    target_unit_meters: f64,
+    geometry_scale: f64,
+    root_rotation: [f64; 4],
+    mirror_axis: Option<Axis>,
+});
+struct_codec!(LoadBakes {
+    space: SpaceReport,
+    scale_helpers: Vec<(usize, usize)>,
+    geometry_transforms: Vec<usize>,
+});
 record_codec!(SceneSettings {
     axes: CoordinateAxes,
     unit_meters: f64,
@@ -1500,6 +1528,8 @@ fn put_animation(o: &mut Out<'_>, animation: &Animation) -> io::Result<()> {
         stacks,
         default_stack,
         properties,
+        templates,
+        template_of,
         nodes,
         node_order,
         creation,
@@ -1515,6 +1545,8 @@ fn put_animation(o: &mut Out<'_>, animation: &Animation) -> io::Result<()> {
     stacks.put(o)?;
     default_stack.put(o)?;
     put_map(o, properties, |o, v| v.put(o))?;
+    templates.put(o)?;
+    template_of.put(o)?;
     nodes.put(o)?;
     node_order.put(o)?;
     creation.put(o)?;
@@ -1536,6 +1568,8 @@ fn get_animation(i: &mut In<'_>, a: &Budget) -> R<Animation> {
         stacks: Codec::get(i, a)?,
         default_stack: Codec::get(i, a)?,
         properties: get_map(i, a, EvaluatedProperty::MIN, EvaluatedProperty::get)?,
+        templates: Codec::get(i, a)?,
+        template_of: Codec::get(i, a)?,
         nodes: Codec::get(i, a)?,
         node_order: Codec::get(i, a)?,
         creation: Codec::get(i, a)?,
@@ -1544,4 +1578,35 @@ fn get_animation(i: &mut In<'_>, a: &Budget) -> R<Animation> {
         clusters: Codec::get(i, a)?,
         connections: get_map(i, a, 16, get_key)?,
     })
+}
+
+impl Codec for Map<Vec<u8>, EvaluatedProperty> {
+    const MIN: usize = 8;
+    fn put(&self, o: &mut Out<'_>) -> io::Result<()> {
+        o.count(self.len())?;
+        for (name, value) in self {
+            o.bytes(name)?;
+            value.put(o)?;
+        }
+        Ok(())
+    }
+    fn get(i: &mut In<'_>, a: &Budget) -> R<Self> {
+        let n = i.count(8 + EvaluatedProperty::MIN)?;
+        let mut map = Map::new();
+        let mut previous: Option<&[u8]> = None;
+        for _ in 0..n {
+            let len = i.count(1)?;
+            let name = i.take(len)?;
+            if previous.is_some_and(|p| p >= name) {
+                return Err(ReadError::Corrupt);
+            }
+            previous = Some(name);
+            let mut owned = Vec::new();
+            a.reserve(&mut owned, len).map_err(alloc_error)?;
+            owned.extend_from_slice(name);
+            let value = EvaluatedProperty::get(i, a)?;
+            map.try_insert(owned, value, a).map_err(alloc_error)?;
+        }
+        Ok(map)
+    }
 }

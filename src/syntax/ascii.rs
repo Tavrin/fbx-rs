@@ -72,6 +72,37 @@ impl<'a> Cursor<'a> {
     }
 }
 fn number(token: &[u8]) -> Result<AsciiValue<'_>, Error> {
+    // Fast path for the common short integer token (index arrays): an
+    // optional sign and 1..=18 digits cannot overflow i64, cannot be a special
+    // spelling and parse exactly as `str::parse::<i64>` would.
+    let (sign, digits) = match token.first() {
+        Some(b'-') => (-1, &token[1..]),
+        Some(b'+') => (1, &token[1..]),
+        _ => (1, token),
+    };
+    if (1..=18).contains(&digits.len()) && digits.iter().all(u8::is_ascii_digit) {
+        let magnitude = digits
+            .iter()
+            .fold(0i64, |n, &d| n * 10 + i64::from(d - b'0'));
+        return Ok(if magnitude == 0 && sign < 0 {
+            AsciiValue::NegativeZero
+        } else {
+            AsciiValue::I64(sign * magnitude)
+        });
+    }
+    match decimal(token) {
+        Decimal::Exact(value) => return Ok(AsciiValue::F64(value.to_bits())),
+        // A plain decimal spelling: the checks below cannot apply, so parse
+        // directly (the token is ASCII and `str::parse::<f64>` accepts it).
+        Decimal::General => {
+            let text = std::str::from_utf8(token).map_err(|_| Error::InvalidFormat)?;
+            return text
+                .parse::<f64>()
+                .map(|n| AsciiValue::F64(n.to_bits()))
+                .map_err(|_| Error::UnsupportedSyntax);
+        }
+        Decimal::Other => {}
+    }
     let text = std::str::from_utf8(token).map_err(|_| Error::InvalidFormat)?;
     if let Some(value) = special_number(token) {
         return Ok(AsciiValue::F64(value.to_bits()));
@@ -93,6 +124,110 @@ fn number(token: &[u8]) -> Result<AsciiValue<'_>, Error> {
         }
     }
 }
+/// Classification of an ASCII number token by [`decimal`].
+enum Decimal {
+    /// The value, computed exactly by one IEEE operation.
+    Exact(f64),
+    /// A plain decimal float spelling the general parser must round.
+    General,
+    /// Anything else (integers, special values, unusual spellings).
+    Other,
+}
+/// Classify a token `[sign] digits [. digits] [e|E [sign] 1-4 digits]` with a
+/// point or an exponent. Its value is exact under Clinger's fast path when it
+/// has at most 19 significant digits, a mantissa of at most 2^53 and a power
+/// of ten of magnitude at most 22: both operands are then exact, so the single
+/// multiplication or division rounds correctly and equals `str::parse::<f64>`.
+fn decimal(token: &[u8]) -> Decimal {
+    match exact_decimal(token) {
+        Ok(Some(v)) => Decimal::Exact(v),
+        Ok(None) => Decimal::General,
+        Err(()) => Decimal::Other,
+    }
+}
+/// `Ok(Some)` exact value, `Ok(None)` valid spelling without an exact fast
+/// path, `Err` not a plain decimal spelling.
+fn exact_decimal(token: &[u8]) -> Result<Option<f64>, ()> {
+    const POW10: [f64; 23] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+        1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    ];
+    let (negative, mut rest) = match token.first().ok_or(())? {
+        b'-' => (true, &token[1..]),
+        b'+' => (false, &token[1..]),
+        _ => (false, token),
+    };
+    let mut mantissa = 0u64;
+    let mut digits = [0usize; 2];
+    let mut significant = 0usize;
+    let mut scale = 0i32;
+    let mut fraction = false;
+    let mut float = false;
+    while let Some((&b, tail)) = rest.split_first() {
+        match b {
+            b'0'..=b'9' => {
+                digits[usize::from(fraction)] += 1;
+                if mantissa != 0 || b != b'0' {
+                    significant += 1;
+                }
+                if significant <= 19 {
+                    mantissa = mantissa * 10 + u64::from(b - b'0');
+                    if fraction {
+                        scale -= 1;
+                    }
+                }
+            }
+            b'.' if !fraction => {
+                fraction = true;
+                float = true;
+            }
+            b'e' | b'E' => {
+                float = true;
+                let (sign, exponent) = match tail.first().ok_or(())? {
+                    b'-' => (-1, &tail[1..]),
+                    b'+' => (1, &tail[1..]),
+                    _ => (1, tail),
+                };
+                if !(1..=4).contains(&exponent.len()) || !exponent.iter().all(u8::is_ascii_digit) {
+                    return Err(());
+                }
+                let e = exponent
+                    .iter()
+                    .fold(0i32, |n, &d| n * 10 + i32::from(d - b'0'));
+                scale += sign * e;
+                rest = &[];
+                continue;
+            }
+            _ => return Err(()),
+        }
+        rest = tail;
+    }
+    // Require digits on both sides of a point, as every FBX writer emits;
+    // rarer spellings keep the general parser's acceptance rules.
+    if digits[0] == 0 || (fraction && digits[1] == 0) || !float {
+        return Err(());
+    }
+    if significant > 19 || mantissa > 1 << 53 {
+        return Ok(None);
+    }
+    let magnitude = if mantissa == 0 {
+        0.0
+    } else {
+        let Some(&power) = usize::try_from(scale.unsigned_abs())
+            .ok()
+            .and_then(|k| POW10.get(k))
+        else {
+            return Ok(None);
+        };
+        if scale < 0 {
+            mantissa as f64 / power
+        } else {
+            mantissa as f64 * power
+        }
+    };
+    Ok(Some(if negative { -magnitude } else { magnitude }))
+}
+
 // ufbx 0.23.1 ufbxi_parse_inf_nan: one legacy mantissa digit, INF/NAN/IND,
 // optional legacy trailing digits; signed quiet NaN, optional alphanumeric
 // standard NaN payload. Require consumption of the complete token.

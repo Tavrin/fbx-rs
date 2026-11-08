@@ -15,6 +15,36 @@ All notable changes to this crate are documented here. The format follows
   other key is a typed miss, and truncated or malformed bytes are `Corrupt`.
   Reads are bounded by `Limits::max_allocation`. Writing a read scene back
   reproduces the sidecar bit for bit.
+- Add `Scene::import_report()`: the axis and unit conversion applied
+  (source and target axes and units, geometry scale, root rotation, mirror
+  axis), generated scale helper nodes, baked geometric transforms, per-mesh
+  degenerate triangles, boundary and non-manifold edges, skipped point and
+  line faces, generated normals and missing UVs, and material texture links
+  with embedded, file name and unresolved flags.
+- Add the optional `meshoptimizer` feature (off by default) with
+  `Mesh::to_meshopt()`: validated 32-bit positions, normals, UVs and signed
+  tangents, welded where every emitted attribute is bitwise equal, with
+  degenerate triangles dropped and the triangle list grouped by material
+  slot. Views for meshoptimizer-rs 0.2 positions and attributes, and the
+  `meshopt_lod` example (attribute-aware simplification on an FBX file).
+- Add `MeshDataError` and `Error::MeshData`: inconsistent or non-finite mesh
+  data is a typed error instead of a panic.
+
+### Changed
+
+- Lower peak memory of `load` on node-heavy files: element connections are
+  kept in one shared table, element keys are formatted on demand, and the DOM
+  and node projections are freed as soon as publication no longer reads them.
+  Output is unchanged.
+- Faster loading with unchanged output: each property list is decoded once
+  per load and later reads copy it; template defaults used by animation
+  evaluation are stored once per template instead of once per object; ASCII
+  integers and short decimals skip the general number parser when the result
+  is provably identical; binary words are read as fixed-width integers; one
+  decompressor is reused per document.
+- The fixed-corpus load benchmark uses 23.6% fewer instructions; see
+  [the performance report](docs/LOAD-PERFORMANCE.md) for stage attribution,
+  reference comparisons and remaining performance limits.
 
 ### Fixed
 

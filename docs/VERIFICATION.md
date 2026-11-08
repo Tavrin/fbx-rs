@@ -882,3 +882,33 @@ cargo test -p fbx-rs --release --lib cache::validate::tests::read_validation_cos
 The
 test alternates seven reads per mode and reports median decode times with
 and without validation, excluding scene destruction.
+
+### Scene cache import-report load facts
+
+The unreleased version-1 layout includes an eighteenth section, `BAKE`,
+carrying all of `LoadBakes` and `SpaceReport`. Exhaustive struct codecs and
+scene destructuring guard field coverage. The animation section also carries
+shared template property maps and per-element optional template references
+introduced with the memory changes. Map keys must be strictly increasing;
+references must index the template table, and a nonempty reference list must
+have one entry per scene element. The existing record codecs also
+cover mesh winding and generated-normal flags. Floating-point values keep
+all bits, including signed zero and NaN payloads. Helper pairs and geometric
+transform lists use byte-bounded, allocation-budgeted vector decoding;
+helper owners, helper nodes and geometric-transform nodes must index the
+scene node table. Invalid option/axis tags, impossible vector counts and
+out-of-range node references return `ReadError::Corrupt`.
+
+Fixture and external-corpus round trips compare `import_report()` as well
+as byte-identical re-encoding. Additional tests exercise nonempty helper
+and geometric-transform lists, mirrored source axes and source unit conversions. Valid-checksum forged-section tests cover counts, tags and node
+references. No new finite-value restriction is imposed on report scalars,
+consistent with other cached numeric records.
+
+The public-text checker uses file discovery and text matching through
+`rg`, including hidden non-ignored files, without repository-state commands.
+
+The release cache suite passed all five tests over 354 inputs (344 external
+corpus entries and ten local fixtures), with zero load refusals. Every
+loaded scene matched its cached import report and byte-identical cache
+re-encoding, including the largest corpus input.

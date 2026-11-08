@@ -115,6 +115,12 @@ fn sidecar_round_trips_bit_exact() {
         let read_start = std::time::Instant::now();
         let read = cache::read(&first, &key, &limits).unwrap();
         let read_time = read_start.elapsed();
+        assert_eq!(
+            read.import_report().unwrap(),
+            scene.import_report().unwrap(),
+            "{}",
+            path.display()
+        );
         // write(read(write(load(x)))) == write(load(x)): every field survives,
         // including NaN payloads and negative zero, which `PartialEq` misses.
         assert!(write(&read, &key) == first, "{}", path.display());
@@ -235,4 +241,36 @@ fn reading_is_charged_to_the_allocation_limit() {
     );
     let ample = Limits::default();
     assert!(cache::read(&bytes, &key, &ample).is_ok());
+}
+
+#[test]
+fn forged_bakes_sections_are_corrupt() {
+    let limits = Limits::default();
+    let scene = load_with_limits(RICH, &LoadOptions::default(), &limits).unwrap();
+    let key = key_for(RICH, &limits);
+    let bytes = write(&scene, &key);
+    let bake = section_offset(&bytes, 17);
+    let source_tag = bytes[bake];
+    // SpaceReport: optional source axes, target axes, three
+    // scalars, quaternion, and optional mirror axis, followed by two vectors.
+    let target = bake + 1 + if source_tag == 1 { 3 } else { 0 };
+    let mirror = target + 3 + 3 * 8 + 4 * 8;
+    let helpers = mirror + 1 + usize::from(bytes[mirror] == 1);
+    let helper_count = u64::from_le_bytes(bytes[helpers..helpers + 8].try_into().unwrap()) as usize;
+    let geometry = helpers + 8 + helper_count * 16;
+    for (offset, patch) in [
+        (bake, vec![2]),
+        (target, vec![255]),
+        (mirror, vec![2]),
+        (helpers, u64::MAX.to_le_bytes().to_vec()),
+        (geometry, u64::MAX.to_le_bytes().to_vec()),
+    ] {
+        let mut forged = bytes.clone();
+        forged[offset..offset + patch.len()].copy_from_slice(&patch);
+        reseal(&mut forged);
+        assert_eq!(
+            cache::read(&forged, &key, &limits).err(),
+            Some(ReadError::Corrupt)
+        );
+    }
 }

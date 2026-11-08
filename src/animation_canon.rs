@@ -208,7 +208,7 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
     ordered.extend(a.curves.iter());
     ordered.sort_by_key(|c| c.element);
     for c in ordered {
-        let base = em.push(&scene.elements[c.element].key);
+        let base = em.push(&scene.elements[c.element].key());
         let mut samples = Vec::new();
         curve_samples(&mut samples, c, scene.doc.version >= 7000)?;
         take_samples(&mut samples, default.0, default.1)?;
@@ -240,7 +240,7 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
         let stack = a
             .stacks
             .iter()
-            .find(|s| scene.elements[s.element].key == *key);
+            .find(|s| scene.elements[s.element].key() == key.as_str());
         let layers = stack.map_or(&[][..], |s| s.layers.as_slice());
         let mut samples = Vec::new();
         for &ix in layers {
@@ -258,8 +258,8 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
                 .then(a.time.to_bits().cmp(&b.time.to_bits()))
                 .then_with(|| {
                     a.curve
-                        .map_or("", |i| scene.elements[i].key.as_str())
-                        .cmp(b.curve.map_or("", |i| scene.elements[i].key.as_str()))
+                        .map_or("".into(), |i| scene.elements[i].key())
+                        .cmp(&b.curve.map_or("".into(), |i| scene.elements[i].key()))
                 })
                 .then(a.kind.cmp(b.kind))
                 .then(a.index.cmp(&b.index))
@@ -281,8 +281,8 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
                 let mut bindings: Vec<_> = a.layers[ix].bindings.iter().collect();
                 bindings.sort_by(|a, b| {
                     scene.elements[a.element]
-                        .key
-                        .cmp(&scene.elements[b.element].key)
+                        .key()
+                        .cmp(&scene.elements[b.element].key())
                         .then(a.property.cmp(&b.property))
                 });
                 for (p, b) in bindings.iter().enumerate() {
@@ -303,7 +303,7 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
             em.count("length", states.len())?;
             for &i in &node_order {
                 let Some(st) = states.get(i) else { continue };
-                let k = em.push(&scene.elements[a.nodes[i].element].key);
+                let k = em.push(&scene.elements[a.nodes[i].element].key());
                 for (part, t) in [("local", &st.local), ("geometry", &st.geometry)] {
                     let p = em.push(part);
                     eval(em, "translation", "eval_f64", &t.translation)?;
@@ -326,7 +326,7 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
             em.count("length", a.clusters.len())?;
             for &j in &cluster_order {
                 let (&(element, ref c), (bone, bind)) = (clusters[j], &a.clusters[j]);
-                let k = em.push(&scene.elements[element].key);
+                let k = em.push(&scene.elements[element].key());
                 let mat = bone.map_or(c.geometry_to_world.0, |i| {
                     crate::scene_node::matrix_mul(&states[i].node_to_world, bind)
                 });
@@ -338,7 +338,7 @@ pub(crate) fn write<W: Write>(em: &mut Emitter<'_, W>, scene: &CanonScene<'_>) -
             em.count("length", a.channels.len())?;
             for &j in &channel_order {
                 let element = a.channels[j];
-                let k = em.push(&scene.elements[element].key);
+                let k = em.push(&scene.elements[element].key());
                 eval(
                     em,
                     "weight",

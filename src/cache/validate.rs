@@ -51,6 +51,10 @@ fn attribute<const N: usize>(v: &VertexAttribute<N>, corners: usize) -> R<()> {
 pub(super) fn validate(s: &Scene, budget: &Budget) -> R<()> {
     let a = &s.animation;
     let n = s.nodes.len();
+    for &(owner, helper) in &s.bakes.scale_helpers {
+        check(owner < n && helper < n)?;
+    }
+    refs(&s.bakes.geometry_transforms, n)?;
     check(n > 0 && a.nodes.len() == n && a.node_order.len() == n)?;
     check(a.ids.len() == s.element_count && a.creation.len() == s.element_count)?;
     check(a.channels.len() == s.blend_channels.len() && a.clusters.len() == s.skin_clusters.len())?;
@@ -265,6 +269,10 @@ pub(super) fn validate(s: &Scene, budget: &Budget) -> R<()> {
             check(b.bone_node < n)?;
         }
     }
+    check(a.template_of.is_empty() || a.template_of.len() == s.element_count)?;
+    for &template in &a.template_of {
+        optional(template, a.templates.len())?;
+    }
     optional(a.default_stack, a.stacks.len())?;
     for curve in &a.curves {
         check(curve.element < s.element_count)?;
@@ -323,6 +331,69 @@ mod tests {
             &LoadOptions::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn shared_templates_round_trip_and_reject_forged_maps() {
+        let mut scene = fixture();
+        let mut template = Map::new();
+        let budget = Budget::new(usize::MAX);
+        for name in [b"cache-template-a", b"cache-template-b"] {
+            template
+                .try_insert(name.to_vec(), EvaluatedProperty::default(), &budget)
+                .unwrap();
+        }
+        scene.animation.templates = vec![template];
+        scene.animation.template_of = vec![Some(0); scene.element_count];
+        let limits = Limits::default();
+        let key = CacheKey::new(b"templates", &LoadOptions::default(), &limits).unwrap();
+        let mut bytes = Vec::new();
+        scene.write_cache(&key, &mut bytes).unwrap();
+        let cached = read(&bytes, &key, &limits).unwrap();
+        assert_eq!(cached, scene);
+        let mut rewritten = Vec::new();
+        cached.write_cache(&key, &mut rewritten).unwrap();
+        assert_eq!(rewritten, bytes);
+        let first = bytes
+            .windows(16)
+            .position(|w| w == b"cache-template-a")
+            .unwrap();
+        let second = bytes
+            .windows(16)
+            .position(|w| w == b"cache-template-b")
+            .unwrap();
+        for (offset, patch) in [
+            (first - 24, u64::MAX.to_le_bytes().to_vec()), // template count
+            (first - 16, u64::MAX.to_le_bytes().to_vec()), // map count
+            (second, b"cache-template-a".to_vec()),        // duplicate key
+            (second, b"cache-template-0".to_vec()),        // descending key
+        ] {
+            let mut forged = bytes.clone();
+            forged[offset..offset + patch.len()].copy_from_slice(&patch);
+            let end = forged.len() - 8;
+            let checksum = miniz_oxide::mz_adler32_oxide(1, &forged[..end]);
+            forged[end..end + 4].copy_from_slice(&checksum.to_le_bytes());
+            assert_eq!(read(&forged, &key, &limits).err(), Some(ReadError::Corrupt));
+        }
+    }
+
+    #[test]
+    fn bake_floats_preserve_bits() {
+        let mut scene = fixture();
+        scene.bakes.space.source_axes = None;
+        scene.bakes.space.source_unit_meters = f64::from_bits(0x7ff8_0000_0000_0042);
+        scene.bakes.space.target_unit_meters = -0.0;
+        scene.bakes.space.geometry_scale = f64::NEG_INFINITY;
+        scene.bakes.space.root_rotation = [-0.0, f64::INFINITY, 0.0, 1.0];
+        scene.bakes.space.mirror_axis = Some(Axis::PositiveZ);
+        let limits = Limits::default();
+        let key = CacheKey::new(b"bake-bits", &LoadOptions::default(), &limits).unwrap();
+        let mut bytes = Vec::new();
+        scene.write_cache(&key, &mut bytes).unwrap();
+        let cached = read(&bytes, &key, &limits).unwrap();
+        let mut rewritten = Vec::new();
+        cached.write_cache(&key, &mut rewritten).unwrap();
+        assert_eq!(bytes, rewritten);
     }
 
     #[test]
@@ -406,6 +477,11 @@ mod tests {
         ($($name:ident: $change:expr),+ $(,)?) => { $(#[test] fn $name() { reject($change); })+ };
     }
     cases! {
+        template_reference: |s| s.animation.template_of = vec![Some(s.animation.templates.len()); s.element_count],
+        template_reference_count: |s| s.animation.template_of = vec![None; s.element_count + 1],
+        bake_helper_owner: |s| s.bakes.scale_helpers.push((s.nodes.len(), 0)),
+        bake_helper_node: |s| s.bakes.scale_helpers.push((0, s.nodes.len())),
+        bake_geometry_node: |s| s.bakes.geometry_transforms.push(s.nodes.len()),
         empty_hierarchy: |s| { s.nodes.clear(); s.animation.nodes.clear(); s.animation.node_order.clear(); },
         node_mesh: |s| s.nodes[1].mesh = Some(s.meshes.len()),
         node_material: |s| s.nodes[1].materials.push(s.materials.len()),

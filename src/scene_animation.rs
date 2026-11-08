@@ -735,7 +735,11 @@ fn preflight_curves(
     }
     Ok(())
 }
-fn validate_cycles(elements: &[crate::canon_scene::Element], budget: &Budget) -> Result<(), Error> {
+fn validate_cycles(
+    elements: &[crate::canon_scene::Element],
+    conns: &crate::conn_table::Connections,
+    budget: &Budget,
+) -> Result<(), Error> {
     let anim = |k: usize| {
         matches!(
             elements[k].ty,
@@ -750,13 +754,11 @@ fn validate_cycles(elements: &[crate::canon_scene::Element], budget: &Budget) ->
         color[start] = 1;
         let mut stack = budget.collect([(start, 0)])?;
         while let Some((i, next)) = stack.last_mut() {
-            let conns = &elements[*i].src_conns;
-            if *next == conns.len() {
+            let Some((k, _)) = conns.src(*i).get(*next) else {
                 color[*i] = 2;
                 stack.pop();
                 continue;
-            }
-            let k = conns[*next].0;
+            };
             budget.work(1)?;
             *next += 1;
             if !anim(k) {
@@ -814,6 +816,68 @@ impl PropertyMaps {
             .try_get_or_insert_with(index, a, || Ok(PropertyMap::new()))
     }
 }
+/// Template default lists of the elements. FBX 7 objects of one type share
+/// one template, so its decoded list is stored once (`shared`, keyed by the
+/// template's property container) instead of once per object; other lists
+/// (FBX 6 takes and channels) stay per element.
+#[derive(Default)]
+struct DefaultMaps {
+    per_element: PropertyMaps,
+    shared: Vec<PropertyMap>,
+    /// `(container node, index in shared)`, sorted by container.
+    by_container: Vec<(usize, usize)>,
+    shared_of: Vec<Option<usize>>,
+}
+impl std::ops::Index<usize> for DefaultMaps {
+    type Output = PropertyMap;
+    fn index(&self, index: usize) -> &Self::Output {
+        match self.shared_of.get(index).copied().flatten() {
+            Some(k) => &self.shared[k],
+            None => &self.per_element[index],
+        }
+    }
+}
+impl DefaultMaps {
+    fn set(
+        &mut self,
+        doc: &crate::syntax::Document<'_>,
+        element: usize,
+        list: &[scene_property::AuthoredProperty<'_>],
+        a: &crate::api_alloc::Budget,
+    ) -> Result<(), Error> {
+        let container = list
+            .first()
+            .filter(|_| doc.version >= 7000)
+            .and_then(|p| doc.nodes.get(p.source_node))
+            .and_then(|n| n.parent);
+        let (Some(container), Some(slot)) = (container, self.shared_of.get_mut(element)) else {
+            let map = self.per_element.ensure(element, a)?;
+            for p in list {
+                map.try_insert(a.bytes(p.name)?, property(p, a)?, a)?;
+            }
+            return Ok(());
+        };
+        let k = match self
+            .by_container
+            .binary_search_by_key(&container, |&(c, _)| c)
+        {
+            Ok(pos) => self.by_container[pos].1,
+            Err(pos) => {
+                let mut map = PropertyMap::new();
+                for p in list {
+                    map.try_insert(a.bytes(p.name)?, property(p, a)?, a)?;
+                }
+                let k = self.shared.len();
+                a.push(&mut self.shared, map)?;
+                a.reserve(&mut self.by_container, 1)?;
+                self.by_container.insert(pos, (container, k));
+                k
+            }
+        };
+        *slot = Some(k);
+        Ok(())
+    }
+}
 pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(), Error> {
     let budget = Budget::new(
         limits.max_allocation,
@@ -823,9 +887,10 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     budget.charge(scn.doc.nodes.len(), 64)?;
     budget.charge(scn.elements.len(), 1024)?;
     budget.work(scn.doc.nodes.len() + scn.elements.len())?;
-    for e in &scn.elements {
-        budget.charge(e.src_conns.len(), 128)?;
-        for (_, prop) in &e.src_conns {
+    for i in 0..scn.elements.len() {
+        let conns = scn.conns.src(i);
+        budget.charge(conns.len(), 128)?;
+        for (_, prop) in conns {
             budget.charge(prop.len(), 8)?;
         }
     }
@@ -838,13 +903,21 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         limits,
         &budget,
     )?;
-    validate_cycles(&scn.elements, &budget)?;
+    validate_cycles(&scn.elements, &scn.conns, &budget)?;
     let mut a = std::mem::take(&mut scn.animation);
     a.allocation_limit = limits.max_allocation;
     a.creation = budget.collect((0..scn.elements.len()).map(|i| scn.created(i)))?;
     a.ids = budget.collect(scn.elements.iter().map(|e| e.source_id))?;
     let mut authored = PropertyMaps::default();
-    let mut defaults = PropertyMaps::default();
+    let mut defaults = DefaultMaps {
+        // The parity path writes every element's defaults into its records.
+        shared_of: if scn.lean {
+            budget.filled(scn.elements.len(), None)?
+        } else {
+            Vec::new()
+        },
+        ..DefaultMaps::default()
+    };
     let (helper_for, owner_for) = helper_index(scn.elements.len(), &scn.scale_helpers, &budget)?;
     // Animation lists follow ufbx's creation order, not the canonical order.
     let mut by_creation = budget.collect(0..scn.elements.len())?;
@@ -916,13 +989,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                 )?;
             }
             if let Some(list) = &layers.defaults {
-                for p in list {
-                    defaults.ensure(i, alloc)?.try_insert(
-                        alloc.bytes(p.name)?,
-                        property(p, alloc)?,
-                        alloc,
-                    )?;
-                }
+                defaults.set(&scn.doc, i, list, alloc)?;
             }
             scene_property::release_layers(layers)?;
         }
@@ -1034,12 +1101,13 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                     crate::legacy::defaults(&scn.doc, &scn.props, n, scn.ascii, alloc)?;
             }
         }
-        r.budget.sort_work(e.dst_conns.len())?;
-        let mut conns = alloc.collect(e.dst_conns.iter())?;
-        alloc.stable_sort(&mut conns, |a, b| a.1.cmp(&b.1))?;
+        let dst_conns = scn.conns.dst(i);
+        r.budget.sort_work(dst_conns.len())?;
+        let mut conns = alloc.collect(dst_conns.iter())?;
+        alloc.stable_sort(&mut conns, |a, b| a.1.cmp(b.1))?;
         for (src, name) in crate::allocation::Temporary::new(conns)? {
-            if let Some(k) = curve_index[*src] {
-                let c = match name.as_slice() {
+            if let Some(k) = curve_index[src] {
+                let c = match name {
                     b"Y" | b"d|Y" => 1,
                     b"Z" | b"d|Z" => 2,
                     _ => 0,
@@ -1060,16 +1128,17 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
     }
     r.budget.path.set(Path::Layers);
     for v in &a.values {
-        r.budget.work(scn.elements[v.element].src_conns.len())?;
-        for (dst, name) in &scn.elements[v.element].src_conns {
+        let src_conns = scn.conns.src(v.element);
+        r.budget.work(src_conns.len())?;
+        for (dst, name) in src_conns {
             if name.is_empty() {
                 continue;
             }
-            let p = authored.ensure(*dst, alloc)?.try_get_or_insert_with(
+            let p = authored.ensure(dst, alloc)?.try_get_or_insert_with(
                 alloc.bytes(name)?,
                 alloc,
                 || {
-                    let mut p = match defaults[*dst].get(name) {
+                    let mut p = match defaults[dst].get(name) {
                         Some(p) => p.try_clone(alloc)?,
                         None => EvaluatedProperty {
                             flags: 0,
@@ -1078,7 +1147,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                             } else {
                                 [0.0; 4]
                             },
-                            property_type: match name.as_slice() {
+                            property_type: match name {
                                 b"Lcl Translation" => 9,
                                 b"Lcl Rotation" => 10,
                                 b"Lcl Scaling" => 11,
@@ -1087,7 +1156,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                             ..EvaluatedProperty::default()
                         },
                     };
-                    if scn.doc.version < 6000 && defaults[*dst].get(name).is_none() {
+                    if scn.doc.version < 6000 && defaults[dst].get(name).is_none() {
                         p.components[..3].copy_from_slice(&v.default_value);
                     }
                     p.flags |= 0x1001;
@@ -1120,23 +1189,25 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             values: Vec::new(),
             bindings: Vec::new(),
         };
-        r.budget.sort_work(e.dst_conns.len())?;
+        let dst_conns = scn.conns.dst(i);
+        r.budget.sort_work(dst_conns.len())?;
         // Precharge the dedup set and value list before the first insertion.
-        r.budget.charge(e.dst_conns.len(), 80)?;
+        r.budget.charge(dst_conns.len(), 80)?;
         let mut seen = BTreeSet::new();
-        for (src, name) in &e.dst_conns {
+        for (src, name) in dst_conns {
             if !name.is_empty() {
                 continue;
             }
-            let Some(value) = value_index[*src] else {
+            let Some(value) = value_index[src] else {
                 continue;
             };
             if !seen.try_insert(value, alloc)? {
                 continue;
             }
             alloc.push(&mut layer.values, value)?;
-            r.budget.work(scn.elements[*src].src_conns.len())?;
-            for (dst, prop) in &scn.elements[*src].src_conns {
+            let src_conns = scn.conns.src(src);
+            r.budget.work(src_conns.len())?;
+            for (dst, prop) in src_conns {
                 if !prop.is_empty() {
                     r.budget
                         .charge(1, std::mem::size_of::<AnimationBinding>() * 4)?;
@@ -1144,8 +1215,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                     alloc.push(
                         &mut layer.bindings,
                         AnimationBinding {
-                            element: *dst,
-                            source_id: scn.elements[*dst].source_id.unwrap_or(0),
+                            element: dst,
+                            source_id: scn.elements[dst].source_id.unwrap_or(0),
                             property: alloc.bytes(prop)?,
                             value,
                         },
@@ -1178,15 +1249,16 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         let (time_begin, time_end) = bounds.map_or((0.0, 0.0), |(b, e)| {
             (b.value_int as f64 / KTIME, e.value_int as f64 / KTIME)
         });
-        r.budget.sort_work(e.dst_conns.len())?;
-        r.budget.charge(e.dst_conns.len(), 80)?;
+        let dst_conns = scn.conns.dst(i);
+        r.budget.sort_work(dst_conns.len())?;
+        r.budget.charge(dst_conns.len(), 80)?;
         let mut seen = BTreeSet::new();
         let mut layers = Vec::new();
-        for (src, name) in &e.dst_conns {
+        for (src, name) in dst_conns {
             if !name.is_empty() {
                 continue;
             }
-            if let Some(k) = layer_index[*src] {
+            if let Some(k) = layer_index[src] {
                 if seen.try_insert(k, alloc)? {
                     alloc.push(&mut layers, k)?;
                 }
@@ -1214,7 +1286,8 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
             .checked_add(map.len())
             .ok_or(Error::LimitExceeded(crate::Limit::Allocation))?;
     }
-    for (&i, map) in &defaults.maps {
+    // Shared template lists are not copied into the table (see below).
+    for (&i, map) in &defaults.per_element.maps {
         for (name, _) in map {
             if !authored[i].contains_key(name) {
                 property_count = property_count
@@ -1224,7 +1297,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         }
     }
     if scn.lean {
-        for (i, map) in std::mem::take(&mut defaults.maps)
+        for (i, map) in std::mem::take(&mut defaults.per_element.maps)
             .into_iter()
             .chain(std::mem::take(&mut authored.maps))
         {
@@ -1233,6 +1306,11 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
                     .try_insert_bounded((i, name), p, alloc, property_count)?;
             }
         }
+        // Shared template defaults stay one list per template; lookups fall
+        // back to them after the element's own entries (as the merged table
+        // did, where authored entries replaced defaults of the same name).
+        a.template_of = std::mem::take(&mut defaults.shared_of);
+        a.templates = std::mem::take(&mut defaults.shared);
     } else {
         for i in 0..scn.elements.len() {
             for (name, p) in defaults[i].iter().chain(&authored[i]) {
@@ -1271,7 +1349,7 @@ pub(crate) fn project(scn: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(
         if e.ty == T::BlendChannel && e.node.is_some_and(|n| scn.doc.nodes[n].name == b"Shape") {
             let owner = scn.doc.nodes[e.node.unwrap()].parent;
             if let Some(owner) = owner.and_then(|n| node_element[n]) {
-                if a.properties.contains_key(&(owner, alloc.bytes(&e.name)?)) {
+                if a.stored_property(owner, &e.name).is_some() {
                     a.connections.try_insert(
                         (i, alloc.bytes(b"DeformPercent")?),
                         (owner, alloc.bytes(&e.name)?),
@@ -1712,21 +1790,18 @@ pub(crate) fn scale_helpers(
             budget.charge(1, 1024)?;
             let e = &elements[i];
             let helper = elements.len();
-            let element = crate::canon_scene::Element {
-                key: budget.format(format_args!(
-                    "synthetic:{}:role:scale-helper:type:1:ordinal:0",
-                    e.key
-                ))?,
-                ordinal: e.ordinal,
-                source_id: e.source_id,
-                ty: T::Node,
-                node: e.node,
-                name: Vec::new(),
-                src_conns: Vec::new(),
-                dst_conns: Vec::new(),
-                instances: Vec::new(),
-                obj: Obj::new(),
-            };
+            let key = budget.format(format_args!(
+                "synthetic:{}:role:scale-helper:type:1:ordinal:0",
+                e.key_display()
+            ))?;
+            let element = crate::canon_scene::Element::new(
+                e.ordinal,
+                e.source_id,
+                T::Node,
+                e.node,
+                Vec::new(),
+            )
+            .with_key(key);
             budget.push(elements, element)?;
             helpers[i] = Some(helper);
             budget.push(&mut pairs, (i, helper))?;
@@ -1917,14 +1992,29 @@ Connections: {
             .iter()
             .position(|e| e.ty == T::AnimLayer)
             .unwrap();
+        // 32 more layers fed by `value`, which drives 128 properties.
+        let mut edges: Vec<(usize, usize, Vec<u8>)> = s
+            .conns
+            .edges()
+            .filter(|e| e.0 != value)
+            .map(|(src, dst, prop)| (src, dst, prop.to_vec()))
+            .collect();
+        edges.extend((0..128).map(|k| (value, target, format!("Property{k}").into_bytes())));
         for _ in 0..32 {
-            let mut e = s.elements[layer].clone();
-            e.dst_conns = vec![(value, Vec::new())];
+            let e = s.elements[layer].clone();
+            edges.push((value, s.elements.len(), Vec::new()));
             s.elements.push(e);
         }
-        s.elements[value].src_conns = (0..128)
-            .map(|k| (target, format!("Property{k}").into_bytes()))
-            .collect();
+        s.conns = crate::conn_table::Connections::build(
+            s.elements.len(),
+            || {
+                edges
+                    .iter()
+                    .map(|(src, dst, prop)| (*src, *dst, prop.as_slice()))
+            },
+            &crate::api_alloc::Budget::new(usize::MAX),
+        )
+        .unwrap();
         let limits = DumpLimits {
             max_allocation: 100_000,
             ..Default::default()

@@ -30,6 +30,16 @@ and big-endian inputs; see [the construction rules](docs/LEGACY.md).
   documentation, "Order of the lists".
 - Bounds every allocation with configurable limits, and contains no `unsafe`
   code. It builds for `wasm32-unknown-unknown`.
+- Reports what a load did to an asset (`Scene::import_report()`): the axis and
+  unit conversion, generated scale helpers and baked geometric transforms,
+  degenerate triangles, boundary and non-manifold edges, generated normals,
+  missing UVs and unresolved texture links.
+- With the optional `meshoptimizer` feature, `Mesh::to_meshopt()` turns a mesh
+  into welded, validated vertex streams and a triangle list grouped by
+  material slot, ready for the
+  [meshoptimizer-rs](https://crates.io/crates/meshoptimizer-rs) crate. The
+  `meshopt_lod` example simplifies every mesh of an FBX file:
+  `cargo run --example meshopt_lod --features meshoptimizer -- model.fbx`.
 
 ## What it does not do
 

@@ -103,7 +103,17 @@ impl Budget {
         Ok(())
     }
     pub fn collect<T>(&self, iter: impl IntoIterator<Item = T>) -> Result<Vec<T>, Error> {
-        self.try_collect(iter.into_iter().map(Ok))
+        let mut iter = iter.into_iter();
+        let mut out = Vec::new();
+        self.reserve(&mut out, iter.size_hint().0)?;
+        // Fill the charged capacity in one pass (`take` never exceeds it, so
+        // this cannot allocate); only items beyond the hint grow the vector.
+        let room = out.capacity() - out.len();
+        out.extend(iter.by_ref().take(room));
+        for v in iter {
+            self.push(&mut out, v)?;
+        }
+        Ok(out)
     }
     pub fn try_collect<T>(
         &self,

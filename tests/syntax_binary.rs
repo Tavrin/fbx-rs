@@ -303,6 +303,50 @@ fn raw_and_compressed_arrays() {
 }
 
 #[test]
+fn reused_inflater_keeps_streams_independent() {
+    let arrays = [
+        Vec::new(),
+        vec![0; 8192],
+        (0..4096u32).flat_map(u32::to_le_bytes).collect(),
+        vec![7; 256],
+    ];
+    for version in [7400, 7500] {
+        let mut props = Vec::new();
+        for (bytes, level) in arrays.iter().zip([6, 0, 9, 6]) {
+            let packed = miniz_oxide::deflate::compress_to_vec_zlib(bytes, level);
+            let mut p = vec![b'i'];
+            p.extend((bytes.len() as u32 / 4).to_le_bytes());
+            p.extend(1u32.to_le_bytes());
+            p.extend((packed.len() as u32).to_le_bytes());
+            p.extend(packed);
+            props.push(p);
+        }
+        let mut input = fixture(version, false, &[]);
+        input.truncate(27);
+        let width = if version >= 7500 { 8 } else { 4 };
+        let mut records = [rec(b"Arrays", props, vec![])];
+        write_nodes(&mut input, width, &records);
+        let doc = parse(&input, &Limits::default()).unwrap();
+        for (property, expected) in doc.properties.iter().zip(&arrays) {
+            assert!(
+                matches!(property, Property::Array { bytes, .. } if bytes.as_ref() == expected)
+            );
+        }
+        assert_eq!(doc.properties.len(), arrays.len());
+        drop(doc);
+        // A valid earlier stream must not hide a later checksum failure.
+        let last = records[0].props.last_mut().unwrap().last_mut().unwrap();
+        *last ^= 1;
+        input.truncate(27);
+        write_nodes(&mut input, width, &records);
+        assert_eq!(
+            parse(&input, &Limits::default()).unwrap_err(),
+            Error::BadCompression
+        );
+    }
+}
+
+#[test]
 fn limit_boundaries_and_corrupt_zlib() {
     let data = [
         0x78, 0x9c, 0x63, 0x64, 0x60, 0x60, 0x60, 0x02, 0x62, 0x00, 0x00, 0x18, 0x00, 0x04,
