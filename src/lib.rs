@@ -81,6 +81,17 @@
 //! The [`syntax`] module is the lower layer: a bounded binary and ASCII FBX
 //! parser producing a node/property tree.
 //!
+//! [`Scene::import_report`] summarizes what a load did to one asset: the axis
+//! and unit conversion, generated scale helpers and baked geometric
+//! transforms, and per mesh the degenerate triangles, boundary and
+//! non-manifold edges, generated normals and missing UVs, plus the material
+//! texture links.
+//!
+//! The non-default `meshoptimizer` feature adds `Mesh::to_meshopt`, which
+//! converts a mesh into welded, validated vertex streams and a triangle list
+//! grouped by material slot, ready for the meshoptimizer-rs crate
+//! (re-exported as `fbx_rs::meshoptimizer_rs`).
+//!
 //! The non-default `parity` feature exposes the converter's internal modules
 //! (scene records and the canonical `fbx-scene-canon/1` writer) to the
 //! unpublished `fbx-parity` crate. It is unstable, outside semver, and builds
@@ -102,6 +113,7 @@ mod animation;
 #[cfg(feature = "parity")]
 mod animation_canon;
 mod api;
+mod conn_table;
 mod conversion_budget;
 mod numeric;
 #[cfg(test)]
@@ -115,6 +127,18 @@ pub use animation::{
 mod deform;
 mod scene_deform;
 pub use deform::*;
+mod mesh_data;
+pub use mesh_data::{MeshAttribute, MeshDataError};
+#[cfg(feature = "meshoptimizer")]
+mod mesh_path;
+#[cfg(feature = "meshoptimizer")]
+pub use mesh_path::{AttributeStream, MeshoptMesh, MeshoptOptions, MeshoptPart};
+/// The meshoptimizer-rs version this crate converts to (feature
+/// `meshoptimizer`).
+#[cfg(feature = "meshoptimizer")]
+pub use meshoptimizer_rs;
+mod report;
+pub use report::{ImportReport, MeshReport, ScaleHelper, SpaceReport, TextureLink};
 pub mod syntax;
 
 // Converter internals: public only for the parity tooling (unstable). Without

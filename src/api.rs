@@ -39,6 +39,9 @@ pub enum Error {
     /// The file parsed but its object graph or geometry is invalid, or a
     /// conversion limit was exceeded.
     Convert(String),
+    /// A converted mesh has inconsistent data; returned by
+    /// [`Scene::import_report`].
+    MeshData(crate::MeshDataError),
 }
 
 impl std::fmt::Display for Error {
@@ -62,6 +65,7 @@ impl std::fmt::Display for Error {
             Error::UnsupportedOptions(name) => write!(f, "unsupported load option: {name}"),
             Error::Parse(m) => write!(f, "parse error: {m}"),
             Error::Convert(m) => write!(f, "conversion error: {m}"),
+            Error::MeshData(e) => write!(f, "mesh data error: {e}"),
         }
     }
 }
@@ -1266,6 +1270,7 @@ pub struct Scene {
     settings: SceneSettings,
     unsupported: Vec<Unsupported>,
     warnings: Vec<String>,
+    pub(crate) bakes: crate::report::LoadBakes,
 }
 
 impl Scene {
@@ -1456,6 +1461,20 @@ impl Scene {
     pub fn unsupported(&self) -> &[Unsupported] {
         &self.unsupported
     }
+    /// What the loader converted, baked and found in this asset: the axis
+    /// and unit conversion, generated scale helpers, baked geometric
+    /// transforms, per-mesh topology checks and the material texture links.
+    ///
+    /// The report is computed on each call, in time linear in the mesh
+    /// corners plus a sort of the triangle edges.
+    ///
+    /// # Errors
+    /// [`Error::MeshData`] for a mesh whose index data is inconsistent or
+    /// when a work buffer cannot be reserved, and [`Error::InvalidData`] for
+    /// a material texture link past [`Scene::textures`].
+    pub fn import_report(&self) -> Result<crate::ImportReport, Error> {
+        crate::report::build(self)
+    }
 
     fn from_projection(
         mut c: CanonScene<'_>,
@@ -1549,6 +1568,14 @@ impl Scene {
                 materials: refs(t.node_materials.get(i).map_or(&[], Vec::as_slice))?,
             });
         }
+        // The node projections are published: free them before the mesh
+        // stage, which holds the peak.
+        drop(std::mem::take(&mut c.node_states));
+        drop(std::mem::take(&mut t.parent));
+        drop(std::mem::take(&mut t.children));
+        drop(std::mem::take(&mut t.node_materials));
+        drop(std::mem::take(&mut t.attribs));
+        drop(std::mem::take(&mut t.visible));
         let maps = |names: &[&'static str], maps: Vec<crate::scene_material::Map>| {
             budget.collect(names.iter().zip(maps).map(|(&name, m)| {
                 (
@@ -1701,33 +1728,42 @@ impl Scene {
                 meshes.push((i, m));
             }
         }
+        // Triangulation was the last reader of the document: free the DOM and
+        // its lookup tables before the remaining lists are published.
+        drop(sources_by_node);
+        drop(sources);
+        drop(index);
+        let version = c.doc.version;
+        drop(std::mem::take(&mut c.doc.nodes));
+        drop(std::mem::take(&mut c.doc.properties));
+        drop(std::mem::take(&mut c.deferred));
+        c.props.free_tables();
         meshes.sort_unstable_by_key(|(i, _)| slot[*i]);
         let mut meshes = budget.collect(meshes.into_iter().map(|(_, m)| m))?;
 
         let st = &c.settings;
-        let bone_refs = |e: &canon_scene::Element, want: T| {
+        let bone_refs = |element: usize, want: T| {
             budget.collect(
-                e.dst_conns
+                c.conns
+                    .dst(element)
                     .iter()
                     .filter(|(k, p)| p.is_empty() && c.elements[*k].ty == want)
-                    .filter_map(|(k, _)| r(*k)),
+                    .filter_map(|(k, _)| r(k)),
             )
         };
         if !c.deformers.skins.is_empty() || !c.deformers.blends.is_empty() {
             let mut seen = budget.filled(n, 0usize)?;
             let mut stamp = 0usize;
-            for (mesh, e) in meshes
-                .iter_mut()
-                .zip(list_of(T::Mesh).iter().map(|&k| &c.elements[k]))
-            {
+            for (mesh, &element) in meshes.iter_mut().zip(list_of(T::Mesh)) {
+                let e = &c.elements[element];
                 let mut fetch = |ty| -> Result<Vec<usize>, Error> {
                     stamp += 1;
-                    let mut out = bone_refs(e, ty)?;
+                    let mut out = bone_refs(element, ty)?;
                     for &k in &out {
                         seen[k] = stamp;
                     }
                     if let Some(&node) = e.instances.first() {
-                        for k in bone_refs(&c.elements[node], ty)? {
+                        for k in bone_refs(node, ty)? {
                             if seen[k] != stamp {
                                 seen[k] = stamp;
                                 budget.push(&mut out, k)?;
@@ -1804,7 +1840,7 @@ impl Scene {
             original_unit_meters: real(st.get("original_unit_meters")),
             frames_per_second: real(st.get("frames_per_second")),
             ambient_color: arr(st.get("ambient_color"), [0.0; 3]),
-            version: c.doc.version,
+            version,
             ascii: c.ascii,
             creator: projection_string(&budget, md.get("creator"))?,
             original_application: [app("vendor")?, app("name")?, app("version")?],
@@ -1815,6 +1851,45 @@ impl Scene {
                 .iter()
                 .map(|&(kind, source_id)| Unsupported { kind, source_id }),
         )?;
+        let [coord, up, front] = c.source_axes;
+        let source_axes = match (
+            Axis::from_ufbx(coord),
+            Axis::from_ufbx(up),
+            Axis::from_ufbx(front),
+        ) {
+            (Some(right), Some(up), Some(front))
+                if crate::scene_node::axes_valid(c.source_axes) =>
+            {
+                Some(CoordinateAxes { right, up, front })
+            }
+            _ => None,
+        };
+        // Only the default profile loads (`LoadOptions::check`).
+        let target = LoadOptions::default();
+        let space = crate::report::SpaceReport {
+            source_axes,
+            target_axes: target.target_axes,
+            source_unit_meters: settings.unit_meters,
+            target_unit_meters: target.target_unit_meters,
+            geometry_scale: md.get("geometry_scale").map_or(1.0, |v| real(Some(v))),
+            root_rotation: arr(md.get("root_rotation"), [0.0, 0.0, 0.0, 1.0]),
+            mirror_axis: match int(md.get("mirror_axis")) {
+                1 => Some(Axis::PositiveX),
+                2 => Some(Axis::PositiveY),
+                3 => Some(Axis::PositiveZ),
+                _ => None,
+            },
+        };
+        let bakes = crate::report::LoadBakes {
+            space,
+            scale_helpers: budget.collect(
+                c.scale_helpers
+                    .iter()
+                    .filter_map(|&(owner, helper)| Some((r(owner)?, r(helper)?))),
+            )?,
+            geometry_transforms: budget
+                .collect(c.geometry_modify.iter().filter_map(|&(i, _)| r(i)))?,
+        };
         Ok(Scene {
             element_count: n,
             animation: std::mem::take(&mut c.animation),
@@ -1834,6 +1909,7 @@ impl Scene {
             settings,
             unsupported,
             warnings: std::mem::take(&mut c.warnings),
+            bakes,
         })
     }
 }
