@@ -1,5 +1,57 @@
 use fbx_rs::{load, load_with_limits, Interpolation, Limits, LoadOptions};
 
+#[test]
+fn template_defaults_and_authored_overrides_stay_independent() {
+    let input = br#"; FBX 7.4.0 project file
+Definitions: {
+ ObjectType: "Model" {
+  PropertyTemplate: "FbxNode" {
+   Properties70: {
+    P: "Lcl Translation", "Lcl Translation", "", "A", 10,20,30
+    P: "Label", "KString", "", "U", "shared"
+   }
+  }
+ }
+}
+Objects: {
+ Model: 1, "Model::First", "Null" { }
+ Model: 2, "Model::Override", "Null" {
+  Properties70: {
+   P: "Lcl Translation", "Lcl Translation", "", "A", 40,50,60
+   P: "Label", "KString", "", "U", "own"
+  }
+ }
+ Model: 3, "Model::Last", "Null" { }
+}
+Connections: {
+ C: "OO",1,0
+ C: "OO",2,0
+ C: "OO",3,0
+}
+"#;
+    let scene = load(input, &LoadOptions::default()).unwrap();
+    for (node, components, text) in [
+        (1, [10.0, 20.0, 30.0, 0.0], b"shared".as_slice()),
+        (2, [40.0, 50.0, 60.0, 0.0], b"own".as_slice()),
+        (3, [10.0, 20.0, 30.0, 0.0], b"shared".as_slice()),
+    ] {
+        assert_eq!(
+            scene
+                .evaluate_property(None, node, b"Lcl Translation", 0.0)
+                .unwrap()
+                .components,
+            components
+        );
+        assert_eq!(
+            scene
+                .evaluate_property(None, node, b"Label", 0.0)
+                .unwrap()
+                .value_str,
+            text
+        );
+    }
+}
+
 fn fixture(times: &str, values: &str, flags: &str, attrs: &str, refs: &str) -> String {
     format!(
         r#"; FBX 7.4.0 project file

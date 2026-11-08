@@ -154,24 +154,40 @@ impl<'a> Reader<'a> {
         self.pos = end;
         Ok(bytes)
     }
+    /// An unsigned `n`-byte word (`n` is 1, 2, 4 or 8) in the file byte order.
     fn num(&mut self, n: usize) -> Result<u64, Error> {
         let be = self.be;
         let data = self.take(n)?;
-        let mut result = 0u64;
-        if be {
-            for &b in data {
-                result = (result << 8) | u64::from(b);
+        Ok(match (data.len(), be) {
+            (1, _) => u64::from(data[0]),
+            (2, false) => u64::from(u16::from_le_bytes([data[0], data[1]])),
+            (2, true) => u64::from(u16::from_be_bytes([data[0], data[1]])),
+            (4, false) => u64::from(u32::from_le_bytes(word(data))),
+            (4, true) => u64::from(u32::from_be_bytes(word(data))),
+            (8, false) => u64::from_le_bytes(word(data)),
+            (8, true) => u64::from_be_bytes(word(data)),
+            _ => {
+                let mut result = 0u64;
+                for (i, &b) in data.iter().enumerate() {
+                    result = if be {
+                        (result << 8) | u64::from(b)
+                    } else {
+                        result | u64::from(b) << (i * 8)
+                    };
+                }
+                result
             }
-        } else {
-            for (i, &b) in data.iter().enumerate() {
-                result |= u64::from(b) << (i * 8);
-            }
-        }
-        Ok(result)
+        })
     }
     fn usize(&mut self, n: usize) -> Result<usize, Error> {
         usize::try_from(self.num(n)?).map_err(|_| Error::LimitExceeded { what: "length" })
     }
+}
+/// The first `N` bytes of `data` as an array; `data` holds at least `N` bytes.
+fn word<const N: usize>(data: &[u8]) -> [u8; N] {
+    let mut out = [0u8; N];
+    out.copy_from_slice(&data[..N]);
+    out
 }
 // Bare words retain integer zero for special numbers (unlike signed numeric
 // tokens, whose NaN integer conversion is i64::MIN), as in ufbx's token reader.
@@ -192,8 +208,17 @@ fn allocation_error(e: crate::allocation::Error) -> Error {
         crate::allocation::Error::Failed => Error::AllocationFailed,
     }
 }
+#[inline]
 fn push<T>(vec: &mut Vec<T>, value: T, total: &mut usize, limit: usize) -> Result<(), Error> {
     if vec.len() == vec.capacity() {
+        grow(vec, total, limit)?;
+    }
+    vec.push(value);
+    Ok(())
+}
+#[cold]
+fn grow<T>(vec: &mut Vec<T>, total: &mut usize, limit: usize) -> Result<(), Error> {
+    {
         // A growth may temporarily keep both old and new allocations live.
         let minimum = vec
             .len()
@@ -213,7 +238,6 @@ fn push<T>(vec: &mut Vec<T>, value: T, total: &mut usize, limit: usize) -> Resul
         crate::allocation::reserve(vec, target - vec.len(), total, limit)
             .map_err(allocation_error)?;
     }
-    vec.push(value);
     Ok(())
 }
 /// Oldest accepted FBX version (5.8).
@@ -668,6 +692,9 @@ fn parse_binary_inner<'a>(
     }
     let mut elements = 0usize;
     let mut decompressed = 0usize;
+    // One decompressor per document: creating one zero-fills several KiB of
+    // tables, which dominated small compressed arrays.
+    let mut inflater = miniz_oxide::inflate::core::DecompressorOxide::new();
     loop {
         let source_start = r.pos;
         let end = r.usize(width)?;
@@ -830,8 +857,10 @@ fn parse_binary_inner<'a>(
                             )
                             .map_err(allocation_error)?;
                             out.resize(len, 0);
-                            let mut state = miniz_oxide::inflate::core::DecompressorOxide::new();
-                            let (status, consumed, written) = miniz_oxide::inflate::core::decompress(&mut state, source, &mut out, 0,
+                            // `init` resets the stream state; the decoder
+                            // overwrites its tables before reading them.
+                            inflater.init();
+                            let (status, consumed, written) = miniz_oxide::inflate::core::decompress(&mut inflater, source, &mut out, 0,
                                 miniz_oxide::inflate::core::inflate_flags::TINFL_FLAG_PARSE_ZLIB_HEADER | miniz_oxide::inflate::core::inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
                             if status != miniz_oxide::inflate::TINFLStatus::Done
                                 || consumed != source.len()
