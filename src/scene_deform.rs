@@ -136,26 +136,26 @@ impl Reader<'_, '_> {
         }
         Ok(std::array::from_fn(|i| v[i / 3 * 4 + i % 3]))
     }
-    fn connected(&self, conns: &[(usize, Vec<u8>)], ty: T) -> Result<Vec<usize>, Error> {
+    fn connected(&self, conns: crate::conn_table::List<'_>, ty: T) -> Result<Vec<usize>, Error> {
         self.sort_work(conns.len())?;
         self.charge(conns.len(), 80)?;
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
         for (k, p) in conns {
             if p.is_empty()
-                && self.s.elements[*k].ty == ty
-                && seen.try_insert(*k, &self.allocation)?
+                && self.s.elements[k].ty == ty
+                && seen.try_insert(k, &self.allocation)?
             {
-                self.allocation.push(&mut out, *k)?;
+                self.allocation.push(&mut out, k)?;
             }
         }
         Ok(out)
     }
     fn dst(&self, i: usize, ty: T) -> Result<Vec<usize>, Error> {
-        self.connected(&self.s.elements[i].dst_conns, ty)
+        self.connected(self.s.conns.dst(i), ty)
     }
     fn src(&self, i: usize, ty: T) -> Result<Vec<usize>, Error> {
-        self.connected(&self.s.elements[i].src_conns, ty)
+        self.connected(self.s.conns.src(i), ty)
     }
     fn mesh_targets(&self, i: usize) -> Result<Vec<usize>, Error> {
         let mut out = self.src(i, T::Mesh)?;
@@ -264,18 +264,16 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
         let mut stack = a.collect([(start, 0)])?;
         color[start] = 1;
         while let Some((i, next)) = stack.last_mut() {
-            let conns = &s.elements[*i].src_conns;
-            if *next == conns.len() {
+            let Some((k, p)) = s.conns.src(*i).get(*next) else {
                 color[*i] = 2;
                 stack.pop();
                 continue;
-            }
-            let (k, p) = &conns[*next];
+            };
             r.work(1)?;
             *next += 1;
             if !p.is_empty()
                 || !matches!(
-                    s.elements[*k].ty,
+                    s.elements[k].ty,
                     T::SkinDeformer
                         | T::SkinCluster
                         | T::BlendDeformer
@@ -285,12 +283,12 @@ pub(crate) fn project(s: &mut CanonScene<'_>, limits: &DumpLimits) -> Result<(),
             {
                 continue;
             }
-            if color[*k] == 1 {
+            if color[k] == 1 {
                 return Err("deformer: connection cycle".into());
             }
-            if color[*k] == 0 {
-                color[*k] = 1;
-                a.push(&mut stack, (*k, 0))?;
+            if color[k] == 0 {
+                color[k] = 1;
+                a.push(&mut stack, (k, 0))?;
             }
         }
     }

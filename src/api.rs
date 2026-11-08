@@ -1568,6 +1568,14 @@ impl Scene {
                 materials: refs(t.node_materials.get(i).map_or(&[], Vec::as_slice))?,
             });
         }
+        // The node projections are published: free them before the mesh
+        // stage, which holds the peak.
+        drop(std::mem::take(&mut c.node_states));
+        drop(std::mem::take(&mut t.parent));
+        drop(std::mem::take(&mut t.children));
+        drop(std::mem::take(&mut t.node_materials));
+        drop(std::mem::take(&mut t.attribs));
+        drop(std::mem::take(&mut t.visible));
         let maps = |names: &[&'static str], maps: Vec<crate::scene_material::Map>| {
             budget.collect(names.iter().zip(maps).map(|(&name, m)| {
                 (
@@ -1720,33 +1728,42 @@ impl Scene {
                 meshes.push((i, m));
             }
         }
+        // Triangulation was the last reader of the document: free the DOM and
+        // its lookup tables before the remaining lists are published.
+        drop(sources_by_node);
+        drop(sources);
+        drop(index);
+        let version = c.doc.version;
+        drop(std::mem::take(&mut c.doc.nodes));
+        drop(std::mem::take(&mut c.doc.properties));
+        drop(std::mem::take(&mut c.deferred));
+        c.props.free_tables();
         meshes.sort_unstable_by_key(|(i, _)| slot[*i]);
         let mut meshes = budget.collect(meshes.into_iter().map(|(_, m)| m))?;
 
         let st = &c.settings;
-        let bone_refs = |e: &canon_scene::Element, want: T| {
+        let bone_refs = |element: usize, want: T| {
             budget.collect(
-                e.dst_conns
+                c.conns
+                    .dst(element)
                     .iter()
                     .filter(|(k, p)| p.is_empty() && c.elements[*k].ty == want)
-                    .filter_map(|(k, _)| r(*k)),
+                    .filter_map(|(k, _)| r(k)),
             )
         };
         if !c.deformers.skins.is_empty() || !c.deformers.blends.is_empty() {
             let mut seen = budget.filled(n, 0usize)?;
             let mut stamp = 0usize;
-            for (mesh, e) in meshes
-                .iter_mut()
-                .zip(list_of(T::Mesh).iter().map(|&k| &c.elements[k]))
-            {
+            for (mesh, &element) in meshes.iter_mut().zip(list_of(T::Mesh)) {
+                let e = &c.elements[element];
                 let mut fetch = |ty| -> Result<Vec<usize>, Error> {
                     stamp += 1;
-                    let mut out = bone_refs(e, ty)?;
+                    let mut out = bone_refs(element, ty)?;
                     for &k in &out {
                         seen[k] = stamp;
                     }
                     if let Some(&node) = e.instances.first() {
-                        for k in bone_refs(&c.elements[node], ty)? {
+                        for k in bone_refs(node, ty)? {
                             if seen[k] != stamp {
                                 seen[k] = stamp;
                                 budget.push(&mut out, k)?;
@@ -1823,7 +1840,7 @@ impl Scene {
             original_unit_meters: real(st.get("original_unit_meters")),
             frames_per_second: real(st.get("frames_per_second")),
             ambient_color: arr(st.get("ambient_color"), [0.0; 3]),
-            version: c.doc.version,
+            version,
             ascii: c.ascii,
             creator: projection_string(&budget, md.get("creator"))?,
             original_application: [app("vendor")?, app("name")?, app("version")?],
